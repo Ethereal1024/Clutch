@@ -15,6 +15,10 @@ The graph in .github/workflows/release.yml is therefore a contract:
     transitively needs `verify`, so a rejected tree reaches no release;
   * the phone chain also needs `deb` itself, so a failed desktop BUILD stops the
     tars and the APK too, not just a failed scan.
+  * the page a release gets says what changed, from ONE source: the tag's own
+    note. `deb` is the job that CREATES the release, so it is the one that hands
+    the note over (`body_path`); every other leg attaches files with no body, and
+    the action keeps what is already there (`body = workflowBody || existingReleaseBody`).
 
 Checks (offline, stdlib only — a runner executes them with bare python3):
   1. `verify` exists and runs every offline scan (fonts, stylesheets, launcher
@@ -22,8 +26,11 @@ Checks (offline, stdlib only — a runner executes them with bare python3):
   2. `verify` installs no package (no uv sync / npm ci / pip install)
   3. every attaching job transitively needs `verify`
   4. the phone chain (pylibs-index, android-apk) transitively needs `deb`
-  5. the parsing itself: the pre-fix graph (phone chain with no `needs:`), a
-     missing scan, and a package install in `verify` are all reported
+  5. `deb` reads the release note from the tag and attaches it as `body_path`,
+     so a release page cannot go out blank
+  6. the parsing itself: the pre-fix graph (phone chain with no `needs:`), a
+     missing scan, a package install in `verify`, and a body-less release are all
+     reported
 
 Run: python3 -m tests.release_graph_check
 """
@@ -166,6 +173,14 @@ def problems(jobs: dict[str, Job]) -> list[str]:
         if name in jobs and not reaches(jobs, name, DEB):
             out.append(f"`{name}` does not need `{DEB}`: a broken desktop build "
                        "still publishes the phone chain")
+    creator = jobs.get(DEB)
+    if creator is not None and creator.attaches:
+        if "git tag -l --format='%(contents)'" not in creator.body:
+            out.append(f"`{DEB}` does not read the release note from the tag: the "
+                       "page would be a second copy of the notes, or blank")
+        if "body_path:" not in creator.body:
+            out.append(f"`{DEB}` attaches the release with no `body_path`: the page "
+                       "goes out saying nothing")
     return out
 
 
@@ -220,6 +235,21 @@ def check_regression(text: str) -> None:
                          "      - name: Verify UI fonts\n", 1)
     check(noted != text, "regression fixture: a comment can be added to verify")
     check(not problems(parse(noted)), "a comment naming an install is not an install")
+
+    # 6. a release page that says nothing: the body is dropped, and with it the
+    #    tag's note the page was supposed to show
+    blank = re.sub(r"^ +body_path: .*\n", "", text, flags=re.M)
+    check(blank != text, "regression fixture: the release body is removable")
+    check(any("body_path" in p for p in problems(parse(blank))),
+          "a release that hands over no body is reported")
+
+    # 7. …and a body from somewhere else is still not the tag's note
+    paraphrased = text.replace('git tag -l --format=\'%(contents)\' "$GITHUB_REF_NAME"',
+                               'git log -1 --format=%B > "$RUNNER_TEMP/release-notes.md"')
+    check(paraphrased != text, "regression fixture: the tag read is replaceable")
+    check(any("does not read the release note from the tag" in p
+              for p in problems(parse(paraphrased))),
+          "a release note written a second time is reported")
 
 
 def main() -> int:

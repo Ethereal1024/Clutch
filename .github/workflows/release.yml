@@ -126,7 +126,12 @@ jobs:
     steps:
       # No submodules: the bundle is the HOST's own code and carries no module —
       # a release must not depend on one being checked out (or published).
+      # fetch-depth: 0 — the release page's body is the tag's own note, and a
+      # shallow checkout has no tag object to read it from (see "Read the tag's
+      # note" below; the repo is ~26 MiB, so the full graph is cheap here).
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -179,9 +184,33 @@ jobs:
           name: clutch-deb
           path: ui/dist/*.deb
 
+      # The page a release gets is the note its tag already carries (`git tag -a
+      # -F`): read here, not written a second time, so there is nothing to keep in
+      # sync. Every release up to 0.2.1 went out blank because this step did not
+      # exist. `deb` is the job that CREATES the release (the other legs only add
+      # files), so this is the one place the body is set; a later attach without a
+      # body keeps it (action-gh-release: `body = workflowBody || existingReleaseBody`).
+      #
+      # A tag that is not annotated has no note to show, so the release stops here
+      # instead of publishing a page that says nothing. The tag is already pushed
+      # by then — but nothing has been published, and the fix is one `git tag -a`.
+      - name: Read the tag's note
+        run: |
+          if [ "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" != tag ]; then
+            echo "tag $GITHUB_REF_NAME is lightweight: a release page is its tag's note" >&2
+            echo "re-tag with: git tag -a $GITHUB_REF_NAME -F <notes>" >&2
+            exit 1
+          fi
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
+          if [ ! -s "$RUNNER_TEMP/release-notes.md" ]; then
+            echo "tag $GITHUB_REF_NAME carries an empty note: a release page has to say what changed" >&2
+            exit 1
+          fi
+
       - name: Attach to GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: ${{ runner.temp }}/release-notes.md
           files: ui/dist/*.deb
 
   # macOS build must run on macOS (no cross-compiling mac targets from Linux).
