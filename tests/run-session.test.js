@@ -1018,7 +1018,19 @@ async function main() {
         project: "/p",
         onBusy: (b) => edges.push(b),
       });
+      // The gate answers its queue in ARRIVAL order, so `release(1)` frees
+      // whichever claim reached the session first — and two fetches fired in the
+      // same tick can swap places. The window this section is about ("the first
+      // one returns while the second is still waiting to get in") only exists
+      // when the first call is also FIRST IN THE QUEUE: let it arrive before the
+      // second is called. Otherwise which call returns is a coin flip, the other
+      // one stays parked until its lease times out at 10 s, and the marker is
+      // asked about at a moment that has nothing to do with the window.
       const first = run.drive();
+      for (let i = 0; i < 200 && gate.pending() < 1; i++) {
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      check(gate.pending() === 1, `the first call reached the claim (parked: ${gate.pending()})`);
       const second = run.step();
       for (let i = 0; i < 200 && gate.pending() < 2; i++) {
         await new Promise((r) => setTimeout(r, 5));
