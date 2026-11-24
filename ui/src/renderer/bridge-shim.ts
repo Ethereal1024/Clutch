@@ -159,14 +159,20 @@
   });
 
   expose("clutchComponents", {
-    list: () => call("clutchComponents", "list"),
+    list: (slotId) => call("clutchComponents", "list", [slotId]),
     market: (opts) => call("clutchComponents", "market", [opts]),
-    install: (name) => call("clutchComponents", "install", [name]),
-    versions: (name) => call("clutchComponents", "versions", [name]),
-    remove: (name, opts) => call("clutchComponents", "remove", [name, opts]),
-    setDisabled: (name, disabled) => call("clutchComponents", "setDisabled", [name, disabled]),
-    settings: (name) => call("clutchComponents", "settings", [name]),
-    setSetting: (name, values) => call("clutchComponents", "setSetting", [name, values]),
+    install: (name, slotId) => call("clutchComponents", "install", [name, slotId]),
+    // every write also carries the PLACE the row was read at: the page draws the
+    // client's plugins and the session machine's components in ONE list, so a
+    // name alone does not say which machine is being asked to drop something
+    versions: (name, place, slotId) => call("clutchComponents", "versions", [name, place, slotId]),
+    remove: (name, opts, place, slotId) =>
+      call("clutchComponents", "remove", [name, opts, place, slotId]),
+    setDisabled: (name, disabled, place, slotId) =>
+      call("clutchComponents", "setDisabled", [name, disabled, place, slotId]),
+    settings: (name, place, slotId) => call("clutchComponents", "settings", [name, place, slotId]),
+    setSetting: (name, values, place, slotId) =>
+      call("clutchComponents", "setSetting", [name, values, place, slotId]),
     mirrors: () => call("clutchComponents", "mirrors"),
     addMirror: (url) => call("clutchComponents", "addMirror", [url]),
     removeMirror: (url) => call("clutchComponents", "removeMirror", [url]),

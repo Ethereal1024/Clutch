@@ -132,7 +132,12 @@ const RELEASE = {
   source: "https://example.invalid/skills.json",
   artifacts: { any: { asset: "clutch-skills.tar.gz", sha256: DIGEST } },
 };
-const EMPTY_WIN = null; // no window handle: the tunnel, if any, decides
+// The window that asked (an IPC handler always has one: it is the page's own
+// sender) and no slot named. A slot is one tab, and "" is the window's default
+// session -- which is what every call site here wants. A view with NO window is
+// the one shape aimed at nothing at all, and section 1 reaches it by making
+// `windowKind` answer null for a window that has claimed no session.
+const EMPTY_WIN = { id: 1 };
 
 function view(deps = {}) {
   const lib = deps.lib || fakeLib();
@@ -141,6 +146,11 @@ function view(deps = {}) {
     api: createComponentsView({
       supervisorBase: () => "http://127.0.0.1:8890",
       tunnelStatus: () => ({ active: false, url: null }),
+      // the page belongs to a TAB, and a tab that is running here says so: every
+      // host that wires this view passes `windowKind` (ui/main.js,
+      // android/host/src/android-host.js), so "the session is on this machine" is
+      // the honest default for a test that does not care which machine it is.
+      windowKind: () => "local",
       lib,
       ...deps.deps,
     }),
@@ -153,12 +163,13 @@ async function main() {
     const local = view();
     check(
       JSON.stringify(local.api.target(EMPTY_WIN)) === JSON.stringify({ kind: "local", base: "http://127.0.0.1:8890" }),
-      "with no tunnel the target machine is this machine's supervisor"
+      "a tab whose session runs here asks this machine's supervisor"
     );
-    const remote = view({ deps: { tunnelStatus: () => ({ active: true, url: "http://127.0.0.1:41000" }) } });
+    // the tab's own machine answers, not "a live tunnel somewhere in this window"
+    const near = view({ deps: { windowKind: () => "tunnel", slotBase: () => "http://127.0.0.1:41000" } });
     check(
-      remote.api.target(EMPTY_WIN).base === "http://127.0.0.1:41000" && remote.api.target(EMPTY_WIN).kind === "remote",
-      "a live tunnel makes the far side's supervisor the target"
+      near.api.target({ id: 1 }).base === "http://127.0.0.1:41000" && near.api.target({ id: 1 }).kind === "remote",
+      "a tab whose session runs on the far side asks THAT machine's supervisor"
     );
     // the window's OWN session decides when it has one: a tunnel being up is not
     // the same claim as this window running on the far side (it may have fallen
@@ -173,13 +184,46 @@ async function main() {
       fellBack.api.target({ id: 1 }).kind === "local",
       "a window that fell back to a local session targets THIS machine, tunnel or not"
     );
-    const tunneled = view({ deps: { windowKind: () => "tunnel", tunnelStatus: () => ({ active: true, url: "http://127.0.0.1:41000" }) } });
-    check(tunneled.api.target({ id: 1 }).kind === "remote", "a tunneled window targets the far machine");
+    // ...and the READ carries that same fact, because the page weighs the sentence
+    // it gets back by it: "nobody to ask yet" is a wait (quiet), "asked and did not
+    // answer" is a failure (red). Parsing the words back out would be the host
+    // deciding a page's weight by prose.
+    const hereList = await local.api.list(EMPTY_WIN);
+    check(hereList.target === "local" && hereList.error === null, "a read on this machine says its target is `local`");
+    const farList = await near.api.list({ id: 1 });
+    check(farList.target === "remote" && farList.error === null, "a read on the far machine says its target is `remote`");
+    // ...and a tab that has claimed no session has no machine at all, even while a
+    // tunnel is up: that tunnel belongs to whichever tab claimed it, and reading it
+    // here is how a list (and then a write aimed at it) used to land on a machine
+    // the page never named
+    const unclaimed = view({
+      deps: {
+        tunnelStatus: () => ({ active: true, url: "http://127.0.0.1:41000" }),
+        windowKind: () => null,
+      },
+    });
+    check(
+      JSON.stringify(unclaimed.api.target({ id: 1 })) === JSON.stringify({ kind: "none", base: "" }),
+      "a tab no session has claimed is aimed at no machine, tunnel or not"
+    );
+    const said = await unclaimed.api.list({ id: 1 });
+    check(
+      said.target === "none" && said.held.length === 0,
+      "and a read says WHICH machine it was asked of, so the page can weigh the sentence (`none` = a wait, not a failure)"
+    );
+    check(
+      /^this tab has no session yet, so there is no machine to ask/.test(said.error || ""),
+      "a tab with no session YET says so in its own words (it is answered by waiting, not by fixing anything)"
+    );
+    check(!/claimed/.test(said.error || ""), "and the host's word for it — 'claimed' — is not on the page");
     // a tunnel that died between claims: a target with no base is no machine
     const deadTunnel = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowKind: () => "tunnel" } });
     check(deadTunnel.api.target({ id: 1 }).base === "", "a tunneled window after the tunnel died has no target base");
     const bad = await deadTunnel.api.list({ id: 1 });
-    check(bad.error && bad.held.length === 0, "and a read says so instead of throwing");
+    check(
+      bad.error && bad.held.length === 0 && bad.target === "remote",
+      "and a read says so instead of throwing, with the target still named (this one IS a failure: the machine exists and cannot be reached)"
+    );
   }
 
   // ---- 2. what the machine holds ----
@@ -198,47 +242,19 @@ async function main() {
     );
   }
 
-  // ---- 2b. what the automatic pass at connect did, and to which machine ----
+  // ---- 2b. the automatic pass at connect is a log line, not an answer ----
   {
-    // no pass yet: the page draws no line rather than an empty one
-    const none = await view().api.list(EMPTY_WIN);
-    check(none.pass === null, "no pass yet is no report, not an empty one");
-
-    // a pass about THIS machine comes back as the host kept it — the same object,
-    // because the view does not get to summarise a removal a second time
-    const pass = {
-      at: 1700000000000,
-      base: "http://127.0.0.1:8890",
-      installed: 1,
-      retired: [{ name: "clutch-websearch", version: "0.1.0", reason: "the market's copy belongs to the client", status: "removed" }],
-      deferred: 0,
-      errors: [],
-    };
-    const here = await view({ deps: { componentsPass: () => pass } }).api.list(EMPTY_WIN);
+    // The pass retires what a machine should not hold and defers what it cannot
+    // take; it says its piece in the log (ui/tunnel-bootstrap.js). What a place
+    // HOLDS is the inventories above, and the pass used to ride along as `pass` —
+    // a second, older picture of the same machine drawn under a list that had just
+    // been read. Both halves of that are gone, and this is what keeps them gone.
+    const l = await view().api.list(EMPTY_WIN);
+    check(!("pass" in l), "a list is the inventories, with no pass riding along");
     check(
-      here.pass === pass && here.pass.retired.length === 1,
-      "the pass over this machine is handed to the page verbatim, removal and reason together"
+      !/componentsPass/.test(createComponentsView.toString()),
+      "and the view is not handed the pass at all, so it cannot draw one again"
     );
-
-    // ...and a pass about ANOTHER machine is not this window's news
-    const elsewhere = await view({
-      deps: { componentsPass: () => ({ ...pass, base: "http://127.0.0.1:41000" }) },
-    }).api.list(EMPTY_WIN);
-    check(elsewhere.pass === null, "a pass about another machine is not drawn on this one");
-
-    // a pass that names no machine is not a pass about this one either
-    const nameless = await view({ deps: { componentsPass: () => ({ ...pass, base: "" }) } }).api.list(EMPTY_WIN);
-    check(nameless.pass === null, "a report with no machine behind it is not inherited either");
-
-    // a domain that cannot answer costs the line, not the list
-    const broken = await view({
-      deps: {
-        componentsPass: () => {
-          throw new Error("state unreadable");
-        },
-      },
-    }).api.list(EMPTY_WIN);
-    check(broken.pass === null && broken.error === null, "an unreadable pass leaves the list standing and says nothing it cannot back");
   }
 
   // ---- 3. the market, and the reason it can be short ----
@@ -443,47 +459,47 @@ async function main() {
         ],
       }),
     });
-    const v = await api.versions("clutch-memory", EMPTY_WIN);
+    const v = await api.versions("clutch-memory", "session", EMPTY_WIN);
     check(v.error === null && v.versions.length === 2, "every version this machine holds comes back for one component");
     check(v.versions[0].resolved === true && v.versions[1].resolved === false, "with the host's own verdict about which one it would run");
     check(lib.calls.versionReads[0].name === "clutch-memory" && lib.calls.versionReads[0].base === "http://127.0.0.1:8890", "the question goes to THIS machine's supervisor, by name");
 
     // a read that failed is the reason it failed, never "no versions"
     const blind = view({ lib: fakeLib({ versionsError: "DELETE /api/components/versions/… answered 500" }) });
-    const v2 = await blind.api.versions("clutch-memory", EMPTY_WIN);
+    const v2 = await blind.api.versions("clutch-memory", "session", EMPTY_WIN);
     check(v2.versions.length === 0 && /answered 500/.test(v2.error || ""), "a version read that failed says why, instead of reporting an empty machine");
 
     // and a target that does not exist is not asked at all
     const nowhere = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowKind: () => "tunnel" } });
-    const v3 = await nowhere.api.versions("clutch-memory", { id: 1 });
+    const v3 = await nowhere.api.versions("clutch-memory", "session", { id: 1 });
     check(v3.error && nowhere.lib.calls.versionReads.length === 0, "a machine with no supervisor URL is reported without a request being made");
   }
 
   // ---- 8. one removal, and the three shapes its verdict takes ----
   {
     const { api, lib } = view({ lib: fakeLib() });
-    const r = await api.remove("clutch-memory", {}, EMPTY_WIN);
+    const r = await api.remove("clutch-memory", {}, "session", EMPTY_WIN);
     check(r.ok && r.status === "removed" && r.removed[0] === VERSION, "a removal reports the host's verdict and the versions that went");
     check(lib.calls.removals[0].name === "clutch-memory" && lib.calls.removals[0].version === "", "no version named means the component goes whole");
     check(lib.calls.removals[0].base === "http://127.0.0.1:8890", "and it is asked of the target machine's supervisor");
 
     const one = view({ lib: fakeLib({ removal: { status: "removed", name: "clutch-memory", removed: [VERSION] } }) });
-    await one.api.remove("clutch-memory", { version: VERSION }, EMPTY_WIN);
+    await one.api.remove("clutch-memory", { version: VERSION }, "session", EMPTY_WIN);
     check(one.lib.calls.removals[0].version === VERSION, "a version the caller names is the one asked about");
 
     // "absent" is an outcome, not a failure: what was asked for is already true
     const gone = view({ lib: fakeLib({ removal: { status: "absent", name: "clutch-memory", removed: [] } }) });
-    const r2 = await gone.api.remove("clutch-memory", {}, EMPTY_WIN);
+    const r2 = await gone.api.remove("clutch-memory", {}, "session", EMPTY_WIN);
     check(r2.ok && r2.status === "absent" && r2.removed.length === 0, "a component that was already gone answers 'absent' and is not an error");
 
     // a refusal is the host's sentence — the page quotes it, this layer does not
     // invent a verdict of its own (the host is the side that knows what is running)
     const refused = view({ lib: fakeLib({ removeError: "clutch-memory is being served right now by a daemon this process did not start (pid 4242): stop it first" }) });
-    const r3 = await refused.api.remove("clutch-memory", {}, EMPTY_WIN);
+    const r3 = await refused.api.remove("clutch-memory", {}, "session", EMPTY_WIN);
     check(!r3.ok && /pid 4242/.test(r3.error), "a refusal surfaces with the host's own words");
 
     const nowhere = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowKind: () => "tunnel" } });
-    const r4 = await nowhere.api.remove("clutch-memory", {}, { id: 1 });
+    const r4 = await nowhere.api.remove("clutch-memory", {}, "session", { id: 1 });
     check(!r4.ok && nowhere.lib.calls.removals.length === 0, "a machine with no supervisor URL is refused before anything is sent");
   }
 
@@ -492,7 +508,7 @@ async function main() {
   //         verdict can be "absent" — the machine does not hold the component.
   {
     const { api, lib } = view({ lib: fakeLib() });
-    const off = await api.setDisabled("clutch-memory", true, EMPTY_WIN);
+    const off = await api.setDisabled("clutch-memory", true, "session", EMPTY_WIN);
     check(off.ok && off.status === "disabled" && off.disabled === true, "the switch reports the host's verdict and the bit it now holds");
     check(
       lib.calls.switches[0].disabled === true && lib.calls.switches[0].name === "clutch-memory",
@@ -501,29 +517,89 @@ async function main() {
     check(lib.calls.switches[0].base === "http://127.0.0.1:8890", "asked of the target machine's supervisor");
 
     const on = view({ lib: fakeLib({ switchVerdict: { status: "enabled", name: "clutch-memory", disabled: false } }) });
-    const back = await on.api.setDisabled("clutch-memory", false, EMPTY_WIN);
+    const back = await on.api.setDisabled("clutch-memory", false, "session", EMPTY_WIN);
     check(back.ok && back.disabled === false && on.lib.calls.switches[0].disabled === false, "the other direction sends the other state, and reports the host's bit back");
 
     // a verdict that carries no bit still answers the state that was asked for
     const bare = view({ lib: fakeLib({ switchVerdict: { status: "disabled", name: "clutch-memory" } }) });
-    const b = await bare.api.setDisabled("clutch-memory", true, EMPTY_WIN);
+    const b = await bare.api.setDisabled("clutch-memory", true, "session", EMPTY_WIN);
     check(b.ok && b.disabled === true, "a host that sends no bit is still read as the state that was asked for");
     check(b.target && b.target.base === "http://127.0.0.1:8890", "and the answer names the machine it was about");
 
     // "absent" is an outcome, not a failure: that machine holds nothing of this name
     const nowhere = view({ lib: fakeLib({ switchVerdict: { status: "absent", name: "clutch-nothing" } }) });
-    const a = await nowhere.api.setDisabled("clutch-nothing", true, EMPTY_WIN);
+    const a = await nowhere.api.setDisabled("clutch-nothing", true, "session", EMPTY_WIN);
     check(a.ok && a.status === "absent", "a component that machine does not hold answers 'absent' rather than failing");
 
     // a refusal is the host's sentence — a name that could never be an install,
     // and the host's own words for it
     const refused = view({ lib: fakeLib({ switchError: "bad component name: ../../etc" }) });
-    const r = await refused.api.setDisabled("../../etc", true, EMPTY_WIN);
+    const r = await refused.api.setDisabled("../../etc", true, "session", EMPTY_WIN);
     check(!r.ok && /bad component name/.test(r.error), "a refusal surfaces with the host's own words");
 
     const unreachable = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowKind: () => "tunnel" } });
-    const n = await unreachable.api.setDisabled("clutch-memory", true, { id: 1 });
+    const n = await unreachable.api.setDisabled("clutch-memory", true, "session", { id: 1 });
     check(!n.ok && unreachable.lib.calls.switches.length === 0, "a machine with no supervisor URL is refused before anything is sent");
+  }
+
+  // ---- 9a. a name is not a place: every verb is aimed by the place its row named,
+  //          and a call that names no place is refused rather than guessed at. This
+  //          is what keeps one window's removal from landing on the other machine.
+  {
+    const asked = { versions: [], removes: [], switches: [] };
+    const pluginHost = {
+      list: () => [{ name: "clutch-websearch", version: "0.2.0", digest: DIGEST, entry: true }],
+      versions: (name) => (asked.versions.push(name), [{ name, version: "0.2.0", resolved: true }]),
+      remove: (name, version) => (asked.removes.push([name, version]), { status: "removed", removed: ["0.2.0"] }),
+      setDisabled: (name, disabled) => (
+        asked.switches.push([name, disabled]),
+        { status: disabled ? "disabled" : "enabled", disabled }
+      ),
+    };
+    const { api, lib } = view({ lib: fakeLib(), deps: { plugins: () => pluginHost } });
+
+    const v = await api.versions("clutch-websearch", "client", EMPTY_WIN);
+    check(
+      v.place === "client" && v.versions.length === 1 && asked.versions.length === 1,
+      "a client row's versions are read from this client's own table"
+    );
+    check(lib.calls.versionReads.length === 0, "and the session machine is not asked about it");
+
+    const r = await api.remove("clutch-websearch", {}, "client", EMPTY_WIN);
+    check(
+      r.ok && r.place === "client" && asked.removes.length === 1 && lib.calls.removals.length === 0,
+      "letting a client row go is this client's own removal"
+    );
+
+    const s = await api.setDisabled("clutch-websearch", true, "client", EMPTY_WIN);
+    check(
+      s.ok && s.disabled === true && asked.switches.length === 1 && lib.calls.switches.length === 0,
+      "and its switch is this client's too, with the session machine untouched"
+    );
+
+    // no place, or something that is not one of the two: the answer is the
+    // refusal, and neither machine is asked anything
+    for (const missing of [undefined, null, "", "local", "clutch-websearch"]) {
+      const answers = [
+        await api.versions("clutch-websearch", missing, EMPTY_WIN),
+        await api.remove("clutch-websearch", {}, missing, EMPTY_WIN),
+        await api.setDisabled("clutch-websearch", true, missing, EMPTY_WIN),
+        await api.settings("clutch-websearch", missing, EMPTY_WIN),
+        await api.setSetting("clutch-websearch", { a: 1 }, missing, EMPTY_WIN),
+      ];
+      check(
+        answers.every((a) => a.ok !== true && /is not a place/.test(a.error || "")),
+        "a call that names no place (" + JSON.stringify(missing) + ") is refused, whichever verb it is"
+      );
+    }
+    check(
+      asked.versions.length === 1 && asked.removes.length === 1 && asked.switches.length === 1,
+      "and not one of those refusals asked either machine anything"
+    );
+    check(
+      lib.calls.versionReads.length === 0 && lib.calls.removals.length === 0 && lib.calls.switches.length === 0,
+      "the session machine in particular, which the old name-derived place would have aimed at"
+    );
   }
 
   // ---- 9b. the knobs a component declares: the schema its declaration carries
@@ -538,7 +614,7 @@ async function main() {
     };
     const doc = { schema, values: { "library.enabled": true, "library.root": "" } };
     const { api, lib } = view({ lib: fakeLib({ settingsDoc: doc }) });
-    const r = await api.settings("clutch-memory", EMPTY_WIN);
+    const r = await api.settings("clutch-memory", "session", EMPTY_WIN);
     check(r.ok && r.schema["library.enabled"].type === "boolean", "the schema comes back as the declaration wrote it");
     check(r.values["library.enabled"] === true && r.values["library.root"] === "", "and the values are the effective document, the declaration's defaults laid in");
     check(
@@ -549,7 +625,7 @@ async function main() {
 
     // a write carries the keys it was given and nothing else
     const written = view({ lib: fakeLib({ writeVerdict: { status: "saved", values: { "library.enabled": false, "library.root": "" } } }) });
-    const w = await written.api.setSetting("clutch-memory", { "library.enabled": false }, EMPTY_WIN);
+    const w = await written.api.setSetting("clutch-memory", { "library.enabled": false }, "session", EMPTY_WIN);
     check(w.ok && w.status === "saved", "a write reports the host's verdict");
     check(
       JSON.stringify(written.lib.calls.settingWrites[0].values) === JSON.stringify({ "library.enabled": false }),
@@ -563,13 +639,13 @@ async function main() {
     // a value the declaration cannot take is the host's refusal: nothing is
     // invented on this side, and its sentence is the one to draw
     const refused = view({ lib: fakeLib({ writeError: "bad value for library.enabled: expected a boolean" }) });
-    const bad = await refused.api.setSetting("clutch-memory", { "library.enabled": "yes" }, EMPTY_WIN);
+    const bad = await refused.api.setSetting("clutch-memory", { "library.enabled": "yes" }, "session", EMPTY_WIN);
     check(!bad.ok && /expected a boolean/.test(bad.error || ""), "a refusal surfaces with the host's own words");
     check(bad.values === undefined, "with no values, so the page cannot draw a document no machine ever answered");
 
     // a machine with no supervisor URL is refused before anything is sent
     const unreachable = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowKind: () => "tunnel" } });
-    const n = await unreachable.api.settings("clutch-memory", { id: 1 });
+    const n = await unreachable.api.settings("clutch-memory", "session", { id: 1 });
     check(!n.ok && unreachable.lib.calls.settingReads.length === 0, "a machine with no supervisor URL is refused before anything is sent");
   }
 
@@ -641,6 +717,7 @@ async function main() {
       lib: fakeLib({ specs: [CHECKOUT], held: [] }),
       deps: {
         tunnelStatus: () => ({ active: true, url: "http://127.0.0.1:41000" }),
+        windowKind: () => "tunnel",
         ensureSupervisor: async () => {
           throw new Error("the far machine's supervisor is not this client's to start");
         },
@@ -867,6 +944,29 @@ async function main() {
       !/declares neither/.test(String(components.destinationOf.toString())),
       "and the refusal for 'nothing could run' is gone: a component need not be a tool"
     );
+    // an `entry` beside `settings` is refused at that same one place: the knobs are
+    // a MACHINE store (agent/tools/settings.py), and a module this app runs in
+    // process has no such file — inventing a client-side copy here would make this
+    // page a second source of truth for a schema the host already validates
+    const configuredWhere = components.destinationOf(decl("clutch-configured", { entry: "index.js", settings: { apiKey: "" } }));
+    check(
+      configuredWhere.place === null && /declares `entry` and `settings`/.test(configuredWhere.error || ""),
+      "an `entry` that also declares `settings` has no place at all, and says why"
+    );
+    check(
+      /agent\/tools\/settings\.py/.test(configuredWhere.error || ""),
+      "naming the store that explains it (agent/tools/settings.py)"
+    );
+    check(
+      /this app runs in-process, where there is none/.test(configuredWhere.error || ""),
+      "and that the in-process side of it has no settings store to write to"
+    );
+    // the same knobs on a component that RUNS are exactly where they belong
+    const daemonKnobs = components.destinationOf(decl("clutch-workspace", { service: {}, settings: { root: "" } }));
+    check(
+      daemonKnobs.place === components.PLACE_SESSION && daemonKnobs.error === null,
+      "while a machine-side component keeps its `settings`, and stays on the session machine"
+    );
     // a row nobody has read yet is NOT a contradiction: the page says so instead
     const unread = components.destinationOf({ name: "clutch-unread", checkout: false, entry: { manifest: "x" } });
     check(unread.place === null && unread.read === false && unread.error === "", "a declaration not read yet is 'unknown', not a refusal");
@@ -929,12 +1029,14 @@ async function main() {
     check(bare.lib.calls.artifacts.length === 0, "and no bytes were prepared for a place that is not there");
 
     // 6. a plugin's knobs are the store's of the machine that RUNS it, and this
-    //    client is not that machine: showing a form here would draw defaults the
-    //    component would never read, so the answer is the reason, said out loud,
-    //    and nothing is asked of the session machine about it
+    //    client is not that machine — so the declaration is refused where it is
+    //    READ (ui/components.js destinationOf: an `entry` with `settings`), and the
+    //    row never offers a form. This sentence is the one shape that can still
+    //    arrive here (a page holding an older row), and it is an answer rather than
+    //    a failure, with nothing asked of the session machine
     const readsBefore = lib.calls.settingReads.length;
-    const knobs = await api.settings("clutch-websearch", EMPTY_WIN);
-    check(knobs.ok === false && /nowhere here to store them/.test(knobs.error || ""), "a client-held component's settings are refused in words that say why");
+    const knobs = await api.settings("clutch-websearch", "client", EMPTY_WIN);
+    check(knobs.ok === false && /has no settings store/.test(knobs.error || ""), "a client-held component's settings are refused in words that say why");
     check(knobs.place === "client", "and the answer names the place that cannot hold them");
     check(lib.calls.settingReads.length === readsBefore, "with nothing asked of the session machine about it");
   }

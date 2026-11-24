@@ -1081,6 +1081,12 @@ function declaredContribution(spec) {
     service: declared.service !== undefined && declared.service !== null,
     launch: Boolean(launch && (launch.argv || launch.entry || launch.binary || launch.importable)),
     entry: typeof declared.entry === "string" ? declared.entry : "",
+    // the knobs a person can set: a MACHINE-side store (agent/tools/settings.py),
+    // so this is one of the facts that decides where a component belongs
+    settings:
+      declared.settings && typeof declared.settings === "object"
+        ? Object.keys(declared.settings).length
+        : 0,
   };
 }
 
@@ -1096,6 +1102,22 @@ function destinationOf(spec) {
       error:
         `${name} declares \`entry\` and ${what.service ? "\`service\`" : "\`launch\`"}: \`entry\` is the module this client ` +
         `runs for a component with no process here, and that one starts a process where the session's commands run`,
+    };
+  }
+  // Settings belong to the machine that RUNS the component: the store is
+  // agent/tools/settings.py (`~/.clutch/components/settings/<name>.json`) and the
+  // `host.settings` path a statement is handed is its document. A module this app
+  // process runs has no such file, and inventing a client-side copy would make this
+  // page a second source of truth for a schema the host already validates. Refused
+  // here, at the one place the declaration is read, so no row ever offers a form
+  // that could not be saved.
+  if (what.entry && what.settings) {
+    return {
+      place: null,
+      read: true,
+      error:
+        `${name} declares \`entry\` and \`settings\`: the settings store lives on the machine that runs a component's ` +
+        `commands (agent/tools/settings.py), and \`entry\` is a module this app runs in-process, where there is none`,
     };
   }
   if (!starts && !what.entry) {

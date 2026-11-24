@@ -153,9 +153,30 @@ export async function resetBackendLocal() {
   }
 }
 
+// Is the claim the host holds for ONE slot the tunnel's? The renderer may not
+// assume it: `slot:status` answers { claimed, kind, url } without claiming anything
+// (host-core.ts slotStatus). "Could not ask" (a build with no slotStatus, a thrown
+// IPC) answers NO — that is the safe half, because the bit it guards is the flag
+// the picker reads as "this window is on the saved host".
+async function claimedByTunnel(slot) {
+  if (!(window.clutchApi && window.clutchApi.slotStatus)) return false;
+  try {
+    const st = await window.clutchApi.slotStatus(slot);
+    return Boolean(st && st.claimed && st.kind === "tunnel");
+  } catch (e) {
+    return false;
+  }
+}
+
 // reconcile the stored URL with the tunnel's real state; a live tunnel is
 // authoritative, a dead-tunnel leftover falls back to the local backend
-export async function reconciledBackendUrl() {
+//
+// `slot` is the session this reconcile is FOR, and it defaults to the window's own
+// (""). A caller that is acting for one tab passes that tab's slot: the ask claims
+// what it names, so reconciling the default slot while a tab is on a machine would
+// start a second session here and hand its URL back to be adopted — the window then
+// browses this machine while its tab, and the picker, still say the host.
+export async function reconciledBackendUrl(slot = "") {
   if (!window.clutchTunnel) return null;
   // The second claim entry, and the one that fires when the tunnel still answers
   // (s.active below asks the host for THIS window's session). Same note, same read-
@@ -168,9 +189,15 @@ export async function reconciledBackendUrl() {
   const flag = localStorage.getItem("clutch_ssh_connected");
   if (s.active) {
     // live tunnel: the main process owns this window's session URL — ask it
-    const target = await hostSessionUrl();
+    const target = await hostSessionUrl(slot);
     if (target && override !== target) {
-      localStorage.setItem("clutch_ssh_connected", "1");
+      // The ✓ the picker draws means "this window is ON the saved host", and it is
+      // read off this flag. So the flag may only be written for a claim that really
+      // is the tunnel's: a slot that fell back to a session on THIS machine is
+      // working here, and marking it SSH-connected is how the picker came to offer
+      // a host it could not dial (the ✓ it would not move off). Where the claim
+      // cannot be asked about, nothing is claimed on its behalf either.
+      if (await claimedByTunnel(slot)) localStorage.setItem("clutch_ssh_connected", "1");
       return target;
     }
     return null;

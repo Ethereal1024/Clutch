@@ -212,7 +212,20 @@ async function main() {
   // move that lands) or one that is not (a move that fails, and must leave nothing
   // of itself behind — section 3c)
   let dialOk = true;
-  global.window = { clutchTunnel: { disconnect: async () => done.push("disconnect") } };
+  // the tunnel's own answer: which host the hop is for, as the shell reports it
+  // (tunnelStatus().target). Null = no hop, which is the common case here: only
+  // the guard's own section (11) puts one up.
+  let tunnelTarget = null;
+  global.window = {
+    clutchTunnel: {
+      disconnect: async () => done.push("disconnect"),
+      status: async () => ({
+        active: Boolean(tunnelTarget),
+        url: tunnelTarget ? "http://127.0.0.1:41000" : "",
+        target: tunnelTarget,
+      }),
+    },
+  };
   global.handleSshConnect = async (host, user, port, statusEl) => {
     done.push(`dial:"${host}" "${user}" "${port}"`);
     // the failed attempt's verdict is written where the flow writes it: on the door
@@ -237,6 +250,10 @@ async function main() {
   // it validates: that note belongs to its own runner, and this one only needs the
   // call to exist and to stay out of the sequence it is counting
   global.connLostExitClear = () => {};
+  // the tunnel's own answer, and the two bodies that read it: the door below asks
+  // the hop which host it is for before it believes the ✓ (section 11)
+  (0, eval)(fnBody("hopLandedFor"));
+  (0, eval)(fnBody("sshTargetOf"));
   (0, eval)(fnBody("connConnect"));
   // the move itself (connSwitch in js/conn-flow.js): the one door both host-naming
   // paths go through, so what it leaves behind on a failure is what this runner has
@@ -272,6 +289,7 @@ async function main() {
     global.connOnValue = "";
     global.connBusy = false;
     global.fsListing = false;
+    tunnelTarget = null;
     dialOk = true;
     done.length = 0;
   };
@@ -867,8 +885,9 @@ async function main() {
     "the list's change listener hands the choice straight to the door");
   check(/\$\("#conn-connect"\)\.addEventListener\("click", \(\) => connConnect\(connTarget\(\)\)\);/.test(CONN_FLOW),
     "and the folded bar's button presses the same door with the target it can dial");
-  check(/async function connConnect\(v\) \{[\s\S]{0,400}?if \(!v \|\| v === connOnValue\) return;/.test(CONN_FLOW),
-    "which validates: nowhere to dial, or dialling where the window already is, is not a dial");
+  check(/async function connConnect\(v\) \{[\s\S]{0,2500}?if \(v === connOnValue\) \{[\s\S]{0,1200}?hopLandedFor\(t\.host, t\.user, t\.port, 0\)\)\) return;/.test(CONN_FLOW),
+    "which validates: nowhere to dial is not a dial, and neither is the host the TUNNEL says this window is on " +
+    "(the ✓ alone is not the fact — see section 11)");
   check(!/connBusy\s*=/.test(CONN_FLOW),
     "the in-flight flag has one owner (js/conn-store.js); the flow only asks it to change");
   check(/\$\("#conn-connect"\)\.disabled = connBusy \|\| !connTarget\(\);/.test(CONN_STORE) &&
@@ -946,6 +965,55 @@ async function main() {
     "the typed name wears the list's own type, not the dialog's field type");
   check(/#fs-list \.fs-edit-error \{[^}]*padding: 0 0 var\(--s1\) 18px/.test(CSS),
     "and its refusal is indented to the name column, not to the field's box");
+
+  // ---- 11) the ✓ is the picker's memory; the tunnel is the fact ----
+  // The regression this pins (device report): a window could end up carrying the ✓
+  // on a host it was no longer on — the base had been reconciled onto another
+  // session (a claim that fell back to this machine, a tab that moved) while the
+  // session URL, and so the tick, stayed where it was. connConnect's first guard
+  // read the tick as the fact and refused the press, so the one host the user
+  // needed was the one entry that did nothing, and only clearing localStorage got
+  // the picker back. The guard now asks the tunnel which host its hop is for:
+  // still there is not a dial, anywhere else is.
+  global.IS_ANDROID = true;
+  global.state.apiBase = "http://127.0.0.1:31001";
+  seed(HOSTS, SESSION);
+  renderConnSelector();
+  check(connOnValue === "ssh:me@new.example.com:22",
+    `the ticked entry is the host the picker believes this window is on (got ${JSON.stringify(connOnValue)})`);
+
+  // (a) the tunnel's hop is for ANOTHER host: the tick is stale, so the press dials
+  tunnelTarget = { host: "old.example.com", user: "me", port: 2222 };
+  done.length = 0;
+  await connConnect("ssh:me@new.example.com:22");
+  await flush();
+  check(/dial:"new\.example\.com" "me" "22"/.test(done.join("|")),
+    `a ✓ the tunnel does not confirm is dialled, not refused (got ${done.join(",")})`);
+
+  // (b) the tunnel's hop IS that host: there is nowhere to move to, so nothing moves
+  tunnelTarget = { host: "new.example.com", user: "me", port: 22 };
+  done.length = 0;
+  await connConnect("ssh:me@new.example.com:22");
+  await flush();
+  check(!/dial:|disconnect/.test(done.join("|")),
+    `while a ✓ the tunnel confirms is not a dial at all (got ${done.join(",")})`);
+
+  // (c) no hop behind the ✓ at all: a tick cannot stand for a session that is not up
+  tunnelTarget = null;
+  done.length = 0;
+  await connConnect("ssh:me@new.example.com:22");
+  await flush();
+  check(/dial:"new\.example\.com" "me" "22"/.test(done.join("|")),
+    `and a ✓ with no hop behind it dials rather than refusing (got ${done.join(",")})`);
+
+  // (d) the two entries that name no host are not targets of a verification: there
+  // is no host to ask the tunnel about, and nothing to dial either
+  check(sshTargetOf("local") === null && sshTargetOf("ssh:__connected__") === null,
+    "`local` and the synthetic connected entry parse as no host at all");
+  check(sshTargetOf("ssh:me@host.example.com").port === "22" &&
+    sshTargetOf("ssh:me@host.example.com:2222").port === "2222",
+    "while a saved host parses to the three fields the tunnel dials, port defaulting to 22");
+  global.state.apiBase = null;
 
   summary("fs-picker");
 }

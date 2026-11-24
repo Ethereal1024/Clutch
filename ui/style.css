@@ -2150,7 +2150,14 @@ mjx-container[display="true"] {
      was a size the scale does not have */
   font-size: var(--fs-md);
 }
-.plug-note { margin: var(--s1) 0 0; font-size: var(--fs-sm); color: var(--muted); min-height: var(--fs-lg); overflow-wrap: anywhere; }
+.plug-note { margin: var(--s1) 0 0; font-size: var(--fs-sm); color: var(--muted); overflow-wrap: anywhere; }
+/* nothing to report is not a line. The reserved height this used to carry put a
+   blank band at the TOP of the pane — the note is its first child, so a pane with
+   nothing to say opened with a line of nothing, a margin, and then the controls —
+   and the note's own text, when there is some, is what should take that room.
+   `#plug-note` is emptied to "" by plugReadNote (`:empty`, not a class), so this
+   only ever hides an element that holds no character. */
+.plug-note:empty { display: none; }
 .plug-note.error { color: var(--accent); }
 /* the plugin group's body: the mirror row, the note, the filter row — and then the
    ONE list, which is the only thing that scrolls. Those three are `flex: none` so
@@ -2164,6 +2171,11 @@ mjx-container[display="true"] {
 #plug-pane {
   display: flex;
   flex-direction: column;
+  /* the group's height is the pane's, not its content's: without this the pane is
+     as tall as the note, the filter row and whatever rows arrived, and the rest of
+     the dock group is dead space that reads as a blank window (the list cannot use
+     a height nobody gave it — `.plug-body` below is the item that grows) */
+  flex: 1 1 auto;
   min-height: 0;
   overflow: hidden;
   /* the tree's own gutter (ui/style.css `#tree`): the list below this note is a
@@ -2189,12 +2201,22 @@ mjx-container[display="true"] {
    sits OUTSIDE the scrolling list on purpose — which view is on screen must stay
    on screen while the rows under it move. */
 .plug-filter { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s2); flex-wrap: wrap; }
-.plug-filter-chips { display: inline-flex; align-items: center; gap: var(--s1); flex-wrap: wrap; }
+/* the five views are ONE line, and the name box is the one thing that goes under
+   them. A column this narrow (300px, ui/index.html `#right`) cannot hold both on
+   one line, and when the chips wrapped they took TWO — a third of the pane, above
+   the list, for a row of controls. A chip is `flex: none` so a label is never
+   squashed; a font wide enough to overflow the row gets the app's own thin
+   scrollbar under the chips (the pill every scroller here draws) rather than a
+   second line of height. */
+.plug-filter-chips { display: inline-flex; align-items: center; gap: var(--s1); flex-wrap: nowrap; min-width: 0; overflow-x: auto; }
 /* a chip is a target, so it keeps --tap of height whatever the type scale says:
    at 2px/11.5px it was a 17px box, i.e. below the floor a hand or a mouse can
-   reliably hit (SC 2.5.8 is 24px) */
+   reliably hit (SC 2.5.8 is 24px). The side padding is the tight one (--s1): five
+   labels plus the name box have to stay one row wide in a 275px content column,
+   and the separation a reader sees is this padding twice plus the gap. */
 .plug-filter-chip {
-  padding: var(--s1) var(--s2);
+  flex: none;
+  padding: var(--s1) var(--s1);
   min-height: var(--tap);
   font-size: var(--fs-sm);
   background: transparent;
@@ -2236,6 +2258,11 @@ mjx-container[display="true"] {
    border and no ring, like every other field on the page. It is a field on the page,
    not a case of its own — this spot used to carry a rule of its own for it. */
 .plug-section { margin-bottom: var(--s4); }
+/* the space above a section head separates it from the section before it, and the
+   FIRST one has none: with the full step it opened the list with a band of nothing
+   right under the filter row (the top of a short pane is where height is scarcest).
+   `--s3` is still air between the controls and the first machine's name. */
+.plug-section:first-child .plug-section-title { margin-top: var(--s3); }
 /* the section head is the MACHINE's name — DATA, not a field label — so it is the
    one heading on this page that must not be set in caps: the same screen would
    otherwise read `SSH ubuntu@box` in the head and `SSH UBUNTU@BOX` under it. The
@@ -2429,6 +2456,16 @@ mjx-container[display="true"] {
    row behind a hairline, like the version list: it is a disclosure OF that row and
    never a second component. */
 .plug-settings-box { flex: 1 1 100%; margin: 0 0 var(--s1) var(--s3); padding-left: var(--s3); border-left: 1px solid var(--border); }
+/* the copy of this name the OTHER place still holds (ui/src/renderer/
+   components-panel.ts `plugStrayRow`): a leftover, so it is set in behind the same
+   hairline as the disclosures above and says its piece in their voice. The line
+   and its "Let it go" share one row — the sentence is what is being read, the
+   button is the one thing to do about it — and the box takes a line of its own for
+   the same reason they do: a lone extra box is a flex item of the ROW, not a child
+   of `.plug-row-extra`. */
+.plug-stray { flex: 1 1 100%; display: flex; align-items: baseline; gap: var(--s2); margin: 0 0 var(--s1) var(--s3); padding-left: var(--s3); border-left: 1px solid var(--border); }
+.plug-stray > .plug-line { margin-top: 0; flex: 1 1 auto; min-width: 0; }
+.plug-stray > .plug-remove { flex: 0 0 auto; }
 .plug-setting { display: flex; align-items: flex-start; gap: var(--s3); padding: var(--s2) 0; }
 .plug-setting + .plug-setting { border-top: 1px solid var(--border); }
 /* the words yield the width, the control never does: a key and its sentence can
@@ -2457,11 +2494,6 @@ mjx-container[display="true"] {
 .plug-setting-input:focus, .plug-setting-select:focus { outline: none; border-color: var(--accent); }
 .plug-setting-check { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
 .plug-setting-reset { padding: 2px var(--s2); min-height: var(--ctl-h-sm); font-size: var(--fs-xs); background: transparent; color: var(--muted); }
-/* what the automatic pass at connect did to this machine: a name it let go of is
-   not a row any more, so this is the only place a removal is stated on the page.
-   It sits with the list, not above it, and speaks only when there is something
-   to say (ui/js/components-panel.js `plugPassLine`). */
-.plug-pass { margin: var(--s2) 0 0; font-size: var(--fs-xs); color: var(--muted); }
 /* the name is the row's loudest mark, and it has to read that way against the
    sentence under it and the two grey lines below both: VS Code's `.name` is the
    one semibold thing in an extension row (media/extension.css). It carries no

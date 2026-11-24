@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: d8cb0ba4aedb70f4c00f10603c74321c6ff35bd21ed1dffe4012d5defd79f1d7
+// sources sha256: df4dc36b23056efcad9c781273759a2c53b27a5add5af7d5c2af4d7da41c6cbc
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -112,14 +112,17 @@
       onEvent: (cb) => subscribe("run:event", cb)
     });
     expose("clutchComponents", {
-      list: () => call("clutchComponents", "list"),
+      list: (slotId) => call("clutchComponents", "list", [slotId]),
       market: (opts) => call("clutchComponents", "market", [opts]),
-      install: (name) => call("clutchComponents", "install", [name]),
-      versions: (name) => call("clutchComponents", "versions", [name]),
-      remove: (name, opts) => call("clutchComponents", "remove", [name, opts]),
-      setDisabled: (name, disabled) => call("clutchComponents", "setDisabled", [name, disabled]),
-      settings: (name) => call("clutchComponents", "settings", [name]),
-      setSetting: (name, values) => call("clutchComponents", "setSetting", [name, values]),
+      install: (name, slotId) => call("clutchComponents", "install", [name, slotId]),
+      // every write also carries the PLACE the row was read at: the page draws the
+      // client's plugins and the session machine's components in ONE list, so a
+      // name alone does not say which machine is being asked to drop something
+      versions: (name, place, slotId) => call("clutchComponents", "versions", [name, place, slotId]),
+      remove: (name, opts, place, slotId) => call("clutchComponents", "remove", [name, opts, place, slotId]),
+      setDisabled: (name, disabled, place, slotId) => call("clutchComponents", "setDisabled", [name, disabled, place, slotId]),
+      settings: (name, place, slotId) => call("clutchComponents", "settings", [name, place, slotId]),
+      setSetting: (name, values, place, slotId) => call("clutchComponents", "setSetting", [name, values, place, slotId]),
       mirrors: () => call("clutchComponents", "mirrors"),
       addMirror: (url) => call("clutchComponents", "addMirror", [url]),
       removeMirror: (url) => call("clutchComponents", "removeMirror", [url]),
@@ -494,6 +497,698 @@
     }
   }
 
+  // src/renderer/pane.ts
+  var HOP_SHARE = 0.4;
+  var REPLAY_PHASES = {
+    parse: [0, 0.5],
+    render: [0.5, 0.9],
+    typeset: [0.9, 1]
+  };
+  function paneWelcome() {
+    return { view: "welcome" };
+  }
+  function paneTab(tabId) {
+    return { view: "tab", tabId: tabId || "" };
+  }
+  function paneLoad(tabId, label, where = "") {
+    return { view: "load", tabId: tabId || "", label: label || "", where: where || "", progress: { pct: null, note: "" } };
+  }
+  function paneBlocked(tabId, text, machine = null) {
+    return {
+      view: "blocked",
+      tabId: tabId || null,
+      text: text || "",
+      machine: machine || null,
+      shown: true
+    };
+  }
+  var pane = paneWelcome();
+  var listeners = [];
+  function currentPane() {
+    return pane;
+  }
+  function paneShowsTab(tabId) {
+    return pane.view === "tab" && !!tabId && pane.tabId === tabId;
+  }
+  function paneBlockedTabId() {
+    return pane.view === "blocked" ? pane.tabId : null;
+  }
+  function paneLoadPct() {
+    return pane.view === "load" && pane.progress ? pane.progress.pct : null;
+  }
+  function onPaneChange(fn) {
+    listeners.push(fn);
+  }
+  function setPane(next) {
+    pane = next;
+    render();
+    for (const fn of listeners) fn(pane);
+  }
+  function byId(id) {
+    return document.getElementById(id);
+  }
+  function render() {
+    const state2 = pane;
+    const stream2 = byId("stream");
+    if (stream2) {
+      stream2.dataset.pane = state2.view;
+      stream2.dataset.tabId = state2.view === "tab" || state2.view === "load" ? state2.tabId : "";
+      stream2.classList.toggle("loading", state2.view === "load");
+    }
+    const visible = state2.view === "blocked" && !state2.shown ? "" : state2.view;
+    for (const el of Array.from(document.querySelectorAll("[data-view]"))) {
+      el.classList.toggle("hidden", el.getAttribute("data-view") !== visible);
+    }
+    if (state2.view === "load") renderLoad(state2);
+    else stopBar();
+    if (state2.view === "blocked") renderBlocked(state2);
+    if (state2.view !== "tab") {
+      const jump = byId("jump-bottom");
+      if (jump) jump.classList.add("hidden");
+    }
+  }
+  function renderLoad(state2) {
+    const title = byId("tab-load-title");
+    if (title) title.textContent = state2.label;
+    const where = byId("tab-load-where");
+    if (where) where.textContent = state2.where;
+    const barEl = byId("open-progress");
+    if (!barEl) return;
+    const progress = state2.progress;
+    barEl.classList.toggle("hidden", !progress);
+    if (!progress) {
+      stopBar();
+      return;
+    }
+    const note = byId("open-progress-note");
+    if (note) note.textContent = progress.note || "";
+    const fill = barEl.querySelector(".open-progress-fill");
+    const label = barEl.querySelector(".open-progress-label");
+    if (!fill) return;
+    if (progress.pct === null) {
+      stopBar();
+      fill.classList.add("indeterminate");
+      fill.style.width = "";
+      if (label) label.textContent = "";
+      return;
+    }
+    const whole = Math.round(Math.max(0, Math.min(100, progress.pct)));
+    fill.classList.remove("indeterminate");
+    const fresh = !bar || bar.tabId !== state2.tabId;
+    bar = { fill, label, tabId: state2.tabId };
+    if (fresh) {
+      barShown = 0;
+      barPainted = -1;
+    }
+    barTarget = whole;
+    paintBar();
+    if (!barStop && barShown !== barTarget) {
+      barAt = 0;
+      barStop = nextFrame(barFrame);
+    }
+  }
+  var CHASE_TAU_MS = 130;
+  var CHASE_MIN_PCT = 0.35;
+  function chasePct(shown, target, dtMs) {
+    const to = Math.max(0, Math.min(100, Number(target) || 0));
+    const from = Math.max(0, Math.min(100, Number(shown) || 0));
+    if (!(to > from)) return to;
+    const k = 1 - Math.exp(-Math.max(0, Number(dtMs) || 0) / CHASE_TAU_MS);
+    return Math.min(to, Math.max(from + (to - from) * k, from + CHASE_MIN_PCT));
+  }
+  var bar = null;
+  var barTarget = 0;
+  var barShown = 0;
+  var barPainted = -1;
+  var barStop = null;
+  var barAt = 0;
+  function nextFrame(cb) {
+    if (typeof requestAnimationFrame === "function") {
+      const id2 = requestAnimationFrame(cb);
+      return () => cancelAnimationFrame(id2);
+    }
+    const id = setTimeout(() => cb(Date.now()), 16);
+    return () => clearTimeout(id);
+  }
+  function paintBar() {
+    if (!bar) return;
+    const whole = Math.round(barShown);
+    if (whole === barPainted) return;
+    barPainted = whole;
+    bar.fill.style.width = whole + "%";
+    if (bar.label) bar.label.textContent = whole + "%";
+  }
+  function barFrame(now) {
+    barStop = null;
+    if (!bar || pane.view !== "load") {
+      bar = null;
+      return;
+    }
+    const dt = barAt ? Math.max(1, now - barAt) : 16;
+    barAt = now;
+    barShown = chasePct(barShown, barTarget, dt);
+    paintBar();
+    if (barShown < barTarget) barStop = nextFrame(barFrame);
+  }
+  function stopBar() {
+    if (barStop) barStop();
+    barStop = null;
+    bar = null;
+    barTarget = 0;
+    barShown = 0;
+    barPainted = -1;
+    barAt = 0;
+  }
+  function renderBlocked(state2) {
+    const text = byId("tab-blocked-text");
+    if (text) text.textContent = state2.text;
+  }
+  function setProgress(progress) {
+    if (pane.view !== "load") return;
+    setPane({ ...pane, progress });
+  }
+  function reportHopStage(stagePct, note) {
+    setProgress({
+      pct: stagePct === null ? null : stagePct * HOP_SHARE,
+      note: note || ""
+    });
+  }
+  function paneHopSettled(up) {
+    if (pane.view !== "load") return;
+    setProgress(up ? { pct: paneLoadPct(), note: "Opening project\u2026" } : null);
+  }
+  function paneReplayProgress(phase, frac) {
+    if (pane.view !== "load") return;
+    const [from, to] = REPLAY_PHASES[phase];
+    const f = Math.max(0, Math.min(1, Number(frac) || 0));
+    const start = paneLoadPct() ?? 0;
+    const end = start + (100 - start) * (from + (to - from) * f);
+    setProgress({ pct: end, note: pane.progress ? pane.progress.note : "" });
+  }
+
+  // src/renderer/slots.ts
+  var SLOT_EVENT = "clutch:tab-state";
+  function activeTab() {
+    if (!state.activeTabId) return null;
+    return state.tabs.find((t) => t.id === state.activeTabId) || null;
+  }
+  function activeSlotId() {
+    return state.activeTabId || "";
+  }
+  function tabForSlot(slotId) {
+    if (!slotId) return null;
+    return state.tabs.find((t) => t.id === slotId) || null;
+  }
+  function findTabByPath(path) {
+    return state.tabs.find((t) => t.path === path || t.projectKey === path) || null;
+  }
+  function ensureTab(path, name = "") {
+    const existing = path ? findTabByPath(path) : null;
+    if (existing) return existing;
+    const tab = {
+      id: "tab-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      path,
+      name: name || (path ? path.split("/").pop() || path : ""),
+      base: null,
+      running: false,
+      needsInput: false
+    };
+    state.tabs.push(tab);
+    return tab;
+  }
+  function announceTabState() {
+    document.dispatchEvent(new CustomEvent(SLOT_EVENT));
+  }
+  function machineLabel(m) {
+    if (!m) return "this machine";
+    return m.user ? `${m.user}@${m.host}:${m.port}` : `${m.host}:${m.port}`;
+  }
+  function asMachine(v) {
+    if (v === void 0) return void 0;
+    if (v === null || v === false) return null;
+    if (typeof v !== "object" || !v.host) return void 0;
+    return {
+      host: String(v.host),
+      user: String(v.user || ""),
+      port: String(v.port === void 0 || v.port === null || v.port === "" ? 22 : v.port)
+    };
+  }
+  function sameMachine(a, b) {
+    if (a === void 0 || b === void 0) return a === b;
+    if (a === null || b === null) return a === b;
+    return a.host === b.host && a.user === b.user && String(a.port) === String(b.port);
+  }
+  function tunnelTarget(ts) {
+    const t = ts && ts.target;
+    if (!t || !t.host) return null;
+    return { host: String(t.host), user: String(t.user || ""), port: String(t.port || 22) };
+  }
+  async function tunnelNow() {
+    if (!(window.clutchTunnel && window.clutchTunnel.status)) return { active: false, target: null };
+    try {
+      const s = await window.clutchTunnel.status();
+      return { active: !!(s && s.active), target: tunnelTarget(s) };
+    } catch (e) {
+      return { active: false, target: null };
+    }
+  }
+  async function pinSlot(slotId, target) {
+    if (!(window.clutchApi && window.clutchApi.setSlotTarget)) return;
+    try {
+      await window.clutchApi.setSlotTarget(slotId, target);
+    } catch (e) {
+    }
+  }
+  function rememberedMachine() {
+    try {
+      const list = JSON.parse(localStorage.getItem("clutch_ssh_connections") || "[]");
+      const first = Array.isArray(list) ? list.find((c) => c && c.host) : null;
+      if (first) return asMachine(first);
+    } catch (e) {
+    }
+    try {
+      const host = localStorage.getItem("clutch_ssh_host");
+      if (!host) return null;
+      return {
+        host,
+        user: localStorage.getItem("clutch_ssh_user") || "",
+        port: String(localStorage.getItem("clutch_ssh_port") || 22)
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+  function hopUpFor(tab) {
+    if (!tab || !tab.machine) return true;
+    if (!tab.base) return false;
+    try {
+      if (localStorage.getItem("clutch_ssh_connected") !== "1") return false;
+    } catch (e) {
+      return false;
+    }
+    return sameMachine(rememberedMachine(), tab.machine);
+  }
+  var dialing = false;
+  async function dialMachine(m) {
+    if (!m || dialing) return false;
+    if (!(window.clutchTunnel && window.clutchTunnel.connect)) return false;
+    dialing = true;
+    try {
+      const res = await window.clutchTunnel.connect({
+        host: m.host,
+        user: m.user,
+        port: Number(m.port) || 22
+      });
+      return !!(res && res.ok);
+    } catch (e) {
+      return false;
+    } finally {
+      dialing = false;
+    }
+  }
+  var autoConnectDoor = null;
+  function onTabAutoConnect(fn) {
+    autoConnectDoor = fn;
+  }
+  var autoDial = null;
+  function autoConnect(m) {
+    if (!autoConnectDoor) {
+      return dialMachine(m).then(
+        (ok) => ok ? "" : `could not reconnect to ${machineLabel(m)} \u2014 open the file picker and press Connect`
+      );
+    }
+    if (autoDial && sameMachine(autoDial.m, m)) return autoDial.p;
+    const p = autoConnectDoor(m).finally(() => {
+      if (autoDial && autoDial.p === p) autoDial = null;
+    });
+    autoDial = { m, p };
+    return p;
+  }
+  async function prepareTabMachine(tab) {
+    const m = tab.machine;
+    if (m === null) {
+      await pinSlot(tab.id, { kind: "local" });
+      return "";
+    }
+    if (!m) return "";
+    const now = await tunnelNow();
+    if (now.active && sameMachine(now.target, m)) {
+      await pinSlot(tab.id, { kind: "tunnel" });
+      return "";
+    }
+    const name = tab.name || tab.path;
+    if (now.active) {
+      return `${name} lives on ${machineLabel(m)}, but this window is on ${now.target ? machineLabel(now.target) : "another machine"} \u2014 connect to ${machineLabel(m)} in the file picker to open it`;
+    }
+    const why = await autoConnect(m);
+    if (why) return `${name} lives on ${machineLabel(m)} \u2014 ${why}`;
+    await pinSlot(tab.id, { kind: "tunnel" });
+    return "";
+  }
+  async function noteTabMachine(tab) {
+    if (!(window.clutchApi && window.clutchApi.slotStatus)) return;
+    let st;
+    try {
+      st = await window.clutchApi.slotStatus(tab.id);
+    } catch (e) {
+      return;
+    }
+    if (!st || !st.claimed) return;
+    let next = tab.machine;
+    if (st.kind === "local") next = null;
+    else if (st.kind === "tunnel") {
+      const now = await tunnelNow();
+      if (now.target) next = now.target;
+    }
+    if (sameMachine(tab.machine, next)) return;
+    tab.machine = next;
+    announceTabState();
+    if (persistTabs) {
+      try {
+        persistTabs();
+      } catch (e) {
+      }
+    }
+  }
+  var persistTabs = null;
+  function onTabsPersist(cb) {
+    persistTabs = cb;
+  }
+  function noSessionThere(tab) {
+    return `${tab.name || tab.path} lives on ${machineLabel(tab.machine)} \u2014 no session there right now: connect to it in the file picker to open it`;
+  }
+  async function localClaimHasNoFile(tab) {
+    if (!(window.clutchApi && window.clutchApi.slotStatus)) return false;
+    let st;
+    try {
+      st = await window.clutchApi.slotStatus(tab.id);
+    } catch (e) {
+      return false;
+    }
+    if (!st || st.kind !== "local") return false;
+    const dir = String(tab.path || "").replace(/\/[^/]*$/, "");
+    if (!dir) return false;
+    try {
+      const r = await fetch(tab.base + "/api/fs/stat?path=" + encodeURIComponent(dir));
+      if (!r.ok) return false;
+      const body = await r.json();
+      return !!(body && body.type === "none");
+    } catch (e) {
+      return false;
+    }
+  }
+  async function claimTab(tab) {
+    if (!tab) return null;
+    if (!(window.clutchApi && window.clutchApi.baseUrl)) {
+      return tab.base || null;
+    }
+    const why = await prepareTabMachine(tab);
+    if (why) {
+      tab.base = null;
+      tab.unreachable = why;
+      return null;
+    }
+    try {
+      const base = await window.clutchApi.baseUrl(tab.id);
+      tab.base = base ? String(base).replace(/\/+$/, "") : null;
+      if (!tab.base) {
+        if (tab.machine) tab.unreachable = noSessionThere(tab);
+        return null;
+      }
+      tab.unreachable = null;
+      if (tab.machine && await localClaimHasNoFile(tab)) {
+        await releaseTab(tab);
+        tab.unreachable = noSessionThere(tab);
+        return null;
+      }
+      return tab.base;
+    } catch (e) {
+      console.warn("[slot] claim failed", tab.id, e);
+      tab.base = null;
+      return null;
+    }
+  }
+  async function releaseTab(tab) {
+    if (!tab) return;
+    unwatchTab(tab.id);
+    tab.running = false;
+    tab.needsInput = false;
+    if (window.clutchApi && window.clutchApi.releaseSession) {
+      try {
+        await window.clutchApi.releaseSession(tab.id);
+      } catch (e) {
+      }
+    }
+    tab.base = null;
+  }
+  function adoptBase(base) {
+    const clean = base ? String(base).replace(/\/+$/, "") : "";
+    state.apiBase = clean || null;
+    try {
+      if (clean) sessionStorage.setItem("clutch_api_url", clean);
+    } catch (e) {
+    }
+    document.dispatchEvent(new CustomEvent("clutch:backend-changed", { detail: state.apiBase }));
+  }
+  var mementos = /* @__PURE__ */ new Map();
+  var domCaches = /* @__PURE__ */ new Map();
+  var MEMENTO_KEY = (slotId) => "clutch_view:" + slotId;
+  function readStoredMemento(slotId) {
+    try {
+      const raw = localStorage.getItem(MEMENTO_KEY(slotId));
+      if (!raw) return null;
+      const m = JSON.parse(raw);
+      if (!m || typeof m !== "object" || typeof m.high !== "number") return null;
+      return {
+        scroll: typeof m.scroll === "number" ? m.scroll : 0,
+        high: typeof m.high === "number" ? m.high : null,
+        oldest: typeof m.oldest === "number" ? m.oldest : null,
+        older: typeof m.older === "number" ? m.older : 0,
+        workdir: typeof m.workdir === "string" ? m.workdir : ""
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+  function saveMemento(slotId, extra = {}) {
+    if (!slotId) return;
+    const stream2 = document.getElementById("stream");
+    if (!stream2 || !paneShowsTab(slotId)) return;
+    const m = {
+      scroll: stream2.scrollTop,
+      high: state.streamHighOffset,
+      oldest: state.oldestOffset,
+      older: typeof extra.older === "number" ? extra.older : 0,
+      workdir: extra.workdir || ""
+    };
+    mementos.set(slotId, m);
+    try {
+      localStorage.setItem(MEMENTO_KEY(slotId), JSON.stringify(m));
+    } catch (e) {
+    }
+  }
+  function mementoOf(slotId) {
+    return mementos.get(slotId) || readStoredMemento(slotId);
+  }
+  function forgetMemento(slotId) {
+    mementos.delete(slotId);
+    try {
+      localStorage.removeItem(MEMENTO_KEY(slotId));
+    } catch (e) {
+    }
+  }
+  function restoreMemento(slotId) {
+    const m = mementoOf(slotId);
+    const stream2 = document.getElementById("stream");
+    if (!m || !stream2) return null;
+    const end = Math.max(0, stream2.scrollHeight - stream2.clientHeight);
+    stream2.scrollTop = Math.max(0, Math.min(m.scroll, end));
+    return stream2.scrollTop;
+  }
+  function viewIsSettled(eventsEl2) {
+    if (!eventsEl2.children.length) return false;
+    if (eventsEl2.querySelector(".stream, .live")) return false;
+    for (const el of Array.from(eventsEl2.querySelectorAll(".fold, pre"))) {
+      if (el.style.height || el.style.gridTemplateRows) return false;
+    }
+    return true;
+  }
+  function saveDomCache(slotId) {
+    if (!slotId) return;
+    const eventsEl2 = document.getElementById("events");
+    const stream2 = document.getElementById("stream");
+    if (!eventsEl2 || !stream2 || !paneShowsTab(slotId) || !viewIsSettled(eventsEl2)) {
+      domCaches.delete(slotId);
+      return;
+    }
+    const streamScrollTop = stream2.scrollTop;
+    const nodes = document.createDocumentFragment();
+    while (eventsEl2.firstChild) nodes.appendChild(eventsEl2.firstChild);
+    domCaches.set(slotId, {
+      nodes,
+      streamScrollTop,
+      stateSnapshot: {
+        streamHighOffset: state.streamHighOffset,
+        oldestOffset: state.oldestOffset,
+        followTail: state.followTail,
+        runSettled: state.runSettled,
+        // the live pointers go with the nodes they name (see DomCache). They are
+        // read here, while this tab is still the pane's, and put back by
+        // restoreDomCache when it is the pane's again.
+        lastTextEl: state.lastTextEl,
+        lastTextContent: state.lastTextContent,
+        textSealed: state.textSealed,
+        // ...and the block a record drew, for the same reason: the final that repeats
+        // it is replayed into the restored pane, and only this pointer says the answer
+        // is already on the page (stream-events.ts)
+        lastRecordEl: state.lastRecordEl,
+        lastRecordText: state.lastRecordText,
+        thinkingEl: state.thinkingEl,
+        thinkingContent: state.thinkingContent,
+        toolGroupEl: state.toolGroupEl,
+        compactionEl: state.compactionEl,
+        retryNoteEl: state.retryNoteEl
+      }
+    });
+  }
+  function restoreDomCache(slotId) {
+    if (!slotId) return false;
+    const cache = domCaches.get(slotId);
+    const eventsEl2 = document.getElementById("events");
+    const stream2 = document.getElementById("stream");
+    if (!cache || !eventsEl2 || !stream2) return false;
+    domCaches.delete(slotId);
+    for (const node of Array.from(cache.nodes.childNodes)) {
+      if (node.nodeType === 1) node.dataset.restored = "1";
+    }
+    eventsEl2.replaceChildren(cache.nodes);
+    const end = Math.max(0, stream2.scrollHeight - stream2.clientHeight);
+    stream2.scrollTop = Math.max(0, Math.min(cache.streamScrollTop, end));
+    const s = cache.stateSnapshot;
+    state.streamHighOffset = s.streamHighOffset;
+    state.oldestOffset = s.oldestOffset;
+    state.followTail = s.followTail;
+    state.runSettled = s.runSettled;
+    state.lastTextEl = s.lastTextEl || null;
+    state.lastTextContent = s.lastTextContent || "";
+    state.textSealed = !!s.textSealed;
+    state.lastRecordEl = s.lastRecordEl || null;
+    state.lastRecordText = s.lastRecordText || "";
+    state.thinkingEl = s.thinkingEl || null;
+    state.thinkingContent = s.thinkingContent || "";
+    state.toolGroupEl = s.toolGroupEl || null;
+    state.compactionEl = s.compactionEl || null;
+    state.retryNoteEl = s.retryNoteEl || null;
+    if (state.textRenderRaf) {
+      cancelAnimationFrame(state.textRenderRaf);
+      state.textRenderRaf = 0;
+    }
+    if (state.thinkingRenderRaf) {
+      cancelAnimationFrame(state.thinkingRenderRaf);
+      state.thinkingRenderRaf = 0;
+    }
+    return true;
+  }
+  function forgetDomCache(slotId) {
+    domCaches.delete(slotId);
+  }
+  var watchers = /* @__PURE__ */ new Map();
+  function watchTab(tab) {
+    if (!tab || !tab.running || !tab.base || !tab.path) return;
+    if (watchers.has(tab.id)) return;
+    let es2;
+    try {
+      const qs = new URLSearchParams();
+      qs.set("project", tab.projectKey || tab.path);
+      qs.set("replay", "0");
+      es2 = new EventSource(tab.base + "/api/events?" + qs.toString());
+    } catch (e) {
+      return;
+    }
+    es2.onmessage = (m) => {
+      let ev;
+      try {
+        ev = JSON.parse(m.data);
+      } catch (e) {
+        return;
+      }
+      let changed = false;
+      if (ev && ev.type === "state_update" && ev.key === "execution_status") {
+        const running = ev.value === "running" || ev.value === "waiting";
+        if (tab.running !== running) {
+          tab.running = running;
+          changed = true;
+        }
+      } else if (ev && ev.type === "permission_request") {
+        if (!tab.needsInput) {
+          tab.needsInput = true;
+          changed = true;
+        }
+      } else if (ev && ev.type === "final") {
+        if (tab.running || tab.needsInput) {
+          tab.running = false;
+          tab.needsInput = false;
+          changed = true;
+        }
+        unwatchTab(tab.id);
+      }
+      if (changed) announceTabState();
+    };
+    es2.onerror = () => {
+    };
+    watchers.set(tab.id, es2);
+  }
+  function rewatchTab(tab) {
+    if (!tab) return;
+    unwatchTab(tab.id);
+    if (!tab.running) return;
+    watchTab(tab);
+  }
+  function unwatchTab(slotId) {
+    const es2 = watchers.get(slotId);
+    if (!es2) return;
+    watchers.delete(slotId);
+    try {
+      es2.close();
+    } catch (e) {
+    }
+  }
+  function unwatchAll() {
+    for (const id of [...watchers.keys()]) unwatchTab(id);
+  }
+  function noteTabEvent(slotId, ev) {
+    const tab = tabForSlot(slotId);
+    if (!tab || !ev || typeof ev !== "object") return false;
+    let changed = false;
+    if (ev.type === "state_update" && ev.key === "execution_status") {
+      const running = ev.value === "running" || ev.value === "waiting";
+      if (tab.running !== running) {
+        tab.running = running;
+        changed = true;
+      }
+    } else if (ev.type === "permission_request") {
+      if (!tab.needsInput) {
+        tab.needsInput = true;
+        changed = true;
+      }
+    } else if (ev.type === "final") {
+      if (tab.running || tab.needsInput) {
+        tab.running = false;
+        tab.needsInput = false;
+        changed = true;
+      }
+    }
+    if (changed) announceTabState();
+    return true;
+  }
+  function setTabRunning(slotId, running) {
+    const tab = tabForSlot(slotId);
+    if (!tab) return;
+    if (tab.running === running) return;
+    tab.running = running;
+    announceTabState();
+  }
+
   // src/renderer/fs-browser.ts
   var fsModal = $("#fs-modal");
   var fsMode = "open";
@@ -639,7 +1334,7 @@
     $("#fs-mkdir-btn").disabled = true;
     $("#fs-path-input").disabled = false;
     fsModal.classList.remove("hidden", "closing");
-    const settled = busy ? Promise.resolve(null) : reconciledBackendUrl().catch((e) => {
+    const settled = busy ? Promise.resolve(null) : reconciledBackendUrl(activeSlotId()).catch((e) => {
       notice("could not reach the backend: " + (e && e.message ? e.message : e));
       return null;
     });
@@ -1759,698 +2454,6 @@
       if (taskHistoryNewer()) e.preventDefault();
     }
   });
-
-  // src/renderer/pane.ts
-  var HOP_SHARE = 0.4;
-  var REPLAY_PHASES = {
-    parse: [0, 0.5],
-    render: [0.5, 0.9],
-    typeset: [0.9, 1]
-  };
-  function paneWelcome() {
-    return { view: "welcome" };
-  }
-  function paneTab(tabId) {
-    return { view: "tab", tabId: tabId || "" };
-  }
-  function paneLoad(tabId, label, where = "") {
-    return { view: "load", tabId: tabId || "", label: label || "", where: where || "", progress: { pct: null, note: "" } };
-  }
-  function paneBlocked(tabId, text, machine = null) {
-    return {
-      view: "blocked",
-      tabId: tabId || null,
-      text: text || "",
-      machine: machine || null,
-      shown: true
-    };
-  }
-  var pane = paneWelcome();
-  var listeners = [];
-  function currentPane() {
-    return pane;
-  }
-  function paneShowsTab(tabId) {
-    return pane.view === "tab" && !!tabId && pane.tabId === tabId;
-  }
-  function paneBlockedTabId() {
-    return pane.view === "blocked" ? pane.tabId : null;
-  }
-  function paneLoadPct() {
-    return pane.view === "load" && pane.progress ? pane.progress.pct : null;
-  }
-  function onPaneChange(fn) {
-    listeners.push(fn);
-  }
-  function setPane(next) {
-    pane = next;
-    render();
-    for (const fn of listeners) fn(pane);
-  }
-  function byId(id) {
-    return document.getElementById(id);
-  }
-  function render() {
-    const state2 = pane;
-    const stream2 = byId("stream");
-    if (stream2) {
-      stream2.dataset.pane = state2.view;
-      stream2.dataset.tabId = state2.view === "tab" || state2.view === "load" ? state2.tabId : "";
-      stream2.classList.toggle("loading", state2.view === "load");
-    }
-    const visible = state2.view === "blocked" && !state2.shown ? "" : state2.view;
-    for (const el of Array.from(document.querySelectorAll("[data-view]"))) {
-      el.classList.toggle("hidden", el.getAttribute("data-view") !== visible);
-    }
-    if (state2.view === "load") renderLoad(state2);
-    else stopBar();
-    if (state2.view === "blocked") renderBlocked(state2);
-    if (state2.view !== "tab") {
-      const jump = byId("jump-bottom");
-      if (jump) jump.classList.add("hidden");
-    }
-  }
-  function renderLoad(state2) {
-    const title = byId("tab-load-title");
-    if (title) title.textContent = state2.label;
-    const where = byId("tab-load-where");
-    if (where) where.textContent = state2.where;
-    const barEl = byId("open-progress");
-    if (!barEl) return;
-    const progress = state2.progress;
-    barEl.classList.toggle("hidden", !progress);
-    if (!progress) {
-      stopBar();
-      return;
-    }
-    const note = byId("open-progress-note");
-    if (note) note.textContent = progress.note || "";
-    const fill = barEl.querySelector(".open-progress-fill");
-    const label = barEl.querySelector(".open-progress-label");
-    if (!fill) return;
-    if (progress.pct === null) {
-      stopBar();
-      fill.classList.add("indeterminate");
-      fill.style.width = "";
-      if (label) label.textContent = "";
-      return;
-    }
-    const whole = Math.round(Math.max(0, Math.min(100, progress.pct)));
-    fill.classList.remove("indeterminate");
-    const fresh = !bar || bar.tabId !== state2.tabId;
-    bar = { fill, label, tabId: state2.tabId };
-    if (fresh) {
-      barShown = 0;
-      barPainted = -1;
-    }
-    barTarget = whole;
-    paintBar();
-    if (!barStop && barShown !== barTarget) {
-      barAt = 0;
-      barStop = nextFrame(barFrame);
-    }
-  }
-  var CHASE_TAU_MS = 130;
-  var CHASE_MIN_PCT = 0.35;
-  function chasePct(shown, target, dtMs) {
-    const to = Math.max(0, Math.min(100, Number(target) || 0));
-    const from = Math.max(0, Math.min(100, Number(shown) || 0));
-    if (!(to > from)) return to;
-    const k = 1 - Math.exp(-Math.max(0, Number(dtMs) || 0) / CHASE_TAU_MS);
-    return Math.min(to, Math.max(from + (to - from) * k, from + CHASE_MIN_PCT));
-  }
-  var bar = null;
-  var barTarget = 0;
-  var barShown = 0;
-  var barPainted = -1;
-  var barStop = null;
-  var barAt = 0;
-  function nextFrame(cb) {
-    if (typeof requestAnimationFrame === "function") {
-      const id2 = requestAnimationFrame(cb);
-      return () => cancelAnimationFrame(id2);
-    }
-    const id = setTimeout(() => cb(Date.now()), 16);
-    return () => clearTimeout(id);
-  }
-  function paintBar() {
-    if (!bar) return;
-    const whole = Math.round(barShown);
-    if (whole === barPainted) return;
-    barPainted = whole;
-    bar.fill.style.width = whole + "%";
-    if (bar.label) bar.label.textContent = whole + "%";
-  }
-  function barFrame(now) {
-    barStop = null;
-    if (!bar || pane.view !== "load") {
-      bar = null;
-      return;
-    }
-    const dt = barAt ? Math.max(1, now - barAt) : 16;
-    barAt = now;
-    barShown = chasePct(barShown, barTarget, dt);
-    paintBar();
-    if (barShown < barTarget) barStop = nextFrame(barFrame);
-  }
-  function stopBar() {
-    if (barStop) barStop();
-    barStop = null;
-    bar = null;
-    barTarget = 0;
-    barShown = 0;
-    barPainted = -1;
-    barAt = 0;
-  }
-  function renderBlocked(state2) {
-    const text = byId("tab-blocked-text");
-    if (text) text.textContent = state2.text;
-  }
-  function setProgress(progress) {
-    if (pane.view !== "load") return;
-    setPane({ ...pane, progress });
-  }
-  function reportHopStage(stagePct, note) {
-    setProgress({
-      pct: stagePct === null ? null : stagePct * HOP_SHARE,
-      note: note || ""
-    });
-  }
-  function paneHopSettled(up) {
-    if (pane.view !== "load") return;
-    setProgress(up ? { pct: paneLoadPct(), note: "Opening project\u2026" } : null);
-  }
-  function paneReplayProgress(phase, frac) {
-    if (pane.view !== "load") return;
-    const [from, to] = REPLAY_PHASES[phase];
-    const f = Math.max(0, Math.min(1, Number(frac) || 0));
-    const start = paneLoadPct() ?? 0;
-    const end = start + (100 - start) * (from + (to - from) * f);
-    setProgress({ pct: end, note: pane.progress ? pane.progress.note : "" });
-  }
-
-  // src/renderer/slots.ts
-  var SLOT_EVENT = "clutch:tab-state";
-  function activeTab() {
-    if (!state.activeTabId) return null;
-    return state.tabs.find((t) => t.id === state.activeTabId) || null;
-  }
-  function activeSlotId() {
-    return state.activeTabId || "";
-  }
-  function tabForSlot(slotId) {
-    if (!slotId) return null;
-    return state.tabs.find((t) => t.id === slotId) || null;
-  }
-  function findTabByPath(path) {
-    return state.tabs.find((t) => t.path === path || t.projectKey === path) || null;
-  }
-  function ensureTab(path, name = "") {
-    const existing = path ? findTabByPath(path) : null;
-    if (existing) return existing;
-    const tab = {
-      id: "tab-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      path,
-      name: name || (path ? path.split("/").pop() || path : ""),
-      base: null,
-      running: false,
-      needsInput: false
-    };
-    state.tabs.push(tab);
-    return tab;
-  }
-  function announceTabState() {
-    document.dispatchEvent(new CustomEvent(SLOT_EVENT));
-  }
-  function machineLabel(m) {
-    if (!m) return "this machine";
-    return m.user ? `${m.user}@${m.host}:${m.port}` : `${m.host}:${m.port}`;
-  }
-  function asMachine(v) {
-    if (v === void 0) return void 0;
-    if (v === null || v === false) return null;
-    if (typeof v !== "object" || !v.host) return void 0;
-    return {
-      host: String(v.host),
-      user: String(v.user || ""),
-      port: String(v.port === void 0 || v.port === null || v.port === "" ? 22 : v.port)
-    };
-  }
-  function sameMachine(a, b) {
-    if (a === void 0 || b === void 0) return a === b;
-    if (a === null || b === null) return a === b;
-    return a.host === b.host && a.user === b.user && String(a.port) === String(b.port);
-  }
-  function tunnelTarget(ts) {
-    const t = ts && ts.target;
-    if (!t || !t.host) return null;
-    return { host: String(t.host), user: String(t.user || ""), port: String(t.port || 22) };
-  }
-  async function tunnelNow() {
-    if (!(window.clutchTunnel && window.clutchTunnel.status)) return { active: false, target: null };
-    try {
-      const s = await window.clutchTunnel.status();
-      return { active: !!(s && s.active), target: tunnelTarget(s) };
-    } catch (e) {
-      return { active: false, target: null };
-    }
-  }
-  async function pinSlot(slotId, target) {
-    if (!(window.clutchApi && window.clutchApi.setSlotTarget)) return;
-    try {
-      await window.clutchApi.setSlotTarget(slotId, target);
-    } catch (e) {
-    }
-  }
-  function rememberedMachine() {
-    try {
-      const list = JSON.parse(localStorage.getItem("clutch_ssh_connections") || "[]");
-      const first = Array.isArray(list) ? list.find((c) => c && c.host) : null;
-      if (first) return asMachine(first);
-    } catch (e) {
-    }
-    try {
-      const host = localStorage.getItem("clutch_ssh_host");
-      if (!host) return null;
-      return {
-        host,
-        user: localStorage.getItem("clutch_ssh_user") || "",
-        port: String(localStorage.getItem("clutch_ssh_port") || 22)
-      };
-    } catch (e) {
-      return null;
-    }
-  }
-  function hopUpFor(tab) {
-    if (!tab || !tab.machine) return true;
-    if (!tab.base) return false;
-    try {
-      if (localStorage.getItem("clutch_ssh_connected") !== "1") return false;
-    } catch (e) {
-      return false;
-    }
-    return sameMachine(rememberedMachine(), tab.machine);
-  }
-  var dialing = false;
-  async function dialMachine(m) {
-    if (!m || dialing) return false;
-    if (!(window.clutchTunnel && window.clutchTunnel.connect)) return false;
-    dialing = true;
-    try {
-      const res = await window.clutchTunnel.connect({
-        host: m.host,
-        user: m.user,
-        port: Number(m.port) || 22
-      });
-      return !!(res && res.ok);
-    } catch (e) {
-      return false;
-    } finally {
-      dialing = false;
-    }
-  }
-  var autoConnectDoor = null;
-  function onTabAutoConnect(fn) {
-    autoConnectDoor = fn;
-  }
-  var autoDial = null;
-  function autoConnect(m) {
-    if (!autoConnectDoor) {
-      return dialMachine(m).then(
-        (ok) => ok ? "" : `could not reconnect to ${machineLabel(m)} \u2014 open the file picker and press Connect`
-      );
-    }
-    if (autoDial && sameMachine(autoDial.m, m)) return autoDial.p;
-    const p = autoConnectDoor(m).finally(() => {
-      if (autoDial && autoDial.p === p) autoDial = null;
-    });
-    autoDial = { m, p };
-    return p;
-  }
-  async function prepareTabMachine(tab) {
-    const m = tab.machine;
-    if (m === null) {
-      await pinSlot(tab.id, { kind: "local" });
-      return "";
-    }
-    if (!m) return "";
-    const now = await tunnelNow();
-    if (now.active && sameMachine(now.target, m)) {
-      await pinSlot(tab.id, { kind: "tunnel" });
-      return "";
-    }
-    const name = tab.name || tab.path;
-    if (now.active) {
-      return `${name} lives on ${machineLabel(m)}, but this window is on ${now.target ? machineLabel(now.target) : "another machine"} \u2014 connect to ${machineLabel(m)} in the file picker to open it`;
-    }
-    const why = await autoConnect(m);
-    if (why) return `${name} lives on ${machineLabel(m)} \u2014 ${why}`;
-    await pinSlot(tab.id, { kind: "tunnel" });
-    return "";
-  }
-  async function noteTabMachine(tab) {
-    if (!(window.clutchApi && window.clutchApi.slotStatus)) return;
-    let st;
-    try {
-      st = await window.clutchApi.slotStatus(tab.id);
-    } catch (e) {
-      return;
-    }
-    if (!st || !st.claimed) return;
-    let next = tab.machine;
-    if (st.kind === "local") next = null;
-    else if (st.kind === "tunnel") {
-      const now = await tunnelNow();
-      if (now.target) next = now.target;
-    }
-    if (sameMachine(tab.machine, next)) return;
-    tab.machine = next;
-    announceTabState();
-    if (persistTabs) {
-      try {
-        persistTabs();
-      } catch (e) {
-      }
-    }
-  }
-  var persistTabs = null;
-  function onTabsPersist(cb) {
-    persistTabs = cb;
-  }
-  function noSessionThere(tab) {
-    return `${tab.name || tab.path} lives on ${machineLabel(tab.machine)} \u2014 no session there right now: connect to it in the file picker to open it`;
-  }
-  async function localClaimHasNoFile(tab) {
-    if (!(window.clutchApi && window.clutchApi.slotStatus)) return false;
-    let st;
-    try {
-      st = await window.clutchApi.slotStatus(tab.id);
-    } catch (e) {
-      return false;
-    }
-    if (!st || st.kind !== "local") return false;
-    const dir = String(tab.path || "").replace(/\/[^/]*$/, "");
-    if (!dir) return false;
-    try {
-      const r = await fetch(tab.base + "/api/fs/stat?path=" + encodeURIComponent(dir));
-      if (!r.ok) return false;
-      const body = await r.json();
-      return !!(body && body.type === "none");
-    } catch (e) {
-      return false;
-    }
-  }
-  async function claimTab(tab) {
-    if (!tab) return null;
-    if (!(window.clutchApi && window.clutchApi.baseUrl)) {
-      return tab.base || null;
-    }
-    const why = await prepareTabMachine(tab);
-    if (why) {
-      tab.base = null;
-      tab.unreachable = why;
-      return null;
-    }
-    try {
-      const base = await window.clutchApi.baseUrl(tab.id);
-      tab.base = base ? String(base).replace(/\/+$/, "") : null;
-      if (!tab.base) {
-        if (tab.machine) tab.unreachable = noSessionThere(tab);
-        return null;
-      }
-      tab.unreachable = null;
-      if (tab.machine && await localClaimHasNoFile(tab)) {
-        await releaseTab(tab);
-        tab.unreachable = noSessionThere(tab);
-        return null;
-      }
-      return tab.base;
-    } catch (e) {
-      console.warn("[slot] claim failed", tab.id, e);
-      tab.base = null;
-      return null;
-    }
-  }
-  async function releaseTab(tab) {
-    if (!tab) return;
-    unwatchTab(tab.id);
-    tab.running = false;
-    tab.needsInput = false;
-    if (window.clutchApi && window.clutchApi.releaseSession) {
-      try {
-        await window.clutchApi.releaseSession(tab.id);
-      } catch (e) {
-      }
-    }
-    tab.base = null;
-  }
-  function adoptBase(base) {
-    const clean = base ? String(base).replace(/\/+$/, "") : "";
-    state.apiBase = clean || null;
-    try {
-      if (clean) sessionStorage.setItem("clutch_api_url", clean);
-    } catch (e) {
-    }
-    document.dispatchEvent(new CustomEvent("clutch:backend-changed", { detail: state.apiBase }));
-  }
-  var mementos = /* @__PURE__ */ new Map();
-  var domCaches = /* @__PURE__ */ new Map();
-  var MEMENTO_KEY = (slotId) => "clutch_view:" + slotId;
-  function readStoredMemento(slotId) {
-    try {
-      const raw = localStorage.getItem(MEMENTO_KEY(slotId));
-      if (!raw) return null;
-      const m = JSON.parse(raw);
-      if (!m || typeof m !== "object" || typeof m.high !== "number") return null;
-      return {
-        scroll: typeof m.scroll === "number" ? m.scroll : 0,
-        high: typeof m.high === "number" ? m.high : null,
-        oldest: typeof m.oldest === "number" ? m.oldest : null,
-        older: typeof m.older === "number" ? m.older : 0,
-        workdir: typeof m.workdir === "string" ? m.workdir : ""
-      };
-    } catch (e) {
-      return null;
-    }
-  }
-  function saveMemento(slotId, extra = {}) {
-    if (!slotId) return;
-    const stream2 = document.getElementById("stream");
-    if (!stream2 || !paneShowsTab(slotId)) return;
-    const m = {
-      scroll: stream2.scrollTop,
-      high: state.streamHighOffset,
-      oldest: state.oldestOffset,
-      older: typeof extra.older === "number" ? extra.older : 0,
-      workdir: extra.workdir || ""
-    };
-    mementos.set(slotId, m);
-    try {
-      localStorage.setItem(MEMENTO_KEY(slotId), JSON.stringify(m));
-    } catch (e) {
-    }
-  }
-  function mementoOf(slotId) {
-    return mementos.get(slotId) || readStoredMemento(slotId);
-  }
-  function forgetMemento(slotId) {
-    mementos.delete(slotId);
-    try {
-      localStorage.removeItem(MEMENTO_KEY(slotId));
-    } catch (e) {
-    }
-  }
-  function restoreMemento(slotId) {
-    const m = mementoOf(slotId);
-    const stream2 = document.getElementById("stream");
-    if (!m || !stream2) return null;
-    const end = Math.max(0, stream2.scrollHeight - stream2.clientHeight);
-    stream2.scrollTop = Math.max(0, Math.min(m.scroll, end));
-    return stream2.scrollTop;
-  }
-  function viewIsSettled(eventsEl2) {
-    if (!eventsEl2.children.length) return false;
-    if (eventsEl2.querySelector(".stream, .live")) return false;
-    for (const el of Array.from(eventsEl2.querySelectorAll(".fold, pre"))) {
-      if (el.style.height || el.style.gridTemplateRows) return false;
-    }
-    return true;
-  }
-  function saveDomCache(slotId) {
-    if (!slotId) return;
-    const eventsEl2 = document.getElementById("events");
-    const stream2 = document.getElementById("stream");
-    if (!eventsEl2 || !stream2 || !paneShowsTab(slotId) || !viewIsSettled(eventsEl2)) {
-      domCaches.delete(slotId);
-      return;
-    }
-    const streamScrollTop = stream2.scrollTop;
-    const nodes = document.createDocumentFragment();
-    while (eventsEl2.firstChild) nodes.appendChild(eventsEl2.firstChild);
-    domCaches.set(slotId, {
-      nodes,
-      streamScrollTop,
-      stateSnapshot: {
-        streamHighOffset: state.streamHighOffset,
-        oldestOffset: state.oldestOffset,
-        followTail: state.followTail,
-        runSettled: state.runSettled,
-        // the live pointers go with the nodes they name (see DomCache). They are
-        // read here, while this tab is still the pane's, and put back by
-        // restoreDomCache when it is the pane's again.
-        lastTextEl: state.lastTextEl,
-        lastTextContent: state.lastTextContent,
-        textSealed: state.textSealed,
-        // ...and the block a record drew, for the same reason: the final that repeats
-        // it is replayed into the restored pane, and only this pointer says the answer
-        // is already on the page (stream-events.ts)
-        lastRecordEl: state.lastRecordEl,
-        lastRecordText: state.lastRecordText,
-        thinkingEl: state.thinkingEl,
-        thinkingContent: state.thinkingContent,
-        toolGroupEl: state.toolGroupEl,
-        compactionEl: state.compactionEl,
-        retryNoteEl: state.retryNoteEl
-      }
-    });
-  }
-  function restoreDomCache(slotId) {
-    if (!slotId) return false;
-    const cache = domCaches.get(slotId);
-    const eventsEl2 = document.getElementById("events");
-    const stream2 = document.getElementById("stream");
-    if (!cache || !eventsEl2 || !stream2) return false;
-    domCaches.delete(slotId);
-    for (const node of Array.from(cache.nodes.childNodes)) {
-      if (node.nodeType === 1) node.dataset.restored = "1";
-    }
-    eventsEl2.replaceChildren(cache.nodes);
-    const end = Math.max(0, stream2.scrollHeight - stream2.clientHeight);
-    stream2.scrollTop = Math.max(0, Math.min(cache.streamScrollTop, end));
-    const s = cache.stateSnapshot;
-    state.streamHighOffset = s.streamHighOffset;
-    state.oldestOffset = s.oldestOffset;
-    state.followTail = s.followTail;
-    state.runSettled = s.runSettled;
-    state.lastTextEl = s.lastTextEl || null;
-    state.lastTextContent = s.lastTextContent || "";
-    state.textSealed = !!s.textSealed;
-    state.lastRecordEl = s.lastRecordEl || null;
-    state.lastRecordText = s.lastRecordText || "";
-    state.thinkingEl = s.thinkingEl || null;
-    state.thinkingContent = s.thinkingContent || "";
-    state.toolGroupEl = s.toolGroupEl || null;
-    state.compactionEl = s.compactionEl || null;
-    state.retryNoteEl = s.retryNoteEl || null;
-    if (state.textRenderRaf) {
-      cancelAnimationFrame(state.textRenderRaf);
-      state.textRenderRaf = 0;
-    }
-    if (state.thinkingRenderRaf) {
-      cancelAnimationFrame(state.thinkingRenderRaf);
-      state.thinkingRenderRaf = 0;
-    }
-    return true;
-  }
-  function forgetDomCache(slotId) {
-    domCaches.delete(slotId);
-  }
-  var watchers = /* @__PURE__ */ new Map();
-  function watchTab(tab) {
-    if (!tab || !tab.running || !tab.base || !tab.path) return;
-    if (watchers.has(tab.id)) return;
-    let es2;
-    try {
-      const qs = new URLSearchParams();
-      qs.set("project", tab.projectKey || tab.path);
-      qs.set("replay", "0");
-      es2 = new EventSource(tab.base + "/api/events?" + qs.toString());
-    } catch (e) {
-      return;
-    }
-    es2.onmessage = (m) => {
-      let ev;
-      try {
-        ev = JSON.parse(m.data);
-      } catch (e) {
-        return;
-      }
-      let changed = false;
-      if (ev && ev.type === "state_update" && ev.key === "execution_status") {
-        const running = ev.value === "running" || ev.value === "waiting";
-        if (tab.running !== running) {
-          tab.running = running;
-          changed = true;
-        }
-      } else if (ev && ev.type === "permission_request") {
-        if (!tab.needsInput) {
-          tab.needsInput = true;
-          changed = true;
-        }
-      } else if (ev && ev.type === "final") {
-        if (tab.running || tab.needsInput) {
-          tab.running = false;
-          tab.needsInput = false;
-          changed = true;
-        }
-        unwatchTab(tab.id);
-      }
-      if (changed) announceTabState();
-    };
-    es2.onerror = () => {
-    };
-    watchers.set(tab.id, es2);
-  }
-  function rewatchTab(tab) {
-    if (!tab) return;
-    unwatchTab(tab.id);
-    if (!tab.running) return;
-    watchTab(tab);
-  }
-  function unwatchTab(slotId) {
-    const es2 = watchers.get(slotId);
-    if (!es2) return;
-    watchers.delete(slotId);
-    try {
-      es2.close();
-    } catch (e) {
-    }
-  }
-  function unwatchAll() {
-    for (const id of [...watchers.keys()]) unwatchTab(id);
-  }
-  function noteTabEvent(slotId, ev) {
-    const tab = tabForSlot(slotId);
-    if (!tab || !ev || typeof ev !== "object") return false;
-    let changed = false;
-    if (ev.type === "state_update" && ev.key === "execution_status") {
-      const running = ev.value === "running" || ev.value === "waiting";
-      if (tab.running !== running) {
-        tab.running = running;
-        changed = true;
-      }
-    } else if (ev.type === "permission_request") {
-      if (!tab.needsInput) {
-        tab.needsInput = true;
-        changed = true;
-      }
-    } else if (ev.type === "final") {
-      if (tab.running || tab.needsInput) {
-        tab.running = false;
-        tab.needsInput = false;
-        changed = true;
-      }
-    }
-    if (changed) announceTabState();
-    return true;
-  }
-  function setTabRunning(slotId, running) {
-    const tab = tabForSlot(slotId);
-    if (!tab) return;
-    if (tab.running === running) return;
-    tab.running = running;
-    announceTabState();
-  }
 
   // src/renderer/render-events.ts
   var driving = /* @__PURE__ */ new Set();
@@ -5945,6 +5948,14 @@
       await new Promise((r) => setTimeout(r, 150));
     }
   }
+  function sshTargetOf(v) {
+    if (!v || !v.startsWith("ssh:") || v.includes("__connected__")) return null;
+    const [user, hostPort2] = v.slice(4).split("@");
+    if (!user || !hostPort2) return null;
+    const [host, port] = hostPort2.split(":");
+    if (!host) return null;
+    return { user, host, port: port || "22" };
+  }
   async function handleSshConnect(host, user, port, statusEl) {
     connLostExitClear();
     if (!window.clutchTunnel) {
@@ -6070,7 +6081,11 @@
   }
   async function connConnect(v) {
     connLostExitClear();
-    if (!v || v === connOnValue) return;
+    if (!v) return;
+    if (v === connOnValue) {
+      const t = sshTargetOf(v);
+      if (!t || await hopLandedFor(t.host, t.user, t.port, 0)) return;
+    }
     if (v === "local") {
       if (localStorage.getItem("clutch_ssh_connected")) {
         localStorage.removeItem("clutch_ssh_connected");
@@ -6083,9 +6098,9 @@
       return;
     }
     if (v.startsWith("ssh:") && !v.includes("__connected__")) {
-      const [user, hostPort2] = v.slice(4).split("@");
-      const [host, port] = hostPort2.split(":");
-      await connSwitch(host, user, port || "22", connStatus);
+      const t = sshTargetOf(v);
+      if (!t) return;
+      await connSwitch(t.host, t.user, t.port, connStatus);
     }
   }
   connSelect.addEventListener("change", () => {
@@ -6224,16 +6239,25 @@
     } catch (e) {
     }
   }
-  async function reconciledBackendUrl() {
+  async function claimedByTunnel(slot) {
+    if (!(window.clutchApi && window.clutchApi.slotStatus)) return false;
+    try {
+      const st = await window.clutchApi.slotStatus(slot);
+      return Boolean(st && st.claimed && st.kind === "tunnel");
+    } catch (e) {
+      return false;
+    }
+  }
+  async function reconciledBackendUrl(slot = "") {
     if (!window.clutchTunnel) return null;
     if (connLostExitPending()) return null;
     const s = await window.clutchTunnel.status();
     const override = sessionStorage.getItem("clutch_api_url");
     const flag = localStorage.getItem("clutch_ssh_connected");
     if (s.active) {
-      const target = await hostSessionUrl();
+      const target = await hostSessionUrl(slot);
       if (target && override !== target) {
-        localStorage.setItem("clutch_ssh_connected", "1");
+        if (await claimedByTunnel(slot)) localStorage.setItem("clutch_ssh_connected", "1");
         return target;
       }
       return null;
@@ -6520,11 +6544,11 @@
   // src/renderer/app.ts
   var SUPERVISOR_BASE = "http://127.0.0.1:8890";
   var DEFAULT_BASE = SUPERVISOR_BASE;
-  async function hostSessionUrl() {
+  async function hostSessionUrl(slot = "") {
     if (connLostExitPending()) return null;
     if (!(window.clutchApi && window.clutchApi.baseUrl)) return null;
     try {
-      const b = await window.clutchApi.baseUrl();
+      const b = await window.clutchApi.baseUrl(slot);
       const clean = b ? String(b).replace(/\/+$/, "") : "";
       if (clean && clean !== SUPERVISOR_BASE) return clean;
     } catch {
@@ -6816,6 +6840,13 @@
     read: false,
     sessionBase: "",
     // the session machine supervisor URL, as the view resolved it
+    // WHICH machine the session half was asked of, as the view answered it
+    // (`list().target`): "none" until this tab has a session at all, then "local" or
+    // "remote". The difference is not cosmetic — no session YET is a wait (there is
+    // nobody to ask, and it ends by itself), while a machine that is there and will
+    // not answer is a failure — and the line under the list says the two in
+    // different weights (`plugReadNote`).
+    sessionKind: "",
     sessionError: null,
     // why the session machine cannot be AIMED at at all
     sessionHeldError: null,
@@ -6828,10 +6859,6 @@
     // why its own list did not arrive
     held: [],
     // the rows BOTH places hold, each tagged with its own `place`
-    // what the last automatic pass over the session machine did — the names it let
-    // go of and the ones it could not ({at, installed, retired, deferred, errors}),
-    // or null when no pass has run against the machine this window is about
-    pass: null,
     market: null,
     // {entries, errors, unreachable}
     marketError: null,
@@ -6857,9 +6884,9 @@
     result: null,
     // {ok, text} — the host's verdict on the last write
     versions: null,
-    // {name, rows, error} — the one open version list, as just read
+    // {name, place, rows, error} — the one open version list, as just read
     versionsPending: null,
-    // name whose version list is being read right now
+    // {name, place} whose version list is being read right now
     versionsSeq: 0,
     // which version-list read is the current one (closing bumps it)
     // the one open settings form: the schema its declaration carries, the values
@@ -6876,16 +6903,17 @@
     query: ""
     // the name filter, as typed (never persisted)
   };
+  var plugAskAgain = false;
   function plugPlace(item) {
     const place = item && item.place;
     if (place === "client") return "this client";
-    if (place === "session") return "this session";
+    if (place === "session") return "the session machine";
     return "";
   }
   function plugPlaceName(item) {
     const place = typeof item === "string" ? item : item && item.place;
     if (place === "client") return "this client";
-    if (place === "session") return "this session";
+    if (place === "session") return "the session machine";
     return "the place its declaration names";
   }
   function plugPlaceUnread(item) {
@@ -7014,7 +7042,7 @@
     const order = [];
     const slot = (name) => {
       if (!byName.has(name)) {
-        byName.set(name, { name, entry: null, held: null });
+        byName.set(name, { name, entry: null, held: null, stray: null });
         order.push(name);
       }
       return byName.get(name);
@@ -7022,7 +7050,17 @@
     for (const e of plugState.market ? plugState.market.entries : []) slot(e.name).entry = e;
     for (const h of plugState.held || []) {
       const cell = slot(h.name);
-      if (!cell.held || cell.entry && h.place === cell.entry.place) cell.held = h;
+      if (!cell.held) {
+        cell.held = h;
+        continue;
+      }
+      const wanted = cell.entry ? cell.entry.place : "";
+      if (wanted && h.place === wanted && cell.held.place !== wanted) {
+        cell.stray = cell.held;
+        cell.held = h;
+      } else if (!cell.stray) {
+        cell.stray = h;
+      }
     }
     return order.map((n) => byName.get(n));
   }
@@ -7146,9 +7184,9 @@
       }
     }
     if (entry) {
-      const place = plugPlace(entry);
-      if (place) meta.push("goes to " + place);
-      else if (plugPlaceUnread(entry)) meta.push("its place is its declaration's, read when something is installed from it");
+      if (!held && plugPlaceUnread(entry)) {
+        meta.push("its place is its declaration's, read when something is installed from it");
+      }
       if (entry.problem) meta.push("refused: " + entry.problem);
       if (!held) {
         const refuse = plugPlaceUnread(entry) ? "" : plugPlaceUnknown(entry.place);
@@ -7247,12 +7285,43 @@
       chips: plugItemChips(item),
       desc: plugItemDesc(item),
       actions: plugItemActions(item),
-      extra: plugItemExtra(item.held),
+      extra: plugItemExtra(item),
       state: plugItemState(item),
       // every fact the row no longer DRAWS is still answered, one hover away: the
       // list is for choosing, the tooltip for confirming (U-10)
       title: plugItemMeta(item).join(" \xB7 ")
     });
+  }
+  function plugStrayRow(stray) {
+    if (!stray) return null;
+    const box = document.createElement("div");
+    box.className = "plug-stray";
+    const line = document.createElement("div");
+    line.className = "plug-line";
+    line.textContent = `also held on ${plugPlace(stray)} \u2014 a leftover: this row is the copy its declaration names`;
+    box.appendChild(line);
+    box.appendChild(plugStrayButton(stray));
+    return box;
+  }
+  function plugStrayButton(stray) {
+    const busy2 = Boolean(plugState.busy && plugState.busy.name === stray.name);
+    const btn = document.createElement("button");
+    btn.className = "plug-remove";
+    btn.type = "button";
+    btn.textContent = busy2 ? plugBusyLabel(plugState.busy, "Letting go\u2026") : "Let it go";
+    const refuse = plugPlaceReady(stray.place);
+    if (refuse) {
+      btn.disabled = true;
+      btn.title = refuse;
+    } else if (plugState.busy) {
+      btn.disabled = true;
+      btn.title = plugState.busy.name + " is " + plugBusyWord(plugState.busy);
+    } else {
+      const version = stray.version ? " " + stray.version : "";
+      btn.title = `remove ${stray.name}${version} from ${plugPlace(stray)} \u2014 the copy this row is about stays where it is, and nothing is moved between the two`;
+    }
+    btn.addEventListener("click", () => plugRemove(stray));
+    return btn;
   }
   function plugItemState(item) {
     const row = [];
@@ -7271,38 +7340,32 @@
       return why ? "could not be read \u2014 " + why : "reading\u2026";
     }
     if (known && !shown) return "no component here matches this filter";
+    if (plugSessionMissing()) {
+      return "nothing this client holds, and this tab has no session yet \u2014 the session machine has not been asked";
+    }
     return "nothing is installed in either place, and the market lists nothing for this build";
+  }
+  function plugSessionMissing() {
+    return Boolean(plugState.sessionError) && plugState.sessionKind === "none";
+  }
+  function plugReadNote() {
+    const problem = plugReadProblem();
+    if (!problem) return { text: "", bad: false };
+    if (plugSessionMissing() && problem === plugState.sessionError) {
+      return {
+        text: "this tab has no session yet, so nothing is known about the session machine \u2014 the list is read as soon as it has one",
+        bad: false
+      };
+    }
+    return { text: problem, bad: true };
   }
   function plugReadProblem() {
     return plugState.sessionError || plugState.sessionHeldError || plugState.clientError || plugState.clientHeldError || plugState.marketError || null;
-  }
-  function plugPassLine() {
-    const pass = plugState.pass;
-    if (!pass) return null;
-    const retired = Array.isArray(pass.retired) ? pass.retired : [];
-    const errors = Array.isArray(pass.errors) ? pass.errors : [];
-    if (!retired.length && !errors.length) return null;
-    const at = pass.at ? new Date(pass.at).toTimeString().slice(0, 8) : "";
-    const parts = [];
-    if (retired.length) {
-      const names = retired.map((r) => `${r.name}${r.version ? " " + r.version : ""} (${r.reason})`).join("; ");
-      parts.push(`let go of ${retired.length === 1 ? "" : retired.length + " names: "}${names}`);
-    }
-    if (errors.length) {
-      const why = errors.map((e) => `${e.name || "the pass"} (${e.reason})`).join("; ");
-      parts.push(`could not let go of ${why}`);
-    }
-    const el = document.createElement("p");
-    el.className = "plug-pass";
-    el.textContent = `the components pass ${at ? "at " + at : "run at the last connect"} ${parts.join(", and ")}`;
-    return el;
   }
   function plugList() {
     const items = plugModel();
     const shown = items.filter(plugItemShown);
     const sec = plugSection("", "", shown.map(plugItemRow), plugEmptyText(items.length, shown.length));
-    const pass = plugPassLine();
-    if (pass) sec.appendChild(pass);
     for (const reason of plugState.market && plugState.market.errors || []) {
       const el = document.createElement("p");
       el.className = "plug-source-error";
@@ -7498,7 +7561,7 @@
   }
   function plugVersionsButton(held) {
     const open = Boolean(plugState.versions && plugState.versions.name === held.name);
-    const reading = plugState.versionsPending === held.name;
+    const reading = Boolean(plugState.versionsPending && plugState.versionsPending.name === held.name);
     const btn = document.createElement("button");
     btn.className = "plug-versions" + (open ? " open" : "");
     btn.type = "button";
@@ -7523,7 +7586,7 @@
     return btn;
   }
   function plugVersionRows(held) {
-    const reading = plugState.versionsPending === held.name;
+    const reading = Boolean(plugState.versionsPending && plugState.versionsPending.name === held.name);
     const state2 = plugState.versions;
     if (!reading && !(state2 && state2.name === held.name)) return null;
     const box = document.createElement("div");
@@ -7559,9 +7622,15 @@
     }
     return box;
   }
-  function plugItemExtra(held) {
-    if (!held) return null;
-    const boxes = [plugVersionRows(held), plugSettingsRows(held)].filter(Boolean);
+  function plugItemExtra(item) {
+    const boxes = [];
+    if (item.held) {
+      for (const box of [plugVersionRows(item.held), plugSettingsRows(item.held)]) {
+        if (box) boxes.push(box);
+      }
+    }
+    const stray = plugStrayRow(item.stray);
+    if (stray) boxes.push(stray);
     if (!boxes.length) return null;
     if (boxes.length === 1) return boxes[0];
     const wrap = document.createElement("div");
@@ -7587,10 +7656,10 @@
     } else {
       btn.title = `what ${held.name} lets you set on ${plugPlace(held)} \u2014 the values live with the component, on the machine that runs it`;
     }
-    btn.addEventListener("click", () => plugSettingsToggle(held.name));
+    btn.addEventListener("click", () => plugSettingsToggle(held.name, held.place));
     return btn;
   }
-  function plugSettingsToggle(name) {
+  function plugSettingsToggle(name, place) {
     if (plugState.form && plugState.form.name === name) {
       plugState.form = null;
       plugState.formPending = null;
@@ -7599,23 +7668,23 @@
       return;
     }
     plugState.form = null;
-    plugReadSettings(name);
+    plugReadSettings(name, place);
   }
-  function plugReadSettings(name) {
+  function plugReadSettings(name, place) {
     const api = window.clutchComponents;
     if (!api || !api.settings) return;
     const seq = ++plugState.formSeq;
     plugState.form = null;
     plugState.formPending = name;
     renderPlugins();
-    api.settings(name, plugState.slot).then((r) => {
+    api.settings(name, place, plugState.slot).then((r) => {
       if (seq !== plugState.formSeq) return;
       plugState.formPending = null;
-      plugState.form = r && r.ok ? { name, schema: r.schema || {}, values: r.values || {}, busy: null, error: null, saved: null } : { name, schema: {}, values: {}, busy: null, error: r && r.error || "the machine gave no answer", saved: null };
+      plugState.form = r && r.ok ? { name, place, schema: r.schema || {}, values: r.values || {}, busy: null, error: null, saved: null } : { name, place, schema: {}, values: {}, busy: null, error: r && r.error || "the machine gave no answer", saved: null };
     }).catch((e) => {
       if (seq !== plugState.formSeq) return;
       plugState.formPending = null;
-      plugState.form = { name, schema: {}, values: {}, busy: null, error: e && e.message || String(e), saved: null };
+      plugState.form = { name, place, schema: {}, values: {}, busy: null, error: e && e.message || String(e), saved: null };
     }).then(() => {
       if (seq === plugState.formSeq) renderPlugins();
     });
@@ -7629,7 +7698,7 @@
     form.error = null;
     form.saved = null;
     renderPlugins();
-    api.setSetting(name, { [key]: value }, plugState.slot).then((r) => {
+    api.setSetting(name, { [key]: value }, form.place, plugState.slot).then((r) => {
       if (seq !== plugState.formSeq) return;
       form.busy = null;
       if (r && r.ok) {
@@ -7916,7 +7985,7 @@
     renderPlugins();
     let res;
     try {
-      res = await api.remove(held.name, {}, plugState.slot);
+      res = await api.remove(held.name, {}, held.place, plugState.slot);
     } catch (e) {
       res = { ok: false, name: held.name, error: e && e.message || String(e) };
     }
@@ -7944,7 +8013,7 @@
     renderPlugins();
     let res;
     try {
-      res = await api.remove(held.name, { version }, plugState.slot);
+      res = await api.remove(held.name, { version }, held.place, plugState.slot);
     } catch (e) {
       res = { ok: false, name: held.name, error: e && e.message || String(e) };
     }
@@ -7956,17 +8025,17 @@
       plugRefreshVersions();
     }
   }
-  function plugReadVersions(name) {
+  function plugReadVersions(name, place) {
     const api = window.clutchComponents;
     if (!api || !api.versions) return;
     const seq = ++plugState.versionsSeq;
-    plugState.versionsPending = name;
+    plugState.versionsPending = { name, place };
     renderPlugins();
     let out;
-    Promise.resolve().then(() => api.versions(name, plugState.slot)).then((r) => {
-      out = { name, rows: r && Array.isArray(r.versions) ? r.versions : [], error: r && r.error || null };
+    Promise.resolve().then(() => api.versions(name, place, plugState.slot)).then((r) => {
+      out = { name, place, rows: r && Array.isArray(r.versions) ? r.versions : [], error: r && r.error || null };
     }).catch((e) => {
-      out = { name, rows: [], error: e && e.message || String(e) };
+      out = { name, place, rows: [], error: e && e.message || String(e) };
     }).then(() => {
       if (seq !== plugState.versionsSeq) return;
       plugState.versionsPending = null;
@@ -7975,18 +8044,19 @@
     });
   }
   function plugVersionsToggle(held) {
-    if (plugState.versionsPending === held.name) return;
+    const pending = plugState.versionsPending;
+    if (pending && pending.name === held.name && pending.place === held.place) return;
     if (plugState.versions && plugState.versions.name === held.name) {
       plugState.versions = null;
       plugState.versionsSeq++;
       renderPlugins();
       return;
     }
-    plugReadVersions(held.name);
+    plugReadVersions(held.name, held.place);
   }
   function plugRefreshVersions() {
-    const name = plugState.versions && plugState.versions.name || plugState.versionsPending;
-    if (name) plugReadVersions(name);
+    const cur = plugState.versions || plugState.versionsPending;
+    if (cur) plugReadVersions(cur.name, cur.place);
   }
   async function plugSwitch(held) {
     const api = window.clutchComponents;
@@ -7998,7 +8068,7 @@
     renderPlugins();
     let res;
     try {
-      res = await api.setDisabled(held.name, disabled, plugState.slot);
+      res = await api.setDisabled(held.name, disabled, held.place, plugState.slot);
     } catch (e) {
       res = { ok: false, name: held.name, error: e && e.message || String(e) };
     }
@@ -8100,13 +8170,13 @@
   }
   function renderPlugins() {
     plugBodyEl.innerHTML = "";
-    const problem = plugReadProblem();
-    const orphan = problem ? null : plugOrphanLine();
+    const said = plugReadNote();
+    const orphan = said.text ? null : plugOrphanLine();
     let note = "";
     let bad = false;
-    if (problem) {
-      note = problem;
-      bad = true;
+    if (said.text) {
+      note = said.text;
+      bad = said.bad;
     } else if (orphan) {
       note = orphan.text;
       bad = orphan.bad;
@@ -8125,7 +8195,10 @@
   }
   function plugRead({ force = false } = {}) {
     const api = window.clutchComponents;
-    if (!api || plugState.pending) return;
+    if (!api) return;
+    const live = activeSlotId();
+    if (live !== plugState.slot) plugSetSlot(live, { reread: false });
+    if (plugState.pending) return;
     const seq = ++plugState.readSeq;
     const slot = plugState.slot;
     const current = () => seq === plugState.readSeq;
@@ -8133,6 +8206,10 @@
       if (!current()) return;
       plugState.pending--;
       renderPlugins();
+      if (!plugState.pending && plugAskAgain) {
+        plugAskAgain = false;
+        plugRead();
+      }
     };
     plugState.sessionError = null;
     plugState.sessionHeldError = null;
@@ -8144,16 +8221,17 @@
     api.list(slot).then((r) => {
       if (!current()) return;
       plugState.sessionBase = r.sessionBase || "";
+      plugState.sessionKind = r.target || "";
       plugState.sessionError = r.error || null;
       plugState.sessionHeldError = r.inventoryError || null;
       plugState.client = Boolean(r.client);
       plugState.clientError = r.clientError || null;
       plugState.clientHeldError = r.clientInventoryError || null;
       plugState.held = Array.isArray(r.held) ? r.held : [];
-      plugState.pass = r.pass || null;
       plugState.read = true;
     }).catch((e) => {
       if (!current()) return;
+      plugState.sessionKind = "";
       plugState.sessionError = e && e.message || String(e);
       plugState.read = true;
     }).then(settled);
@@ -8232,16 +8310,16 @@
   function pluginTabShown() {
     plugRead();
   }
-  function plugSetSlot(slot) {
+  function plugSetSlot(slot, { reread = true } = {}) {
     const next = String(slot || "");
     if (next === plugState.slot) return;
     plugState.slot = next;
     plugState.read = false;
     plugState.sessionBase = "";
+    plugState.sessionKind = "";
     plugState.sessionError = null;
     plugState.sessionHeldError = null;
     plugState.held = [];
-    plugState.pass = null;
     plugState.result = null;
     plugState.busy = null;
     plugState.versions = null;
@@ -8252,8 +8330,9 @@
     plugState.formSeq++;
     plugState.versionsSeq++;
     plugState.pending = 0;
+    plugAskAgain = false;
     renderPlugins();
-    if (plugPaneVisible()) plugRead();
+    if (reread && plugPaneVisible()) plugRead();
   }
   function plugPaneVisible() {
     const group = $("#dock-plugins");
@@ -8261,7 +8340,17 @@
     if (!group || !side) return false;
     return !group.classList.contains("dock-collapsed") && !side.classList.contains("panel-hidden");
   }
+  function plugSessionArrived() {
+    if (!plugPaneVisible()) return;
+    plugState.result = null;
+    if (plugState.pending) {
+      plugAskAgain = true;
+      return;
+    }
+    plugRead();
+  }
   document.addEventListener("clutch:tab-state", () => plugSetSlot(activeSlotId()));
+  document.addEventListener("clutch:backend-changed", () => plugSessionArrived());
   plugSetSlot(activeSlotId());
   if (window.clutchApi && window.clutchApi.onBaseChanged) {
     window.clutchApi.onBaseChanged((change) => {

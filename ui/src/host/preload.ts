@@ -49,12 +49,14 @@ contextBridge.exposeInMainWorld("clutchComponents", {
   list: (slotId) => ipcRenderer.invoke("components:list", slotId),
   market: (opts) => ipcRenderer.invoke("components:market", opts),
   install: (name, slotId) => ipcRenderer.invoke("components:install", name, slotId),
-  versions: (name, slotId) => ipcRenderer.invoke("components:versions", name, slotId),
-  remove: (name, opts, slotId) => ipcRenderer.invoke("components:remove", name, opts, slotId),
-  setDisabled: (name, disabled, slotId) =>
-    ipcRenderer.invoke("components:set-disabled", name, disabled, slotId),
-  settings: (name, slotId) => ipcRenderer.invoke("components:settings", name, slotId),
-  setSetting: (name, values, slotId) => ipcRenderer.invoke("components:set-setting", name, values, slotId),
+  versions: (name, place, slotId) => ipcRenderer.invoke("components:versions", name, place, slotId),
+  remove: (name, opts, place, slotId) =>
+    ipcRenderer.invoke("components:remove", name, opts, place, slotId),
+  setDisabled: (name, disabled, place, slotId) =>
+    ipcRenderer.invoke("components:set-disabled", name, disabled, place, slotId),
+  settings: (name, place, slotId) => ipcRenderer.invoke("components:settings", name, place, slotId),
+  setSetting: (name, values, place, slotId) =>
+    ipcRenderer.invoke("components:set-setting", name, values, place, slotId),
   mirrors: () => ipcRenderer.invoke("components:mirrors"),
   addMirror: (url) => ipcRenderer.invoke("components:mirror-add", url),
   removeMirror: (url) => ipcRenderer.invoke("components:mirror-remove", url),

@@ -67,6 +67,10 @@ const remote = {
   version: null, // the VERSION file, i.e. the install gate
   stubborn: false, // a process pkill cannot remove (another user's server)
   installFails: false, // the unpack-and-swap chain returns nonzero on the far side
+  // can this far side tell whether its own port is bound at all? The field's GPU
+  // box could not: no python3 to open a socket with and no `ss` to list with, so
+  // the only answer the port question had was UNKNOWN.
+  measurable: true,
   stopped: 0,
   started: 0,
   commands: [],
@@ -74,12 +78,13 @@ const remote = {
   // channel (one per heal round): the count is what says how many rounds the
   // healer actually spent, instead of a race with the clock
   selfAsks: 0,
-  reset({ bound = false, serving = false, version = null, stubborn = false, installFails = false } = {}) {
+  reset({ bound = false, serving = false, version = null, stubborn = false, installFails = false, measurable = true } = {}) {
     this.bound = bound;
     this.serving = serving;
     this.version = version;
     this.stubborn = stubborn;
     this.installFails = installFails;
+    this.measurable = measurable;
     this.stopped = 0;
     this.started = 0;
     this.commands = [];
@@ -96,6 +101,11 @@ function fakeRemoteExec(cmd) {
       remote.serving = false;
     }
     return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+  }
+  if (cmd.includes("ss -ltn")) {
+    // the fallback probe: a far side with no python3 to open a socket with
+    if (!remote.measurable) return Promise.resolve({ code: 0, stdout: "UNKNOWN\n", stderr: "" });
+    return Promise.resolve({ code: 0, stdout: remote.bound ? "UP\n" : "DOWN\n", stderr: "" });
   }
   if (cmd.includes("socket") && cmd.includes("connect")) {
     remote.selfAsks++;
@@ -259,6 +269,40 @@ async function main() {
   check(remote.stopped === 0 && remote.started === 0, "…and neither stops nor restarts the server");
   check(uploads === 0, "…and uploads nothing");
   check(tarFetches === 0, "…and never fetches the pylibs tar: the check is a check (report #5)");
+
+  // ---- 2b. a port we cannot MEASURE is started, not assumed to be running ----
+  //
+  // The field's second failure (region-46.seetacloud.com, 2026-11-24, seven
+  // attempts): a remote with no python3 and no `ss`, holding the version we ship,
+  // whose supervisor had reaped itself after its last session (`--idle-timeout
+  // 25`). Every reconnect asked its port, got UNKNOWN back from the fallback
+  // probe, read that as "already running" — and skipped the start, which is the
+  // only place in this client that ever starts it. All seven then died at the
+  // health gate with "backend not reachable on the remote host", over an install
+  // that was intact and a port that was empty. An unmeasurable port must be
+  // STARTED: a start when one is already running is refused by the far side's own
+  // bind and costs nothing, while a skipped start cannot be recovered anywhere.
+  remote.reset({ bound: false, serving: false, version: VERSION, measurable: false });
+  const unmeasured = await installServer(probeFor({ python: "" }), { force: "pylibs", progress: () => {} });
+  check(unmeasured.installed === true, "an unmeasurable remote still connects");
+  check(
+    remote.started === 1,
+    "…because its server is STARTED, not assumed to be running (the field's deadlock: nothing was ever listening)"
+  );
+  check(remote.stopped === 0, "…and nothing is stopped: an unmeasured port is not proved to be wedged");
+  // …and the sentence at the gate, when it does fail, says which of the two
+  // machines is the casualty (tunnel-connect's health gate asks the far side over
+  // exec, the path the failed forward does not share).
+  const gateAt = CONNECT_SRC.indexOf('waitForServer("http://127.0.0.1:" + localPort');
+  const gate = gateAt > 0 ? CONNECT_SRC.slice(gateAt, gateAt + 2400) : "";
+  check(
+    gate.includes("remoteServingState(state.lastProbe"),
+    "a failed health gate asks the FAR SIDE about its own port before it blames one machine"
+  );
+  check(
+    /far === "SERVING"/.test(gate) && /forwarded port never answered/.test(gate),
+    "…and its verdict names the wire when the far side is serving, not a server the user would restart for nothing"
+  );
 
   // ---- 3. a bound port with nothing behind it is replaced ----
   remote.reset({ bound: true, serving: false, version: VERSION });

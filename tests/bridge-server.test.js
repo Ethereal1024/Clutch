@@ -492,8 +492,17 @@ async function main() {
     };
     try {
       // the window's session is on the far side of the tunnel: components are
-      // installed on the machine that will RUN them, so that is the target
+      // installed on the machine that will RUN them, so that is the target. A live
+      // tunnel is not that answer by itself any more (`components-view.ts`
+      // `target`: two tabs of one window can be pinned to two machines, so a slot
+      // that never claimed a session names no machine), which makes the CLAIM the
+      // fact this section has to produce — the same one the phone produces when it
+      // opens the session: asking for its base is what claims it.
       tunnel.state.status = { active: true, url: sup.base };
+      const claimsBefore = sessions.calls.started.length;
+      await globalThis.clutchApi.baseUrl();
+      assert.strictEqual(sessions.calls.started.length, claimsBefore + 1,
+        "the session is claimed against the tunnel, not merely live");
 
       const progress = [];
       globalThis.clutchComponents.onProgress((stage) => progress.push(stage));
@@ -535,34 +544,42 @@ async function main() {
         assert.deepStrictEqual(progress.map((p) => p.stage), ["artifact", "fetch", "installed"],
           "install progress reaches the page over the bridge's SSE"));
 
-      // 9d. the reverse verbs, same channel, same answers as the desktop
-      const vers = await globalThis.clutchComponents.versions(sup.name);
+      // 9d. the reverse verbs, same channel, same answers as the desktop — and
+      // aimed the way the desktop aims them: a verb that takes a name also takes
+      // the PLACE the row named (`whereFrom`: a name is not a place, so a call
+      // that names neither is refused rather than guessed at).
+      const vers = await globalThis.clutchComponents.versions(sup.name, "session");
       // the same b9af086 rule: a row says WHICH place answered, never which
       // machine the page would have picked
       assert.strictEqual(vers.place, "session");
       assert.strictEqual(vers.error, null);
       assert.strictEqual(vers.versions[0].resolved, true, "the machine says which version it would run");
 
-      const off = await globalThis.clutchComponents.setDisabled(sup.name, true);
+      const off = await globalThis.clutchComponents.setDisabled(sup.name, true, "session");
       assert.deepStrictEqual(off, {
         ok: true, name: sup.name, status: "disabled", disabled: true,
         place: "session", target: { kind: "remote", base: sup.base },
       });
       assert(sup.state.calls.includes(`POST /api/components/${sup.name}/disable`), "the switch was asked of the far machine");
 
-      const gone = await globalThis.clutchComponents.remove(sup.name, { version: sup.held });
+      const gone = await globalThis.clutchComponents.remove(sup.name, { version: sup.held }, "session");
       assert.deepStrictEqual(gone, {
         ok: true, name: sup.name, status: "removed", removed: [sup.held],
         place: "session", target: { kind: "remote", base: sup.base },
       });
       assert(sup.state.calls.includes(`DELETE /api/components/${sup.name}?version=${encodeURIComponent(sup.held)}`));
 
-      // 9e. no session and no local supervisor (N4): the tab says WHY in words a
-      //     page can draw — the answer a phone with nothing to install on owes
+      // 9e. the claim goes, and the machine goes with it (N4): a phone holds no
+      //     local supervisor, so a window with nothing claimed has NOTHING to be
+      //     about — said as a wait rather than a failure, the same sentence the
+      //     desktop tab draws, because the answer is to connect, not to fix.
+      assert.deepStrictEqual(await globalThis.clutchApi.releaseSession(), { ok: true }, "the claim is let go");
       tunnel.state.status = { active: false, url: "" };
       const offline = await globalThis.clutchComponents.list();
-      assert.strictEqual(offline.sessionBase, null, "no machine at all, not a placeholder one");
-      assert.strictEqual(offline.error, "this build has no supervisor URL for the local machine");
+      assert.strictEqual(offline.sessionBase, "", "no machine at all, not a placeholder one");
+      assert.strictEqual(offline.target, "none", "and the page is told WHICH kind of nothing this is");
+      assert.strictEqual(offline.error,
+        "this tab has no session yet, so there is no machine to ask — its components are read once it has one");
       assert.deepStrictEqual(offline.held, [], "no placeholder port, so no misleading empty machine");
 
       // 9f. what that sentence is for now: methods that do not exist. The

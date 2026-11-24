@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-core.ts and run `npm run build:host`.
-// source sha256: 7ed8576c965267781496631884c4f373a33e9020b4c87b584b07695e4493865e
+// source sha256: 59d97b9f8627f34defa7a6c76cecd5227c1dbb558251142020d07ff202ecf8df
 
 "use strict";
 // the tunnel's shared singleton — the state every phase works on, its wire
@@ -58,13 +58,6 @@ function createTunnelState() {
         lastStrategy: null,
         lastHome: null,
         lastProbe: null, // the target's last probe: what a restart has to match
-        // The last components pass this process ran at a connect — what it installed,
-        // what it let go of, and what it could not. The pass is deliberately NOT
-        // awaited by the connect, so this is where its answer waits for a page: the
-        // plugin tab reads it (ui/components-view.js `list`) and says what the pass
-        // did, which is the only place a removal is visible (`tunnelLog` is a file).
-        // One object, one machine: `base` says which one the pass was about.
-        componentsPass: null,
         healTimer: null,
         // The heal round asking RIGHT NOW — the round's own object, or null. A round
         // is several questions over a wire that is already suspect (a patient poll,

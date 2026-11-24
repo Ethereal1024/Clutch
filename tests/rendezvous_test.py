@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -262,7 +263,144 @@ def _disabled_probe() -> None:
                 os.environ[components.ROOT_ENV] = previous
 
 
+def _interpreter_probe() -> None:
+    """2a. WHICH python drives a `-m` component, and whether this host can say it
+    has one at all.
+
+    A frozen build's sys.executable is the app (it would relaunch the UI), so the
+    interpreter is CLUTCH_PYTHON, then PATH, then a LOGIN SHELL. The last one is
+    the reported bug: a packaged app inherits the PATH of whatever launched it,
+    which is not the PATH the machine's own shell has — on the host this came
+    from, `python3` was /root/miniconda3/bin/python3, reachable only from a login
+    shell, so a component that was installed and healthy (clutch-workspace, with
+    four tools) was dropped as "no interpreter that can run it" and its tools
+    vanished with it while the page still said "installed".
+
+    Driven with the answers a shell can give — a path, no path, and text that is
+    not one — and nothing is started: the shell call is a fake, and the path it
+    "finds" is this process's own interpreter, so the executable test is real.
+    """
+    real_which, real_run = modules.shutil.which, modules.subprocess.run
+    real_frozen = getattr(sys, "frozen", False)
+    real_override = os.environ.pop("CLUTCH_PYTHON", None)
+    asked: list[list[str]] = []
+    bash = shutil.which("bash") or "/bin/bash"
+
+    class _Answer:
+        def __init__(self, text: str) -> None:
+            self.stdout = text.encode("utf-8")
+
+    def fake_run(argv, **kwargs):
+        asked.append([*argv, f"timeout={kwargs.get('timeout')}"])
+        return _Answer(FOUND[0])
+
+    def fake_which(name):
+        if name == "bash":
+            return BASH[0]
+        return PATH_CANDIDATE[0] if name == PATH_CANDIDATE[1] else None
+
+    FOUND: list[str] = [""]  # what the fake login shell answers
+    PATH_CANDIDATE: list[str | None] = [None, ""]  # what `which` answers, and for which name
+    BASH: list[str | None] = [bash]  # whether this host has a shell to ask at all
+    try:
+        modules.shutil.which, modules.subprocess.run = fake_which, fake_run
+
+        # 2a-i. a source checkout: its own interpreter, and no shell is asked
+        if real_frozen:
+            del sys.frozen
+        asked.clear()
+        check(
+            modules.python_exe() == sys.executable and modules.python_missing() is False,
+            "a source checkout is driven by its own interpreter",
+        )
+        check(not asked, "…and nothing is asked of a shell to find it")
+
+        # 2a-ii. packaged, and PATH answers: that is the interpreter, and the shell
+        #        is not spent on a question already answered
+        sys.frozen = True
+        modules._INTERPRETER[:] = []
+        PATH_CANDIDATE[:] = ["/usr/bin/python3", "python3"]
+        check(modules.python_exe() == "/usr/bin/python3", "a packaged host takes the python on PATH")
+        check(modules.python_missing() is False, "…and says it has one")
+        check(not asked, "…without asking a shell for a second opinion")
+
+        # 2a-iii. packaged, PATH is the bare one a packaged app inherits, and a LOGIN
+        #         shell names the machine's own interpreter — the reported case
+        modules._INTERPRETER[:] = []
+        PATH_CANDIDATE[:] = [None, ""]
+        FOUND[0] = str(Path(sys.executable))
+        check(
+            modules.python_exe() == str(Path(sys.executable)),
+            "a login shell's python is the interpreter when the inherited PATH has none",
+        )
+        check(modules.python_missing() is False, "…so the component is drivable, which is what its tools hang on")
+        check(
+            asked
+            and asked[0][:3] == ["bash", "-lc", modules.LOGIN_PROBE]
+            and asked[0][3] == f"timeout={modules.LOGIN_PROBE_TIMEOUT}",
+            "the question is the login shell's own `command -v`, under a wall",
+        )
+        # ...one resolution per process: the two answers are the same answer, and
+        # the shell is not asked again (it costs a process, and it cannot change)
+        spent = len(asked)
+        PATH_CANDIDATE[:] = ["/elsewhere/python3", "python3"]
+        check(
+            modules.python_exe() == str(Path(sys.executable)) and modules.python_missing() is False,
+            "the resolution is memoized: the command line and the verdict cannot disagree",
+        )
+        check(len(asked) == spent, "…and the shell is asked once, not once per question")
+
+        # 2a-iv. a shell that answers with something which is not an interpreter:
+        #         an alias/function, a relative path, or a file that is not a python
+        for junk, why in (
+            ("python3 not found", "the shell's own error text"),
+            ("alias python3='python3.12'", "an alias, which no command line can run"),
+            ("bin/python3", "a path that is not absolute"),
+            (str(Path(shutil.which("sh") or "/bin/sh")), "an executable that is not a python"),
+        ):
+            modules._INTERPRETER[:] = []
+            PATH_CANDIDATE[:] = [None, ""]
+            FOUND[0] = junk
+            check(modules.python_missing() is True, f"a login shell answering {why} is not an interpreter")
+            check(
+                modules.python_exe() == sys.executable,
+                "…and the bundle's own executable is named only as the last resort it is",
+            )
+
+        # 2a-v. no shell to ask (a phone, a minimal host): nothing is invented and
+        #       nothing is started
+        modules._INTERPRETER[:] = []
+        PATH_CANDIDATE[:] = [None, ""]
+        BASH[0] = None
+        asked.clear()
+        check(modules.python_missing() is True, "a host with no shell to ask has no interpreter to name")
+        check(not asked, "…and no process is spent trying to ask one")
+
+        # 2a-vi. CLUTCH_PYTHON is the explicit knob and outranks both searches
+        modules._INTERPRETER[:] = []
+        PATH_CANDIDATE[:] = ["/usr/bin/python3", "python3"]
+        BASH[0] = bash
+        os.environ["CLUTCH_PYTHON"] = "/opt/py/bin/python3"
+        try:
+            check(modules.python_exe() == "/opt/py/bin/python3", "CLUTCH_PYTHON is the interpreter, said out loud")
+            check(modules.python_missing() is False, "…and a host holding it is never 'missing one'")
+        finally:
+            os.environ.pop("CLUTCH_PYTHON", None)
+    finally:
+        modules.shutil.which, modules.subprocess.run = real_which, real_run
+        modules._INTERPRETER[:] = []
+        if not real_frozen and getattr(sys, "frozen", None):
+            del sys.frozen
+        if real_override is not None:
+            os.environ["CLUTCH_PYTHON"] = real_override
+
+
 def main() -> int:
+    # 2a. which interpreter a packaged host drives a `-m` component with — asked
+    #     first, because everything below is a component this host can only drive
+    #     when it has one
+    _interpreter_probe()
+
     if not rendezvous.available(modules.WORKSPACE):
         print("SKIP: clutch-workspace is not installed for this host / no POSIX shell or curl")
         return 0

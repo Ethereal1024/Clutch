@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/components-view.ts and run `npm run build:host`.
-// source sha256: b64a7ca0b4034daa9381de9ff96fc1b7fe60c8121ea517d6759dd5bddfa807ba
+// source sha256: e0872bb0a0a4e1a7a20e8dbd06522cf0f1df26a0c089d28c09748f6105127846
 
 // the plugin page's backend: what each component's declaration puts where, what
 // those places hold, what this client could give them, and the writes that move
@@ -60,23 +60,21 @@ const MARKET_TTL_MS = 5 * 60_000;
 // page's own reload button is the retry.)
 const MARKET_ERROR_TTL_MS = 30_000;
 const NO_CLIENT = "this shell has no client plugin domain, and that component is one: a plugin is held by the app process itself";
-// A client-held component's settings live on the machine that would run it, and
-// the store (agent/tools/settings.py) is that machine's. Said as a sentence, not
-// as a silent empty form: a page showing blanks would look like defaults.
-const NO_CLIENT_STORE = "its settings live on the machine that runs it, and this one is held by the client — there is nowhere here to store them";
+// A component this client runs cannot declare settings: the store is the
+// MACHINE's (agent/tools/settings.py, `~/.clutch/components/settings/<name>.json`),
+// and an `entry` module runs inside this app process, which has no such file. That
+// is refused where the declaration is READ (ui/components.js `destinationOf`), so a
+// row never offers this form at all; the sentence exists for the one shape that
+// can still arrive here — a page holding an older row — and it names the
+// declaration rather than teaching the reader a rule about places.
+const NO_CLIENT_SETTINGS = "a component that runs inside this app has no settings store — its declaration cannot name settings";
 function createComponentsView(deps) {
     const { supervisorBase, tunnelStatus = () => ({}), plugins = null, // a function: this client plugin domain, or null where it has none
     // which machine one of a WINDOW's slots (one tab = one slot) sits on, and the
     // supervisor URL that slot's machine answers on — the two facts that make an
     // answer be about the tab whose page asked (host-core.ts backendKind /
     // supervisorBaseFor, both already per slot)
-    windowKind = null, slotBase = null, ensureSupervisor = null, log = () => { }, lib = defaultLib, mirrorStore = defaultMirrors, 
-    // The last automatic components pass this host ran, or null: one object
-    // `{at, base, installed, retired, deferred, errors}` (ui/tunnel-connect.js
-    // keeps it, the connect's own pass fills it). Asked per read, because the
-    // pass is not awaited by the connect and a window opened afterwards is
-    // exactly the window that has to hear about it.
-    componentsPass = () => null, now = Date.now, } = deps;
+    windowKind = null, slotBase = null, ensureSupervisor = null, log = () => { }, lib = defaultLib, mirrorStore = defaultMirrors, now = Date.now, } = deps;
     let market = null; // {at, value, specs} — the last market read
     // Which machine a request is about. The components endpoint lives on a
     // machine's SUPERVISOR, not on its session server, so this cannot simply be
@@ -90,24 +88,32 @@ function createComponentsView(deps) {
     // names its tab's slot on every call, and an empty slot is the window's default
     // session (every call site that predates tabs).
     function target(win = null, slot = "") {
-        const ts = tunnelStatus() || {};
-        const live = ts.active && ts.url ? String(ts.url) : "";
         const kind = win && windowKind ? windowKind(win, slot) : null;
-        if (kind === "tunnel")
+        if (kind === "tunnel") {
+            const ts = tunnelStatus() || {};
+            const live = ts.active && ts.url ? String(ts.url) : "";
             return { kind: "remote", base: (win && slotBase ? slotBase(win, slot) : "") || live };
+        }
         // a slot pinned to "local" stays local even while the window holds a tunnel
         if (kind === "local")
             return { kind: "local", base: supervisorBase() };
-        // no session claimed yet (kind null): the tunnel, if any, is still the
-        // machine this window is about
-        if (live)
-            return { kind: "remote", base: live };
-        return { kind: "local", base: supervisorBase() };
+        // No session is claimed on this slot yet, and a live tunnel is NOT the answer:
+        // that tunnel is the machine ONE tab is on, and this slot never said it was
+        // that tab. Reading it here is how a list (and then a write aimed at it) used
+        // to land on a machine the page had not named — the two tabs, one window case.
+        return { kind: "none", base: "" };
     }
     // A target with no URL is not an unreadable machine, it is no machine yet.
     function why(t) {
         if (t.base)
             return null;
+        if (t.kind === "none") {
+            // "claimed" is this host's word for it, not the reader's: the tab has no
+            // session, and the page draws this one as a WAIT rather than a failure
+            // (`list().target === "none"`, ui/src/renderer/components-panel.ts
+            // plugReadNote) because it is answered by waiting, not by fixing anything.
+            return "this tab has no session yet, so there is no machine to ask — its components are read once it has one";
+        }
         return t.kind === "remote"
             ? "the tunnel is up but carries no supervisor URL yet"
             : "this build has no supervisor URL for the local machine";
@@ -150,37 +156,22 @@ function createComponentsView(deps) {
             return null;
         }
     }
-    // Where ONE name lives, for the verbs that take a name and no spec (a removal, a
-    // switch, a version list). The declaration answers it when the market knows the
-    // component; otherwise a component this client holds is its own answer, and
-    // whatever is left can only be the session machine (the only other place there
-    // is). Same rule as `destinationOf`, never a second opinion.
-    async function placeOf(name) {
-        let spec = null;
-        try {
-            spec = await specFor(name);
-        }
-        catch (e) {
-            // the market could not be read: the two inventories still answer below
-            spec = null;
-        }
-        if (spec) {
-            const where = rule.destinationOf(spec);
-            if (where.error)
-                return { place: null, error: where.error };
-            return { place: where.place, error: null };
-        }
-        const host = clientDomain();
-        if (host) {
-            try {
-                if (host.list().some((r) => r.name === name))
-                    return { place: rule.PLACE_CLIENT, error: null };
-            }
-            catch (e) {
-                return { place: null, error: (e && e.message) || String(e) };
-            }
-        }
-        return { place: rule.PLACE_SESSION, error: null };
+    // WHICH of the two ledgers a write is aimed at, taken from the ROW that asked.
+    //
+    // A name is not a place. The old `placeOf(name)` derived it (declaration first,
+    // then "this client holds it", then — for anything left — the session machine),
+    // which meant a market that could not be read turned every removal into a
+    // removal from the wrong machine. The row knows where its bytes were read from
+    // (`list` stamps it); that answer travels with the action, and this refuses
+    // anything that is not one of the two places rather than guessing on its behalf.
+    function whereFrom(place) {
+        const p = String(place || "");
+        if (p === rule.PLACE_CLIENT || p === rule.PLACE_SESSION)
+            return { place: p, error: null };
+        return {
+            place: null,
+            error: "this row did not name the place that holds it, and a name is not a place — read the list again",
+        };
     }
     // What the places hold. Both domains answer here, and each row says which one
     // it came from (`place`), because the page draws one list: a component that is
@@ -203,15 +194,19 @@ function createComponentsView(deps) {
         // and the only one that may kill a control.
         const out = {
             sessionBase: t.base,
+            // WHICH machine the session half was asked of, as the page has to know it:
+            // "none" until this tab has a session at all, then "local" or "remote". A
+            // page cannot tell "nobody to ask yet" from "asked and refused" out of the
+            // sentence alone, and the two are drawn in different weights (a wait, and a
+            // failure), so the answer carries the fact rather than leaving it to be
+            // parsed back out of the words.
+            target: t.kind,
             held: [],
             error: null,
             inventoryError: null,
             client: false,
             clientError: null,
             clientInventoryError: null,
-            // what the automatic pass did, when it was about the machine this window
-            // is about: the names it let go of, and the ones it could not
-            pass: null,
         };
         const problem = trouble(t);
         if (problem) {
@@ -244,18 +239,12 @@ function createComponentsView(deps) {
                 out.clientInventoryError = (e && e.message) || String(e);
             }
         }
-        // The automatic pass belongs to the machine it ran against, so a window
-        // looking at another machine does not inherit its report: a pass about the
-        // far side of a tunnel is not news about this one. A window with no target
-        // yet (no session claimed) is not owed it either.
-        let pass = null;
-        try {
-            pass = componentsPass() || null;
-        }
-        catch (e) {
-            log(`[components] the last pass is unreadable: ${(e && e.message) || e}`);
-        }
-        out.pass = pass && pass.base && pass.base === t.base ? pass : null;
+        // The automatic pass at connect is NOT part of this answer. It is a thing
+        // that happened to one machine at one moment (a retirement, a failed fetch),
+        // and it used to arrive here as `pass` — a second, older picture of what a
+        // place holds, drawn under a list that had just been read. What a place holds
+        // is the inventories above and nothing else; the pass says its piece in the
+        // log, where an event belongs.
         return out;
     }
     // One market row: the facts a page needs and nothing it does not — a checkout
@@ -587,8 +576,8 @@ function createComponentsView(deps) {
     // `resolved` marking the one it would run. Same shape as list(): the reason a
     // read failed travels INSIDE the answer, because an empty list of versions and
     // "the machine could not be asked" are not the same fact.
-    async function versions(name, win = null, slot = "") {
-        const there = await placeOf(name);
+    async function versions(name, place, win = null, slot = "") {
+        const there = whereFrom(place);
         if (there.error)
             return { name, place: null, versions: [], error: there.error };
         if (there.place === rule.PLACE_CLIENT) {
@@ -626,8 +615,8 @@ function createComponentsView(deps) {
     // already true), and a refusal as `error`, which is what arrives when something
     // is running the component: this client cannot stop a process on another
     // machine, and the host will not delete code out from under one.
-    async function remove(name, { version = "" } = {}, win = null, slot = "") {
-        const there = await placeOf(name);
+    async function remove(name, { version = "" } = {}, place, win = null, slot = "") {
+        const there = whereFrom(place);
         if (there.error)
             return { ok: false, name, error: there.error };
         if (there.place === rule.PLACE_CLIENT) {
@@ -680,8 +669,8 @@ function createComponentsView(deps) {
     // component at all, which is an answer rather than a failure — the request was
     // already true there — and the page has to say so, because it means the machine
     // it was aimed at was not the machine to switch.
-    async function setDisabled(name, disabled, win = null, slot = "") {
-        const there = await placeOf(name);
+    async function setDisabled(name, disabled, place, win = null, slot = "") {
+        const there = whereFrom(place);
         if (there.error)
             return { ok: false, name, error: there.error };
         if (there.place === rule.PLACE_CLIENT) {
@@ -729,12 +718,12 @@ function createComponentsView(deps) {
     // (agent/tools/settings.py) — so a component the client itself holds has none
     // here. That is an answer rather than a failure, and the page draws the reason
     // the same way it draws any other refusal.
-    async function settings(name, win = null, slot = "") {
-        const there = await placeOf(name);
+    async function settings(name, place, win = null, slot = "") {
+        const there = whereFrom(place);
         if (there.error)
             return { ok: false, name, error: there.error };
         if (there.place === rule.PLACE_CLIENT) {
-            return { ok: false, name, place: rule.PLACE_CLIENT, error: NO_CLIENT_STORE };
+            return { ok: false, name, place: rule.PLACE_CLIENT, error: NO_CLIENT_SETTINGS };
         }
         const t = target(win, slot);
         const problem = trouble(t);
@@ -759,12 +748,12 @@ function createComponentsView(deps) {
     // a form redraws from what the machine now holds rather than from what it sent.
     // The verdict is the host's: a key it does not declare, or a value its schema
     // cannot take, comes back as its own sentence in `error` and writes nothing.
-    async function setSetting(name, values, win = null, slot = "") {
-        const there = await placeOf(name);
+    async function setSetting(name, values, place, win = null, slot = "") {
+        const there = whereFrom(place);
         if (there.error)
             return { ok: false, name, error: there.error };
         if (there.place === rule.PLACE_CLIENT) {
-            return { ok: false, name, place: rule.PLACE_CLIENT, error: NO_CLIENT_STORE };
+            return { ok: false, name, place: rule.PLACE_CLIENT, error: NO_CLIENT_SETTINGS };
         }
         const t = target(win, slot);
         const problem = trouble(t);
@@ -830,7 +819,6 @@ function createComponentsView(deps) {
     }
     return {
         target,
-        placeOf,
         destination: (spec) => rule.destinationOf(spec),
         list,
         market: marketList,

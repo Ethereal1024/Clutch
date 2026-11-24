@@ -216,7 +216,6 @@ const componentsView = createComponentsView({
   // per slot, so nothing here decides it a second time)
   slotBase: (wc, slotId) => hostCore.supervisorBaseFor(wc.id, slotId),
   plugins: () => pluginHost,
-  componentsPass: () => tunnel.state.componentsPass,
   ensureSupervisor,
   log: tunnelLog,
 });
@@ -476,6 +475,10 @@ if (!app.requestSingleInstanceLock()) {
     // (ui/src/renderer/slots.ts), and a list drawn for the wrong one is a list of
     // somebody else's components. An absent slot is the window's default session,
     // the spelling every call site predates tabs with.
+    //
+    // A write also carries the PLACE the row it came from was read at: the page
+    // draws both ledgers in one list, so a name alone does not say which machine
+    // is being asked to drop something (ui/src/host/components-view.ts whereFrom).
     ipcMain.handle("components:list", async (e, slotId) =>
       componentsView.list(e.sender, slotOf(slotId))
     );
@@ -483,26 +486,48 @@ if (!app.requestSingleInstanceLock()) {
     // the reverse verbs, named the way the host names them: `versions` asks what
     // one machine holds, `remove` asks it to let one go (the host may refuse —
     // something is running it — and that arrives as the error inside the answer).
-    ipcMain.handle("components:versions", async (e, name, slotId) =>
-      componentsView.versions(String(name || ""), e.sender, slotOf(slotId))
+    ipcMain.handle("components:versions", async (e, name, place, slotId) =>
+      componentsView.versions(String(name || ""), String(place || ""), e.sender, slotOf(slotId))
     );
-    ipcMain.handle("components:remove", async (e, name, opts, slotId) =>
-      redeclare(await componentsView.remove(String(name || ""), opts || {}, e.sender, slotOf(slotId)))
+    ipcMain.handle("components:remove", async (e, name, opts, place, slotId) =>
+      redeclare(
+        await componentsView.remove(
+          String(name || ""),
+          opts || {},
+          String(place || ""),
+          e.sender,
+          slotOf(slotId)
+        )
+      )
     );
     // the switch: the one write here that is reversible, so the state is sent
     // rather than a verb translated (ui/components-view.js setDisabled)
-    ipcMain.handle("components:set-disabled", async (e, name, disabled, slotId) =>
+    ipcMain.handle("components:set-disabled", async (e, name, disabled, place, slotId) =>
       redeclare(
-        await componentsView.setDisabled(String(name || ""), Boolean(disabled), e.sender, slotOf(slotId))
+        await componentsView.setDisabled(
+          String(name || ""),
+          Boolean(disabled),
+          String(place || ""),
+          e.sender,
+          slotOf(slotId)
+        )
       )
     );
     // the knobs a component declares: the form is generated from THIS answer, so
     // the page knows no setting by name (ui/components-view.js settings)
-    ipcMain.handle("components:settings", async (e, name, slotId) =>
-      componentsView.settings(String(name || ""), e.sender, slotOf(slotId))
+    ipcMain.handle("components:settings", async (e, name, place, slotId) =>
+      componentsView.settings(String(name || ""), String(place || ""), e.sender, slotOf(slotId))
     );
-    ipcMain.handle("components:set-setting", async (e, name, values, slotId) =>
-      redeclare(await componentsView.setSetting(String(name || ""), values, e.sender, slotOf(slotId)))
+    ipcMain.handle("components:set-setting", async (e, name, values, place, slotId) =>
+      redeclare(
+        await componentsView.setSetting(
+          String(name || ""),
+          values,
+          String(place || ""),
+          e.sender,
+          slotOf(slotId)
+        )
+      )
     );
     ipcMain.handle("components:install", async (e, name, slotId) =>
       redeclare(await componentsView.install(String(name || ""), e.sender, {

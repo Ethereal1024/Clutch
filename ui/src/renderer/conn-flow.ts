@@ -386,6 +386,19 @@ export async function hopLandedFor(host, user, port, budgetMs = 5000) {
   }
 }
 
+// "ssh:user@host:port" — the list's own spelling (conn-store.ts connLabel), read
+// back as the three fields the tunnel dials. `local`, and the synthetic
+// "ssh:__connected__" entry a session with no saved host draws, are not hosts:
+// there is nothing to dial, and nothing to verify against the tunnel either.
+function sshTargetOf(v) {
+  if (!v || !v.startsWith("ssh:") || v.includes("__connected__")) return null;
+  const [user, hostPort] = v.slice(4).split("@");
+  if (!user || !hostPort) return null;
+  const [host, port] = hostPort.split(":");
+  if (!host) return null;
+  return { user, host, port: port || "22" };
+}
+
 export async function handleSshConnect(host, user, port, statusEl) {
   // same door as connConnect, reached from the picker's New-connection popup, the
   // bar's Retry and the outage redial (conn-lost.ts): every one of them is an
@@ -616,7 +629,18 @@ export async function connConnect(v) {
   // the guards below on purpose: the note is about what the NEXT boot may claim, and
   // no press of this button is a boot nobody asked for.
   connLostExitClear();
-  if (!v || v === connOnValue) return;
+  if (!v) return;
+  if (v === connOnValue) {
+    // The ✓ is the picker's memory of a connect; the tunnel's own target is the
+    // fact. A window whose base moved off that host — a claim that fell back to a
+    // session on THIS machine, a reconcile that adopted another one — still carries
+    // the tick, and refusing the press here is what left the host undiallable: the
+    // one entry the user needed was the one entry that did nothing. So the guard
+    // asks the tunnel instead of the picker: still on it is not a dial, anywhere
+    // else is (and `local` and the synthetic connected entry are no host at all).
+    const t = sshTargetOf(v);
+    if (!t || (await hopLandedFor(t.host, t.user, t.port, 0))) return;
+  }
   if (v === "local") {
     if (localStorage.getItem("clutch_ssh_connected")) {
       // the standing intent goes FIRST: the disconnect below ends the tunnel and
@@ -637,9 +661,9 @@ export async function connConnect(v) {
     // switching: the standing intent and the tunnel it names are spent first, then
     // the new host is dialled (connSwitch owns both halves, and the failed move's
     // clean-up: see above)
-    const [user, hostPort] = v.slice(4).split("@");
-    const [host, port] = hostPort.split(":");
-    await connSwitch(host, user, port || "22", connStatus);
+    const t = sshTargetOf(v);
+    if (!t) return;
+    await connSwitch(t.host, t.user, t.port, connStatus);
   }
 }
 // The list's door: choosing a host connects to it, immediately — selection IS the

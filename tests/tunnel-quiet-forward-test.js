@@ -55,11 +55,17 @@ const bootPath = require.resolve("../ui/tunnel-bootstrap");
 const bootMod = new Module(bootPath);
 bootMod.filename = bootPath;
 bootMod.loaded = true;
+// what the far side answers when the connect's health gate asks it about its OWN
+// port over exec (tunnel-connect's failed-gate verdict). "" is "the stub has no
+// answer", which is the shape every scenario but `noForwardingFarSide` wants: the
+// verdict then falls back to the plain sentence.
+let farReports = "";
 bootMod.exports = {
   PROBE_CMD: "true",
   parseProbe: () => ({ os: "linux", arch: "x86_64", home: "/home/far", python: "3.11", libc: "glibc" }),
   installServer: async () => ({ ok: true }),
   installComponents: () => {},
+  remoteServingState: async () => farReports,
 };
 require.cache[bootPath] = bootMod;
 
@@ -73,6 +79,9 @@ const BIND_TIMEOUT_MS = Number(
   (/REVERSE_FORWARD_BIND_TIMEOUT_MS = (\d+)/.exec(connectSrc) || [])[1]
 );
 const CONNECT_BUDGET_MS = 8000; // the connect: the hop, not the model path
+// The health gate's own clock (CONNECT_TIMEOUT_MS) plus the far-side ask it makes
+// after it fails: a hop that cannot be forwarded has to be waited out once.
+const NO_FORWARD_BUDGET_MS = 22000;
 const SILENT_BUDGET_MS = BIND_TIMEOUT_MS + 6000; // one clock, then done
 const LADDER_BUDGET_MS = 20000; // 6 refusals + the ladder's backoff + the port-0 ask
 
@@ -287,6 +296,27 @@ async function refusingFarSide() {
   await far.close();
 }
 
+async function noForwardingFarSide() {
+  // The ambiguity that cost a whole field investigation: the far side is up and
+  // says its OWN server is SERVING, but it will not carry a single forwarded
+  // channel to this client (sshd `AllowTcpForwarding no`, a jump host or proxy
+  // that only carries exec, a hardening policy). The gate must name the WIRE.
+  // "backend not reachable on the remote host" sends the user to restart a box
+  // that was answering all along, and hides the one fact that matters: this hop
+  // cannot forward, so no reconnect through it can ever work.
+  farReports = "SERVING";
+  const far = await startFakeSshd({ forward: "accept", forwardTo: false });
+  const { res, ms } = await connectOnce(far);
+  check(res.ok === false, "no-forward: a hop whose channels are refused is not called up");
+  check(ms < NO_FORWARD_BUDGET_MS, `no-forward: the gate settled in ${ms}ms (its own clock, then the question)`);
+  const why = (res && res.error) || "";
+  check(/forwarded port never answered/.test(why), "no-forward: the verdict names the WIRE, not the server: " + why);
+  check(!/^backend not reachable/.test(why), "no-forward: …and stops blaming a server that is serving");
+  check(/the far side reports SERVING/.test(tunnelLogText()), "no-forward: the far side's own answer is in the log");
+  await far.close();
+  farReports = "";
+}
+
 async function main() {
   check(BIND_TIMEOUT_MS > 0 && BIND_TIMEOUT_MS < 60000, `read the far side clock from the source: ${BIND_TIMEOUT_MS}ms`);
   const hopShouldWork = await supervisorOn8890();
@@ -295,6 +325,7 @@ async function main() {
   await silentFarSide(hopShouldWork);
   await answeringFarSide();
   await refusingFarSide();
+  await noForwardingFarSide();
 
   summary("tunnel-quiet-forward", "the connect is not held open by the far side's answer");
   process.exit(0);

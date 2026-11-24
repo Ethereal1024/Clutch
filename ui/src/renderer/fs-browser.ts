@@ -16,6 +16,7 @@ import { $ } from "./dom";
 import { IS_ANDROID } from "./env";
 import { createProject, openProject } from "./project";
 import { closeModal, dismissOnOverlayPress, notice } from "./settings";
+import { activeSlotId } from "./slots";
 import { state } from "./state";
 import { busy } from "./stream-view";
 import { showHidden } from "./workspace-panel";
@@ -221,14 +222,16 @@ export function openFsBrowser(mode) {
   // Settle the stored URL against the tunnel's real state first, then list once —
   // except while a run is in flight. Opening another project is another TAB, and
   // a tab is its own session (project.ts's openProject / createProject claim one
-  // for it), so this picker only browses: no project has to make way for it. The
-  // base it browses through is the one streaming the run, which is as alive as a
-  // base gets; reconciling would ask the host for THIS WINDOW's default-slot URL
-  // and switch to it, i.e. move the base out from under a run still using it. So
-  // the reconcile is what a run skips, never the picker.
+  // for it), so this picker only browses: no project has to make way for it. It
+  // browses the session of the tab it was opened from, and the reconcile asks for
+  // exactly that slot: asking for the WINDOW's default one would CLAIM a second
+  // session (this machine's, when the tunnel has no URL yet) and adopt it, which
+  // is how a picker on a remote host came to list this machine's files. The base
+  // it browses through is the one streaming the run, which is as alive as a base
+  // gets, so the reconcile is what a run skips — never the picker.
   const settled = busy
     ? Promise.resolve(null)
-    : reconciledBackendUrl().catch((e) => {
+    : reconciledBackendUrl(activeSlotId()).catch((e) => {
         // an unreachable bridge must not leave the dialog empty with no word: say
         // so and fall through, so the local listing still has a chance to appear
         notice("could not reach the backend: " + (e && e.message ? e.message : e));

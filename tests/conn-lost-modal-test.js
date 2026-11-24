@@ -798,23 +798,29 @@ async function main() {
   check(resolveFn.indexOf("connLostExitPending()") < resolveFn.indexOf("hostSessionUrl()"),
   "and it reads before it asks — the ask is what hands the old session back");
   const hostUrlFn = fnBody("hostSessionUrl");
-  check(/window\.clutchApi\.baseUrl\(\)/.test(hostUrlFn) &&
+  check(/window\.clutchApi\.baseUrl\(/.test(hostUrlFn) &&
     /connLostExitPending\(\)\) return null;/.test(hostUrlFn) &&
-    hostUrlFn.indexOf("connLostExitPending()") < hostUrlFn.indexOf("window.clutchApi.baseUrl()"),
+    hostUrlFn.indexOf("connLostExitPending()") < hostUrlFn.indexOf("window.clutchApi.baseUrl("),
   "the ask itself reads the note before it asks: one door, so no caller can reach the host's answer without passing that guard");
-  check((APP.match(/window\.clutchApi\.baseUrl\(\)/g) || []).length === 1 &&
-    !/window\.clutchApi\.baseUrl\(\)/.test(resolveFn) &&
-    !/window\.clutchApi\.baseUrl\(\)/.test(fnBody("reconciledBackendUrl")),
-  "and it is the ONLY call site of the host's session ask in the whole renderer: the boot's claim and the tunnel's claim both go through the one that knows the note and the supervisor's sentinel");
+  // Every ask in the renderer NAMES the session it is for: the window's own
+  // (`slot`, hostSessionUrl above) and a tab's (`tab.id`, slots.ts claimTab). Two
+  // doors, both explicit — and the boot's claim and the tunnel's reconcile take the
+  // first, never the host's answer behind its back. A tab's restore cannot race the
+  // note either: boot.ts refuses to restore tabs while it is up.
+  const askArgs = [...APP.matchAll(/window\.clutchApi\.baseUrl\(([^)]*)\)/g)].map((m) => m[1].trim());
+  check(askArgs.length === 2 && askArgs.includes("slot") && askArgs.includes("tab.id") &&
+    !/window\.clutchApi\.baseUrl\(/.test(resolveFn) &&
+    !/window\.clutchApi\.baseUrl\(/.test(fnBody("reconciledBackendUrl")),
+  "and no claim is made without naming its session: the window's own and a tab's are the only two doors, and both the boot's claim and the tunnel's take the one that knows the note and the supervisor's sentinel");
   const reconciledFn = fnBody("reconciledBackendUrl");
   check(/connLostExitPending\(\)\) return null;/.test(reconciledFn) &&
-    reconciledFn.indexOf("connLostExitPending()") < reconciledFn.indexOf("hostSessionUrl()"),
+    reconciledFn.indexOf("connLostExitPending()") < reconciledFn.indexOf("hostSessionUrl("),
   "the second claim entry (a tunnel that still answers) refuses for the same note, also before it asks");
   check(/if \(!state\.apiBase\) return;/.test(fnBody("connectSSE")),
   "and the stream the boot opens next refuses to open on nothing: no null/api/events ever leaves the window");
   const connConnectFn = fnBody("connConnect");
   check(connConnectFn.indexOf("connLostExitClear()") > -1 &&
-    connConnectFn.indexOf("connLostExitClear()") < connConnectFn.indexOf("if (!v || v === connOnValue) return;"),
+    connConnectFn.indexOf("connLostExitClear()") < connConnectFn.indexOf("if (v === connOnValue) {"),
   "the note is spent by the user's own Connect, before any guard: no press of that button is a boot nobody asked for");
   const sshFn = fnBody("handleSshConnect");
   check(sshFn.indexOf("connLostExitClear()") > -1 &&

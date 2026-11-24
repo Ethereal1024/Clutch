@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit android/host/src/android-host.ts and run `node android/build-host.js`.
-// source sha256: ae7dfc5c439999c76f271a3535d2cd0f74099ba6db01ac4a4623591d2d52a15e
+// source sha256: 673ba7504301abd96235d50dcfac9e4fb2ced116719c795d8cf9fc037e3001d6
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -147,9 +147,10 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
     pluginLink.useHost(pluginHost);
     // The plugin tab's backend — the same object the desktop shell builds
     // (ui/main.js:55), fed this host's answers. N4 decides which machine a request
-    // is about: with no local supervisor, `supervisorBase()` is null, so a window
-    // that holds no session has no machine to be about and the view says so in its
-    // own words rather than the page dying on a missing channel. A window whose
+    // is about: this host has no local supervisor (`supervisorBase()` is null), and
+    // the CLAIM is what names a machine (`components-view.ts` `target`), so a window
+    // that holds no session has no machine to be about — the view answers with the
+    // quiet wait rather than the page dying on a missing channel. A window whose
     // session sits on the tunnel targets the far supervisor's URL — components are
     // installed on the machine that will RUN them, so "install onto the phone" is
     // never the answer when the tools run on the far side.
@@ -498,19 +499,27 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
             market: async (opts) => componentsView.market(opts || {}),
             // the reverse verbs, named the way the host names them: `versions` asks what
             // one machine holds, `remove` asks it to let one go (the host may refuse —
-            // something is running it — and that arrives as the error inside the answer)
-            versions: async (name) => componentsView.versions(String(name || ""), window),
+            // something is running it — and that arrives as the error inside the answer).
+            // Each write carries the PLACE the row it came from was read at, because the
+            // page draws both ledgers in one list and a name alone does not say which
+            // machine is being asked (ui/components-view.js whereFrom)
+            versions: async (name, place) => componentsView.versions(String(name || ""), String(place || ""), window),
             // the three writes go through `redeclare`: a client-domain change is a tool
             // appearing in every session this client serves (ui/plugin-link.js), and the
             // answer is the one place that knows a write happened
-            remove: async (name, opts) => redeclare(await componentsView.remove(String(name || ""), opts || {}, window)),
+            remove: async (name, opts, place) => redeclare(await componentsView.remove(String(name || ""), opts || {}, String(place || ""), window)),
             // the switch: the state being ASKED FOR travels, not a verb translated
-            setDisabled: async (name, disabled) => redeclare(await componentsView.setDisabled(String(name || ""), Boolean(disabled), window)),
+            setDisabled: async (name, disabled, place) => redeclare(await componentsView.setDisabled(String(name || ""), Boolean(disabled), String(place || ""), window)),
             install: async (name) => redeclare(await componentsView.install(String(name || ""), window, {
                 // one line at a time to the page that asked, on the channel the shim
                 // subscribes to; the window handle fans it out over the bridge's SSE
                 progress: (stage) => window.send("components:progress", stage),
             })),
+            // the knobs a component declares — the same two verbs the desktop's
+            // `components:settings` pair serves, so a page on the bridge is not offered
+            // a form whose submit has no route
+            settings: async (name, place) => componentsView.settings(String(name || ""), String(place || ""), window),
+            setSetting: async (name, values, place) => redeclare(await componentsView.setSetting(String(name || ""), values, String(place || ""), window)),
             // the mirrors a failed fetch is retried through: a read, and the two writes
             // that move the user's half of the list (ui/mirrors.js). Each write answers
             // with the list as it now is, so the page draws what was written.

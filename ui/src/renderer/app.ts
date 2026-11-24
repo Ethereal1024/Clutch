@@ -27,6 +27,7 @@ export const SUPERVISOR_BASE = "http://127.0.0.1:8890";
 export let DEFAULT_BASE = SUPERVISOR_BASE; // this machine's session base, once resolved
 
 // What does the host hold for THIS window right now — its session URL, or nothing?
+// `slot` narrows "this window" to one of its sessions (a tab); "" is the window's own.
 //
 // This is the ONE ask, and every reader of this window's session goes through it
 // (resolveApiBase below, backend-lifecycle.ts switchBackendResolved /
@@ -43,11 +44,17 @@ export let DEFAULT_BASE = SUPERVISOR_BASE; // this machine's session base, once 
 //   * null is an ANSWER, not a failure — the host looked and this window has no
 //     session (no tunnel on it, and no local one either). Callers stay where they
 //     are; the real URL, if one is coming, arrives via backend:base-changed.
-export async function hostSessionUrl() {
+export async function hostSessionUrl(slot = "") {
   if (connLostExitPending()) return null;
   if (!(window.clutchApi && window.clutchApi.baseUrl)) return null;
   try {
-    const b = await window.clutchApi.baseUrl(); // IPC: this window's session port
+    // WHICH of this window's sessions is asked about. "" is the window's own
+    // (pre-tabs) session; a tab id is that tab's (ui/src/renderer/slots.ts). The
+    // slot is not decoration: asking is also CLAIMING, so a caller that is
+    // browsing for a tab asks for that tab — asking for the default slot claims a
+    // second session, and adopting its answer is what moved a window off the
+    // machine its tab was on (fs-browser.ts, the picker's regression).
+    const b = await window.clutchApi.baseUrl(slot); // IPC: this window's session port
     const clean = b ? String(b).replace(/\/+$/, "") : "";
     if (clean && clean !== SUPERVISOR_BASE) return clean;
   } catch {

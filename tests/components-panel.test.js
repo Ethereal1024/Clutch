@@ -262,10 +262,10 @@ const COMPONENTS = [
 // removeMirror). Passed, this page HAS that channel (three reads, and the section
 // under the list); omitted, it is a shell that predates the feature and must draw
 // exactly as it did before — the reason the default is null and not a stub.
-// `pass` is the fake of what the connect's automatic components pass did
-// (ui/components-view.js `list()` -> `pass`). Omitted, this machine has had no
-// pass yet, which is a different fact from "a pass that did nothing".
-function page({ held = [], heldError = null, listError = null, target = LOCAL, entries = COMPONENTS, errors = [], unreachable = false, store = {}, session = {}, mirror = null, client = false, clientError = null, clientHeldError = null, heldPlace = "session", entryPlace = "session", pass = null, settings = null, slot = "" } = {}) {
+// What the connect's automatic components pass did is NOT a parameter: it is a
+// log line (ui/tunnel-bootstrap.js) and never part of a list, so a page cannot be
+// handed one. Section 39 keeps it that way.
+function page({ held = [], heldError = null, listError = null, target = LOCAL, entries = COMPONENTS, errors = [], unreachable = false, store = {}, session = {}, mirror = null, client = false, clientError = null, clientHeldError = null, heldPlace = "session", entryPlace = "session", settings = null, slot = "" } = {}) {
   const dom = makeDocument(IDS);
   const world = {
     listCalls: 0,
@@ -306,6 +306,9 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     // `slot` is decided before the module runs, because the pane names the open
     // tab on the reads it starts at load time (an empty tab list is ""
     slot,
+    // which machine the session half is asked of. A tab's session ARRIVES a moment
+    // after the tab does, so a test moves this to say "the claim landed".
+    target,
     slots: [],
     listDefer: false,
     listDeferreds: [],
@@ -325,15 +328,29 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
       // the shape ui/components-view.js list() answers in: two places, and for
       // each one the difference between "cannot be aimed at" (`error` / no
       // `client`) and "answered without its own list" (`inventoryError`)
+      //
+      // ...and WHICH machine the session half was asked of (`target`) as a fact,
+      // not left in the sentence: "none" is a tab with no session yet — nobody to
+      // ask, and it is answered by waiting — while "remote" with no base is a
+      // machine that exists and cannot be reached. The page draws the two in
+      // different weights (components-panel.ts plugReadNote), so a fake that only
+      // wrote the sentence could not tell them apart. It is read from `world` so a
+      // test can let a tab's session ARRIVE between two reads.
+      const said = world.target;
+      const missing = said.kind === "none";
       return {
-        sessionBase: target.base,
+        sessionBase: said.base,
+        target: said.kind,
         held: held.map((h) => ({ place: heldPlace, ...h })),
-        error: target.kind === "remote" && !target.base ? "the tunnel is up but carries no supervisor URL yet" : null,
+        error: missing
+          ? "this tab has no session yet, so there is no machine to ask — its components are read once it has one"
+          : said.kind === "remote" && !said.base
+          ? "the tunnel is up but carries no supervisor URL yet"
+          : null,
         inventoryError: heldError,
         client,
         clientError,
         clientInventoryError: clientHeldError,
-        pass,
       };
     },
     market: async () => {
@@ -349,23 +366,23 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
       if (world.control) return world.control.promise;
       return world.reply;
     },
-    remove: async (name, opts, slot = "") => {
+    remove: async (name, opts, place, slot = "") => {
       world.removeCalls.push(name);
       world.removeOpts.push(opts || null);
-      world.slots.push(["remove", slot]);
+      world.slots.push(["remove", slot, place]);
       if (world.control) return world.control.promise;
       return world.removeReply;
     },
-    versions: async (name, slot = "") => {
+    versions: async (name, place, slot = "") => {
       world.versionsCalls.push(name);
-      world.slots.push(["versions", slot]);
+      world.slots.push(["versions", slot, place]);
       if (world.versionsControl) return world.versionsControl.promise;
       return world.versionsReply;
     },
     onProgress: (cb) => { world.progress = cb; },
-    setDisabled: async (name, disabled, slot = "") => {
+    setDisabled: async (name, disabled, place, slot = "") => {
       world.switchCalls.push([name, disabled]);
-      world.slots.push(["setDisabled", slot]);
+      world.slots.push(["setDisabled", slot, place]);
       if (world.control) return world.control.promise;
       return world.switchReply;
     },
@@ -381,16 +398,16 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     world.settingsReads = [];
     world.settingWrites = [];
     world.settingsDoc = doc;
-    api.settings = async (name, slot = "") => {
+    api.settings = async (name, place, slot = "") => {
       world.settingsReads.push(name);
-      world.slots.push(["settings", slot]);
+      world.slots.push(["settings", slot, place]);
       if (world.settingsControl) return world.settingsControl.promise;
       if (settings.readError) return { ok: false, name, error: settings.readError };
-      return { ok: true, name, schema: doc.schema, values: { ...doc.values } };
+      return { ok: true, name, place, schema: doc.schema, values: { ...doc.values } };
     };
-    api.setSetting = async (name, patch, slot = "") => {
+    api.setSetting = async (name, patch, place, slot = "") => {
       world.settingWrites.push([name, patch]);
-      world.slots.push(["setSetting", slot]);
+      world.slots.push(["setSetting", slot, place]);
       if (world.settingWriteControl) return world.settingWriteControl.promise;
       if (settings.writeError) return { ok: false, name, error: settings.writeError };
       for (const [key, value] of Object.entries(patch || {})) doc.values[key] = value;
@@ -398,38 +415,7 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
       for (const [key, spec] of Object.entries(doc.schema)) {
         values[key] = key in doc.values ? doc.values[key] : (spec || {}).default;
       }
-      return { ok: true, name, values };
-    };
-  }
-  // the settings channel (ui/components-view.js `settings` / `setSetting`): the
-  // declaration's schema, the values this machine holds, and one write per call.
-  // Passed, this page HAS the verb; omitted, it is a shell that predates it and
-  // must not draw a control that looks like one — the reason the default is null.
-  // The write answers the values AS THEY NOW ARE (the store holds the effective
-  // document), which is what the form draws: never what the page sent.
-  if (settings) {
-    const doc = { schema: settings.schema || {}, values: { ...(settings.values || {}) } };
-    world.settingsReads = [];
-    world.settingWrites = [];
-    world.settingsDoc = doc;
-    api.settings = async (name, slot = "") => {
-      world.settingsReads.push(name);
-      world.slots.push(["settings", slot]);
-      if (world.settingsControl) return world.settingsControl.promise;
-      if (settings.readError) return { ok: false, name, error: settings.readError };
-      return { ok: true, name, schema: doc.schema, values: { ...doc.values } };
-    };
-    api.setSetting = async (name, patch, slot = "") => {
-      world.settingWrites.push([name, patch]);
-      world.slots.push(["setSetting", slot]);
-      if (world.settingWriteControl) return world.settingWriteControl.promise;
-      if (settings.writeError) return { ok: false, name, error: settings.writeError };
-      for (const [key, value] of Object.entries(patch || {})) doc.values[key] = value;
-      const values = {};
-      for (const [key, spec] of Object.entries(doc.schema)) {
-        values[key] = key in doc.values ? doc.values[key] : (spec || {}).default;
-      }
-      return { ok: true, name, values };
+      return { ok: true, name, place, values };
     };
   }
   // the mirror channel, when this page is given one: a mutable list the fake
@@ -693,7 +679,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     await settle();
     const ask = p.world.confirms[0];
     check(p.world.confirms.length === 1 && ask.ok === "Install", "installing asks first, with the verb on the button");
-    check(/into the component directory on this session/.test(ask.text), "the question names the place the bytes land in");
+    check(/into the component directory on the session machine/.test(ask.text), "the question names the place the bytes land in");
     check(/neither act is a rollback/.test(ask.text), "and says what the write costs: removable again, but never a rollback (I5)");
     check(p.world.installCalls.length === 0, "a declined install writes nothing");
     check(p.note().textContent === "", "and leaves no verdict behind");
@@ -722,7 +708,10 @@ const CODE = mod ? rendererScript("components-panel") : "";
     const entry = { name: "clutch-websearch", place: "client", version: "0.2.0", origin: "checkout", source: "…/clutch-websearch", published: null };
     const p = page({ entries: [entry], client: true });
     await p.open();
-    check(/goes to this client/.test(rowNamed(p.body(), "clutch-websearch").title), "the row facts name the place the declaration names");
+    check(
+      !/goes to|this client|the session machine/.test(rowNamed(p.body(), "clutch-websearch").title),
+      "the row facts do not restate the place: it is the declaration's, it is not a choice, and the row already draws what it means"
+    );
     check(p.buttons()[0].title === "install clutch-websearch on this client", "and the control says the same place, with no third one to pick");
     p.world.control = defer();
     p.buttons()[0].click();
@@ -777,7 +766,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     check(/the plugin table is unreadable/.test(clientRow.title), "and its facts carry the sentence that explains it");
     check(p.buttons().every((b) => !b.disabled), "a place whose list failed still receives bytes: it is a shelf that was not read, not a place that is gone");
     check(
-      /what this session holds could not be read; the host still decides/.test(p.buttons()[0].title) &&
+      /what the session machine holds could not be read; the host still decides/.test(p.buttons()[0].title) &&
         /what this client holds could not be read; the host still decides/.test(p.buttons()[1].title),
       "and both controls say the host is still the one deciding"
     );
@@ -817,12 +806,12 @@ const CODE = mod ? rendererScript("components-panel") : "";
     // when it is idle): the page says so, because the first start is the slow one
     p.world.progress({ stage: "wake", name: "clutch-workspace" });
     check(
-      /this session is starting its supervisor/.test(p.stateText("clutch-workspace")),
+      /the session machine is starting its supervisor/.test(p.stateText("clutch-workspace")),
       "the wake stage says the target machine's supervisor is coming up"
     );
 
     p.world.progress({ stage: "upload", name: "clutch-workspace", version: "0.1.0+5f900739" });
-    check(/sending clutch-workspace 0\.1\.0\+5f900739 to this session/.test(p.stateText("clutch-workspace")), "the upload stage names the bytes and the machine");
+    check(/sending clutch-workspace 0\.1\.0\+5f900739 to the session machine/.test(p.stateText("clutch-workspace")), "the upload stage names the bytes and the machine");
     p.world.progress({ stage: "upload", name: "clutch-memory" });
     check(/sending clutch-workspace/.test(p.stateText("clutch-workspace")), "a stage from another window's install is ignored");
 
@@ -830,7 +819,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     // which machine is doing the moving
     p.world.progress({ stage: "fetch", name: "clutch-workspace", version: "0.1.0+5f900739" });
     check(
-      /this session is fetching clutch-workspace 0\.1\.0\+5f900739/.test(p.stateText("clutch-workspace")),
+      /the session machine is fetching clutch-workspace 0\.1\.0\+5f900739/.test(p.stateText("clutch-workspace")),
       "the fetch stage says the target machine is getting its own bytes, not receiving ours"
     );
     p.world.progress({ stage: "fetch", name: "clutch-memory" });
@@ -838,7 +827,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
 
     p.world.control.res({ ok: true, status: "installed", version: "0.1.0+5f900739", digest: "5f900739e6a35f43", path: "/home/u/.clutch/components/clutch-workspace" });
     await settle();
-    check(/^installed clutch-workspace 0\.1\.0\+5f900739 on this session · \/home\/u/.test(p.stateText("clutch-workspace")), "the verdict is the host's, with the path it landed at, and it stays on that row");
+    check(/^installed clutch-workspace 0\.1\.0\+5f900739 on the session machine · \/home\/u/.test(p.stateText("clutch-workspace")), "the verdict is the host's, with the path it landed at, and it stays on that row");
     check(/busy/.test(p.state("clutch-workspace").className) === false, "the row is no longer drawn as busy once the write is over");
     check(p.state("clutch-workspace").className.includes("error") === false, "a successful install is not drawn as an error");
     check(p.world.listCalls > before, "the machine's inventory is read again after it changed");
@@ -851,7 +840,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     p.world.reply = { ok: true, status: "current", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" };
     p.buttons()[0].click();
     await settle();
-    check(/already current \(0\.1\.0\+5f900739\) on this session — nothing was sent/.test(p.stateText("clutch-workspace")), "the host's 'current' verdict is reported as nothing sent");
+    check(/already current \(0\.1\.0\+5f900739\) on the session machine — nothing was sent/.test(p.stateText("clutch-workspace")), "the host's 'current' verdict is reported as nothing sent");
   }
 
   // 7. a refusal is quoted, not paraphrased, and drawn as a failure
@@ -884,7 +873,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     check(p.removes().length === 1, "an installed component gets a removal control, one per held row");
     check(ownerName(p.removes()[0]) === "clutch-workspace", "and it belongs to the row it would empty");
     check(p.removes()[0].textContent === "Remove", "the control says what it does");
-    check(/remove clutch-workspace 0\.1\.0\+5f900739 from this session/.test(p.removes()[0].title), "and its title names the machine that would lose the bytes");
+    check(/remove clutch-workspace 0\.1\.0\+5f900739 from the session machine/.test(p.removes()[0].title), "and its title names the machine that would lose the bytes");
   }
 
   // 10. asking first, and the question is the whole point: a removal is a
@@ -897,7 +886,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     await settle();
     const ask = p.world.confirms[0];
     check(p.world.confirms.length === 1 && ask.ok === "Remove", "removing asks first, with the verb on the button");
-    check(/is deleted from the component directory on this session/.test(ask.text), "the question says the bytes are deleted, and where");
+    check(/is deleted from the component directory on the session machine/.test(ask.text), "the question says the bytes are deleted, and where");
     check(/cannot be undone from here/.test(ask.text), "and that nothing here can put them back (I5)");
     check(p.world.removeCalls.length === 0, "a declined removal deletes nothing");
     check(p.note().textContent === "", "and leaves no verdict behind");
@@ -913,7 +902,11 @@ const CODE = mod ? rendererScript("components-panel") : "";
     p.removes()[0].click();
     await settle();
     check(p.world.removeCalls.join(",") === "clutch-workspace", "the confirmed removal hands that name to the channel");
-    check(/^removed clutch-workspace 0\.1\.0\+5f900739 from this session$/.test(p.stateText("clutch-workspace")), "the host's verdict names the versions that went");
+    check(
+      p.world.slots.filter((c) => c[0] === "remove").every((c) => c[2] === "session"),
+      "and it is aimed by the place the row named, not by the component's name (a name is not a place)"
+    );
+    check(/^removed clutch-workspace 0\.1\.0\+5f900739 from the session machine$/.test(p.stateText("clutch-workspace")), "the host's verdict names the versions that went");
     check(p.state("clutch-workspace").className.includes("error") === false, "a completed removal is not drawn as an error");
     check(p.world.listCalls > before, "and the machine's inventory is read again after it changed");
   }
@@ -926,7 +919,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     p.world.removeReply = { ok: true, status: "absent", removed: [] };
     p.removes()[0].click();
     await settle();
-    check(/^clutch-workspace was not installed on this session — there was nothing to remove$/.test(p.stateText("clutch-workspace")), "a component that was already gone is reported as nothing to remove");
+    check(/^clutch-workspace was not installed on the session machine — there was nothing to remove$/.test(p.stateText("clutch-workspace")), "a component that was already gone is reported as nothing to remove");
     check(p.state("clutch-workspace").className.includes("error") === false, "and it is not drawn as a failure");
   }
 
@@ -962,7 +955,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     p.world.control = defer();
     p.removes()[0].click();
     await settle(3);
-    check(/removing clutch-workspace from this session/.test(p.stateText("clutch-workspace")), "the row says what is being removed from it, while it is being removed");
+    check(/removing clutch-workspace from the session machine/.test(p.stateText("clutch-workspace")), "the row says what is being removed from it, while it is being removed");
     check(p.removes().every((b) => b.disabled), "and the removal control is dead for the duration");
     check(p.buttons().every((b) => b.disabled), "as is every install control (one write at a time)");
     p.world.control.res({ ok: true, status: "removed", removed: ["0.1.0+5f900739"] });
@@ -1007,7 +1000,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     check(ownerName(p.switches()[0]) === "clutch-workspace", "and it belongs to the row whose fact it changes");
     check(p.switches()[0].textContent === "Disable", "a component the machine is driving offers 'Disable'");
     check(
-      /stop this session driving clutch-workspace/.test(p.switches()[0].title),
+      /stop the session machine driving clutch-workspace/.test(p.switches()[0].title),
       "and its title names the machine it stops, not the bytes"
     );
     check(/nothing is deleted/.test(p.switches()[0].title), "the title says the bytes are untouched");
@@ -1019,7 +1012,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     const held = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43", disabled: true }] });
     await held.open();
     check(held.switches()[0].textContent === "Enable", "a component that is held but not driven offers 'Enable'");
-    check(/drive clutch-workspace on this session again/.test(held.switches()[0].title), "and its title names the machine it drives again");
+    check(/drive clutch-workspace on the session machine again/.test(held.switches()[0].title), "and its title names the machine it drives again");
     check(/its bytes stay where they are/.test(held.switches()[0].title), "still saying the bytes are what does not move");
     check(
       /^clutch-workspace stopped$/.test(textOf(headOf(rowNamed(held.body(), "clutch-workspace")))),
@@ -1029,7 +1022,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
       /(^| )stopped( |$)/.test(rowNamed(held.body(), "clutch-workspace").className),
       "and the whole row is coloured as stopped, not just the chip (U-7)"
     );
-    check(/held on this session, but not driven/.test(held.text()), "and a line saying it is still held (so 'stopped' is not read as 'gone')");
+    check(/held on the session machine, but not driven/.test(held.text()), "and a line saying it is still held (so 'stopped' is not read as 'gone')");
     check(held.removes().length === 1, "a stopped component is still listed and can still be removed");
   }
 
@@ -1046,7 +1039,11 @@ const CODE = mod ? rendererScript("components-panel") : "";
     check(p.world.confirms.length === 0, "switching asks no question (nothing is destroyed and the act is its own undo)");
     check(JSON.stringify(p.world.switchCalls) === JSON.stringify([["clutch-workspace", true]]), "the state asked for goes on the wire, not a verb");
     check(
-      /^stopped driving clutch-workspace on this session — it is still held there, its tools are no longer offered$/.test(p.stateText("clutch-workspace")),
+      p.world.slots.filter((c) => c[0] === "setDisabled").every((c) => c[2] === "session"),
+      "and the switch says which place it is switching, so a client plugin is never aimed at the session machine"
+    );
+    check(
+      /^stopped driving clutch-workspace on the session machine — it is still held there, its tools are no longer offered$/.test(p.stateText("clutch-workspace")),
       "the verdict says the component is still held (the machine's own bit, when it sent one, else the state asked for)"
     );
     check(p.state("clutch-workspace").className.includes("error") === false, "a completed switch is not drawn as a failure");
@@ -1062,7 +1059,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     await settle();
     check(JSON.stringify(p.world.switchCalls) === JSON.stringify([["clutch-workspace", false]]), "an Enable sends disabled=false — the state, the way the host spells it");
     check(
-      /^driving clutch-workspace on this session again — its tools are offered once more$/.test(p.stateText("clutch-workspace")),
+      /^driving clutch-workspace on the session machine again — its tools are offered once more$/.test(p.stateText("clutch-workspace")),
       "and the verdict says the tools are offered again"
     );
     check(p.world.confirms.length === 0, "starting a component again is as unceremonious as stopping it");
@@ -1078,7 +1075,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     p.switches()[0].click();
     await settle();
     check(
-      /^clutch-workspace is not held by this session — there was nothing to stop or start$/.test(p.stateText("clutch-workspace")),
+      /^clutch-workspace is not held by the session machine — there was nothing to stop or start$/.test(p.stateText("clutch-workspace")),
       "a component that machine does not hold is reported as nothing to switch"
     );
     check(p.state("clutch-workspace").className.includes("error") === false, "and it is not drawn as a failure");
@@ -1117,7 +1114,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     p.world.control = defer();
     p.switches()[0].click();
     await settle(3);
-    check(/stopping clutch-workspace on this session…/.test(p.stateText("clutch-workspace")), "the row says what is being stopped, while it is being stopped");
+    check(/stopping clutch-workspace on the session machine…/.test(p.stateText("clutch-workspace")), "the row says what is being stopped, while it is being stopped");
     check(/is being stopped/.test(p.removes()[0].title), "and the removal control names the act that is holding it up, not 'installed'");
     check(p.switches().every((b) => b.disabled), "the switch is dead for the duration");
     check(p.buttons().every((b) => b.disabled), "so is every install control");
@@ -1130,7 +1127,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     back.world.control = defer();
     back.switches()[0].click();
     await settle(3);
-    check(/driving clutch-workspace on this session again…/.test(back.stateText("clutch-workspace")), "the other direction has its own sentence");
+    check(/driving clutch-workspace on the session machine again…/.test(back.stateText("clutch-workspace")), "the other direction has its own sentence");
     back.world.control.res({ ok: true, status: "enabled", disabled: false });
     await settle();
   }
@@ -1176,7 +1173,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     );
     check(p.ones().length === 2, "each version gets its own removal control");
     check(ownerName(p.ones()[0]) === "0.1.0+bbbb", "and each control belongs to the version row that names what it takes");
-    check(/remove clutch-workspace 0\.1\.0\+bbbb from this session/.test(p.ones()[0].title), "its title names the machine that would lose those bytes");
+    check(/remove clutch-workspace 0\.1\.0\+bbbb from the session machine/.test(p.ones()[0].title), "its title names the machine that would lose those bytes");
     check(/the versions beside it stay/.test(p.ones()[0].title), "and says the versions beside it stay — one version is not the whole component");
     p.versionBtns()[0].click();
     await settle();
@@ -1277,7 +1274,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     await settle();
     check(go.world.removeCalls.join(",") === "clutch-workspace", "the name goes to the channel like any removal");
     check(go.world.removeOpts[0] && go.world.removeOpts[0].version === "0.1.0+bbbb", "and the version names which one — the whole-component removal sends no such thing");
-    check(/^removed clutch-workspace 0\.1\.0\+bbbb from this session$/.test(go.stateText("clutch-workspace")), "the host's verdict names the version that went");
+    check(/^removed clutch-workspace 0\.1\.0\+bbbb from the session machine$/.test(go.stateText("clutch-workspace")), "the host's verdict names the version that went");
     check(go.world.listCalls > before, "the machine's inventory is read again after it changed");
     check(go.world.versionsCalls.length === 2, "and so is the open version list — what it shows is what the machine now holds");
 
@@ -1316,7 +1313,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     one.world.control = defer();
     one.ones()[0].click();
     await settle(3);
-    check(/removing clutch-workspace 0\.1\.0\+bbbb from this session/.test(one.stateText("clutch-workspace")), "a removal of ONE version names that version while it happens");
+    check(/removing clutch-workspace 0\.1\.0\+bbbb from the session machine/.test(one.stateText("clutch-workspace")), "a removal of ONE version names that version while it happens");
     check(one.removes().every((b) => b.disabled) && one.switches().every((b) => b.disabled) && one.buttons().every((b) => b.disabled), "one write at a time, across every control");
     one.world.control.res({ ok: true, status: "removed", removed: ["0.1.0+bbbb"] });
     await settle();
@@ -1504,7 +1501,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     await settle();
     check(p.state("solo") === null, "the row went away with the bytes it held");
     check(
-      /^removed solo 1\.0\.0\+bbbbbbbb from this session$/.test(p.note().textContent),
+      /^removed solo 1\.0\.0\+bbbbbbbb from the session machine$/.test(p.note().textContent),
       "so the host's verdict falls back to the note instead of going missing with the row"
     );
 
@@ -1665,7 +1662,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     const stopped = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43", disabled: true }] });
     await stopped.open();
     const srow = rowNamed(stopped.body(), "clutch-workspace");
-    check(drawnText(srow).includes("held on this session, but not driven"), "a stopped row's sentence says it is still held");
+    check(drawnText(srow).includes("held on the session machine, but not driven"), "a stopped row's sentence says it is still held");
     check(stopped.switches()[0].textContent === "Enable", "and its control offers the way back, not the way out");
   }
 
@@ -2011,83 +2008,78 @@ const CODE = mod ? rendererScript("components-panel") : "";
     }
   }
 
-  // 39. the pass at connect, as the page tells it: a component the market moved
-  //     off this machine is DELETED there by the connect's own pass
-  //     (ui/components.js `retireComponents`), so it is not a row any more and
-  //     the list alone would read as "it was never here". The line under the
-  //     list is the only place that removal is stated (the log is a file).
+  // 38b. ONE NAME, TWO PLACES: the copy the declaration names is the row, and the
+  //      other copy is drawn under it as a leftover with its own way to let it go.
+  //      Joining the two by name alone is what used to make the second copy vanish
+  //      from the page while its bytes stayed on that machine — and a page that
+  //      cannot show a thing cannot let it go either.
   {
-    const passLines = (p) => walk(p.body()).filter((n) => /(^| )plug-pass( |$)/.test(n.className));
-
-    // a pass that let one name go: the name, the version and the market's reason
-    const one = page({
-      held: [],
-      pass: {
-        at: 1700000000000,
-        installed: 1,
-        deferred: 0,
-        retired: [{ name: "clutch-websearch", version: "0.1.0", reason: "the market's copy belongs to the client", status: "removed" }],
-        errors: [],
-      },
+    const p = page({
+      client: true,
+      held: [
+        { name: "clutch-websearch", place: "session", version: "0.1.0+aaaa", digest: "aaaa0000aaaa0000" },
+        { name: "clutch-websearch", place: "client", version: "0.2.0+bbbb", digest: "bbbb0000bbbb0000" },
+      ],
+      entries: [
+        { name: "clutch-websearch", place: "client", version: "0.2.0", origin: "checkout", source: "…/clutch-websearch", published: null },
+      ],
     });
-    await one.open();
-    check(passLines(one).length === 1, "a pass that let a component go says so, once, under the list");
-    const said = passLines(one)[0].textContent;
+    await p.open();
+    const at = (cls) => walk(p.body()).filter((n) => new RegExp("(^| )" + cls + "( |$)").test(n.className));
+    check(at("plug-row").length === 1, "one name is one row, wherever it is held");
     check(
-      /clutch-websearch/.test(said) && /0\.1\.0/.test(said) && /belongs to the client/.test(said),
-      "naming the component, the version, and the reason in the market's own words"
+      /held 0\.2\.0\+bbbb/.test(rowNamed(p.body(), "clutch-websearch").title),
+      "and that row is the copy the declaration names (this client's), not whichever the inventory listed first"
     );
+    check(at("plug-stray").length === 1, "the other copy is drawn as a leftover rather than folded away");
+    const stray = at("plug-stray")[0];
     check(
-      walk(one.body()).every((n) => !/clutch-websearch/.test(n.textContent) || n === passLines(one)[0]),
-      "and it is a sentence, not a row: nothing offers a control for what is gone"
+      /also held on the session machine — a leftover/.test(drawnText(stray)),
+      "the leftover says which place still holds it, and that the row above is the one the declaration names"
     );
-    check(one.buttons().every((b) => !/websearch/.test(b.title || "")), "no button behind the removal either");
-
-    // two names, one line — and a name the pass could not take goes in the same
-    // sentence: the page does not get to report half a pass
-    const many = page({
-      pass: {
-        at: 1700000000000,
-        installed: 0,
-        deferred: 2,
-        retired: [
-          { name: "clutch-a", version: "0.1.0", reason: "the market no longer lists it", status: "removed" },
-          { name: "clutch-b", version: "0.2.0", reason: "the market's copy belongs to the client", status: "removed" },
-        ],
-        errors: [{ name: "clutch-c", reason: "it is running: stop it first" }],
-      },
-    });
-    await many.open();
-    check(passLines(many).length === 1, "two removals and a refusal are still one line");
-    const all = passLines(many)[0].textContent;
+    const letGo = at("plug-remove").find((n) => n.textContent === "Let it go");
+    check(Boolean(letGo), "with its own control, which is an ordinary removal — not an automatic pass over the inventory");
     check(
-      /2 names/.test(all) && /clutch-a/.test(all) && /clutch-b/.test(all),
-      "the count comes first when there is more than one, then every name"
-    );
-    check(
-      /could not let go of clutch-c \(it is running: stop it first\)/.test(all),
-      "and a name the host refused is quoted in the host's own words, not dropped"
+      /remove clutch-websearch 0\.1\.0\+aaaa from the session machine/.test(letGo.title) &&
+        /stays where it is/.test(letGo.title),
+      "and its title names the copy it would remove, and says the row's copy is not touched"
     );
 
-    // a pass that did nothing says nothing: an empty report is not news
-    const quiet = page({ pass: { at: 1700000000000, installed: 2, deferred: 0, retired: [], errors: [] } });
-    await quiet.open();
-    check(passLines(quiet).length === 0, "a pass that only installed draws no line: there is nothing a row cannot already say");
+    // letting it go is aimed at the place that HOLDS that copy: the verb carries a
+    // place, so this cannot land on the row's machine by name
+    p.world.removeReply = { ok: true, status: "removed", removed: ["0.1.0+aaaa"] };
+    letGo.click();
+    await settle(2);
+    check(p.world.removeCalls.join(",") === "clutch-websearch", "the leftover's control removes that name");
+    check(
+      p.world.slots.filter((c) => c[0] === "remove").every((c) => c[2] === "session"),
+      "and it is aimed at the place the leftover came from (the row's own copy is this client's)"
+    );
+  }
 
-    // no pass at all is the same nothing, and for a different reason
-    const fresh = page();
-    await fresh.open();
-    check(passLines(fresh).length === 0, "a machine no pass has run against says nothing about one");
+  // 39. the automatic pass at connect is not on this page at all. It is a thing
+  //     that happened to one machine at one moment (a retirement, a failed fetch)
+  //     and it says its piece in the log (ui/tunnel-bootstrap.js). It used to ride
+  //     along on `list()` as `pass` and be drawn as a line under the list — a
+  //     second, older picture of what a machine holds, under a list that had just
+  //     been read. Two pictures of one machine is how the page came to disagree
+  //     with itself; what a place holds is the inventories and nothing else.
+  {
+    const p = page();
+    await p.open();
+    const lines = walk(p.body()).filter((n) => /(^| )plug-pass( |$)/.test(n.className));
+    check(lines.length === 0, "no pass line is drawn: the list is the only picture of what a machine holds");
+    check(
+      walk(p.body()).every((n) => !/could not let go of|let go of/.test(n.textContent || "")),
+      "and nothing on the page narrates a pass, in either voice"
+    );
 
-    // and the line is drawn in the list's quieter voice, one rule below the
-    // install caution: both are facts ABOUT the list, not rows in it
+    // ...and the words and the rule it was drawn with are gone with it, so a later
+    // change cannot quietly bring a second picture back
     const sheet = fs.readFileSync(path.join(__dirname, "..", "ui", "style.css"), "utf8");
-    const rule = sheet.match(/\.plug-pass\s*\{([^}]*)\}/);
-    check(Boolean(rule), "ui/style.css gives the pass line a rule of its own");
-    check(
-      /color: var\(--muted\)/.test(rule[1]) && /font-size: var\(--fs-xs\)/.test(rule[1]),
-      "small and muted: a removal is a fact to read, not a failure to chase"
-    );
+    check(!/\.plug-pass\s*\{/.test(sheet), "ui/style.css carries no rule for a pass line");
+    const panel = fs.readFileSync(path.join(__dirname, "..", "ui", "src", "renderer", "components-panel.ts"), "utf8");
+    check(!/plugPassLine|plug-pass/.test(panel), "and the panel has no code that could draw one");
   }
 
   // 40. the settings a component DECLARES: the schema is the component's, the form
@@ -2177,6 +2169,10 @@ const CODE = mod ? rendererScript("components-panel") : "";
     check(
       JSON.stringify(p.world.settingWrites) === JSON.stringify([["clutch-skills", { "library.enabled": false }]]),
       "a write names the one key the control settled on"
+    );
+    check(
+      p.world.slots.filter((c) => c[0] === "settings" || c[0] === "setSetting").every((c) => c[2] === "session"),
+      "and the read and the write both name the place that owns the store, so no form is ever asked of a place that has none"
     );
     check(/library\.enabled is set — it takes effect the next time clutch-skills runs/.test(p.text()), "and the form says the write landed, and when it happens");
     check(p.settingReset("library.enabled") !== null, "the key that left its default now offers the way back");
@@ -2307,6 +2303,172 @@ const CODE = mod ? rendererScript("components-panel") : "";
     vm.runInContext("plugSetSlot('tab-a')", away.ctx);
     await settle();
     check(away.world.listCalls === 0, "a sidebar that is put away is the same fact one level up");
+  }
+
+  // 41. a tab with no session YET is a wait, not a failure — and the wait ends by
+  //     itself. The reported shape: a tab linked to a far machine is opened, and
+  //     the pane is read for it BEFORE its claim lands (ui/src/renderer/project.ts
+  //     activateTab announces the tab, then awaits the claim), so every
+  //     session-place row says `on the session machine, unknown` over a red
+  //     sentence. Nothing had failed — there was nobody to ask yet, and the claim
+  //     was already on its way — so the sentence is said quietly; and because the
+  //     tab ends up with a session, the list is asked again when it arrives
+  //     (`clutch:backend-changed` → plugSessionArrived) instead of keeping a
+  //     picture of a tab that had none for the rest of that tab's life.
+  {
+    const NONE = { kind: "none", base: "" };
+    const p = page({ target: NONE, held: [], client: true });
+    await p.open();
+    check(
+      /no session yet/.test(p.note().textContent) && !/(^| )error( |$)/.test(p.note().className),
+      "a tab with no session yet is said in the quiet weight: nobody failed, there was nobody to ask"
+    );
+    check(
+      /on the session machine, unknown/.test(p.text()),
+      "…and the row says `unknown` because its place was NOT read, which is not the same as holding nothing"
+    );
+    check(!/is claimed/.test(p.note().textContent), "and the host's own word for it is not on the page");
+
+    // the session ARRIVES: this is the one event that ends the wait, and the pane
+    // is what asks again — no tab switch, no folded group, no reload
+    const before = p.world.listCalls;
+    p.world.target = LOCAL;
+    vm.runInContext("plugSessionArrived()", p.ctx);
+    await settle();
+    check(p.world.listCalls === before + 1, "the session arriving is what asks the list again");
+    check(p.note().textContent === "", "…and the note goes away with the wait it described");
+
+    // a session that arrives WHILE the list is being read: the read in flight is
+    // the one that missed it, so it is asked again once it settles — once, because
+    // two reads for one arrival is a read on somebody else's answer
+    const flight = page({ target: NONE, held: [] });
+    flight.world.listDefer = true; // this read is held open, so the arrival can land mid-flight
+    flight.world.slot = "tab-r";
+    vm.runInContext("plugSetSlot('tab-r')", flight.ctx);
+    await settle();
+    const asked = flight.world.listCalls;
+    flight.world.target = LOCAL;
+    vm.runInContext("plugSessionArrived()", flight.ctx);
+    await settle();
+    check(flight.world.listCalls === asked, "a session that arrives mid-read does not start a second read beside the one in flight");
+    flight.world.listDefer = false;
+    flight.world.listDeferreds[0].res({
+      sessionBase: "",
+      target: "none",
+      held: [],
+      error: "this tab has no session yet, so there is no machine to ask — its components are read once it has one",
+    });
+    await settle();
+    check(flight.world.listCalls === asked + 1, "…it is asked again as soon as that read settles, exactly once");
+
+    // the other shape, which must stay red: a machine that is there and did not
+    // answer. Waiting does not fix this one, and the page says so in the error
+    // colour (`plugReadNote` weighs the two by `list().target`, not by the words)
+    const broken = page({ target: { kind: "remote", base: "" } });
+    await broken.open();
+    check(
+      /(^| )error( |$)/.test(broken.note().className) && /tunnel is up/.test(broken.note().textContent),
+      "a machine that exists and cannot be reached is still a failure, in red"
+    );
+
+    // ...and an empty list under a tab with no session says the machine was not
+    // asked, rather than "nothing is installed in either place"
+    const bare = page({ target: NONE, held: [], entries: [] });
+    await bare.open();
+    check(
+      /this tab has no session yet/.test(bare.text()) && !/nothing is installed/.test(bare.text()),
+      "an empty list under a tab with no session says the session machine was not asked"
+    );
+
+    // the wiring itself: the mini-DOM's document has a no-op addEventListener, so
+    // the ONE line that connects the event to the read is pinned in the source.
+    // It is the renderer's `clutch:backend-changed` and not the host's
+    // `backend:base-changed`, on purpose: a first claim is answered silently
+    // (ensureSlotBackend's `notify = false`), because announcing a base makes every
+    // page in the window reconnect its stream.
+    const panel = fs.readFileSync(path.join(__dirname, "..", "ui", "src", "renderer", "components-panel.ts"), "utf8");
+    check(
+      /document\.addEventListener\("clutch:backend-changed", \(\) => plugSessionArrived\(\)\)/.test(panel),
+      "the pane listens for the session arriving, which is the only signal a FIRST claim produces"
+    );
+    check(
+      /if \(plugState\.pending\) \{\s*plugAskAgain = true;/.test(panel),
+      "a read in flight is not raced: the arrival is remembered and spent when it settles"
+    );
+  }
+
+  // 42. the slot a read ASKS FOR is the tab strip's answer at the moment of the ask,
+  //     not the copy this pane took the last time it was told. The reported shape: a
+  //     window booted onto one tab sets state.activeTabId from the strip's saved
+  //     list (tab-bar.ts loadTabs) WITHOUT dispatching `clutch:tab-state`, and the
+  //     pane's own module body had already run plugSetSlot(activeSlotId()) while
+  //     there was no tab to name — so it kept the window's default slot ("") and
+  //     asked it for the rest of that tab's life. Every read came back
+  //     `target: "none"`, the quiet note stayed up through the session's own claim,
+  //     and the reload button only re-asked the same empty slot; a tab switch
+  //     (which does dispatch) was the one thing that repaired it.
+  {
+    const NONE = { kind: "none", base: "" };
+    const p = page({ target: NONE, held: [], client: true }); // no tab yet: the strip answers ""
+    await p.open();
+    check(p.world.slots.every(([, slot]) => slot === ""), "with no tab on screen, every read names the window's own session");
+    check(/no session yet/.test(p.note().textContent), "…and that session has no machine to ask, which the note says");
+
+    // the tab comes back (a RESTORE, not a switch): no `clutch:tab-state` reaches
+    // the pane, so plugState.slot is still the "" it took at load time, and the
+    // tab's claim has landed with it
+    p.world.slot = "tab-restored";
+    p.world.target = LOCAL;
+    const before = p.world.listCalls;
+    p.el("plug-reload").click(); // the one manual ask the user has
+    await settle();
+    check(p.world.listCalls === before + 1, "a reload is one read");
+    check(
+      p.world.slots[p.world.slots.length - 1][1] === "tab-restored",
+      "…and it asks the tab on screen, not the default slot the pane took before the tab existed"
+    );
+    check(p.note().textContent === "", "…so the session that DID arrive ends the note without a tab switch");
+
+    // the same fact through the session's own arrival (what boot does after the
+    // claim): the read that event starts names the tab as well
+    const second = page({ target: NONE, held: [] });
+    await second.open();
+    second.world.slot = "tab-later";
+    second.world.target = LOCAL;
+    vm.runInContext("plugSessionArrived()", second.ctx);
+    await settle();
+    check(
+      second.world.slots[second.world.slots.length - 1][1] === "tab-later",
+      "the session arriving is read for the tab that has it"
+    );
+
+    // the wiring, pinned in the source: the live slot is taken on BEFORE the ask,
+    // and taking it on does not start a read of its own (that would be the read
+    // calling itself)
+    const panel = fs.readFileSync(path.join(__dirname, "..", "ui", "src", "renderer", "components-panel.ts"), "utf8");
+    check(
+      /const live = activeSlotId\(\);\s*if \(live !== plugState\.slot\) plugSetSlot\(live, \{ reread: false \}\);/.test(panel),
+      "plugRead asks the tab strip for the slot before it asks the host for the list"
+    );
+    check(
+      /export function plugSetSlot\(slot, \{ reread = true \} = \{\}\)/.test(panel) &&
+        /if \(reread && plugPaneVisible\(\)\) plugRead\(\);/.test(panel),
+      "…and the slot-taking can be done without starting a read beside this one"
+    );
+
+    // 42b. the pane's own height: it is the group's, not its content's, and a note
+    //      with nothing to say is not a line. What the user saw: a short list opened
+    //      with a blank band above it — a reserved note line, a filter row that
+    //      wrapped its five chips onto two lines, and a body that never got the
+    //      height of the group it sits in (the list started two thirds down a pane
+    //      whose rest was empty).
+    const sheet = fs.readFileSync(path.join(__dirname, "..", "ui", "style.css"), "utf8");
+    const rules = (sel) => [...sheet.matchAll(new RegExp(sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\{([^}]*)\\}", "g"))].map((m) => m[1].replace(/\s+/g, " ").trim());
+    check(rules("#plug-pane").some((r) => /flex: 1 1 auto/.test(r)), "the pane fills its dock group instead of hugging its content");
+    check(!rules(".plug-note").some((r) => /min-height/.test(r)), "and the note reserves no line for a sentence it does not have");
+    check(rules(".plug-note:empty").some((r) => /display: none/.test(r)), "…it is not drawn at all when it is empty");
+    check(rules(".plug-filter-chips").some((r) => /flex-wrap: nowrap/.test(r)), "the five views are one row of height, never two");
+    check(rules(".plug-filter-chip").some((r) => /flex: none/.test(r)), "…and a chip's label is never the thing that gives way");
   }
 
   summary("components-panel: the plugin tab's writes (destination, confirm text, verdicts, re-read)");

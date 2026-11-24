@@ -537,7 +537,21 @@ async function installServer(
   // skipped the restart and the connect then died at the health gate on every
   // attempt, forever, until someone restarted the remote box.
   const before = await remoteServingState(probe);
-  if (reinstalled || before === "DOWN" || before === "WEDGED") {
+  // A port we could not MEASURE is not a server we may skip. On a remote with no
+  // python3 and no `ss` (the field's GPU box: probe py=none, and the port check's
+  // own answer was UNKNOWN) that is the only verdict there is, and reading it as
+  // "already running" made the connect unwinnable: the supervisor reaps itself
+  // 25s after its last session (`--idle-timeout 25`, agent/procmgr/supervise.py),
+  // so by the next connect nothing was listening — and this gate, the ONLY place
+  // that ever starts it, kept concluding "server already running (unmeasurable)"
+  // and skipping the start. Seven attempts in one field log died at the health
+  // gate with "backend not reachable on the remote host" over a remote whose
+  // install was intact and whose port was empty. So an unmeasurable port starts
+  // the server too: a start when one IS already running costs nothing (the far
+  // side's bind is refused, that process exits, and the supervisor holding the
+  // port keeps answering), while a start skipped when nothing is running cannot
+  // be recovered anywhere else in this client.
+  if (reinstalled || before === "DOWN" || before === "WEDGED" || before === "UNMEASURABLE") {
     if (before === "WEDGED") {
       tunnelLog(`[bootstrap] port ${REMOTE_API_PORT} is bound but not answering — replacing its process`);
       const stopped = await stopServer(probe, strategy);
@@ -630,21 +644,13 @@ function stopServerCmd(strategy, signal = "") {
 // something a user has to be able to SEE: the plugin tab draws the names this
 // pass let go of (ui/js/components-panel.js). No second pass and no second
 // summary — the page reads the one pass and the one log line.
-function installComponents(base, onPass = null) {
-  // The pass's answer goes two places, and they are the same facts: the log line
-  // below (a file, `~/.clutch/tunnel.log`) and the caller's `onPass` — which
-  // keeps it for the plugin tab (ui/tunnel-connect.js → state.componentsPass).
-  // A pass that could not run at all is reported the same way rather than
-  // disappearing: a removal the page cannot see is how "the market moved it"
-  // reads as "it vanished".
-  const report = (pass) => {
-    if (!onPass) return;
-    try {
-      onPass(pass);
-    } catch (e) {
-      tunnelLog("[components] pass report failed: " + ((e && e.message) || e));
-    }
-  };
+function installComponents(base) {
+  // The pass's answer goes to the log and nowhere else. It is a thing that
+  // happened to ONE machine at ONE moment, and it used to travel to the plugin tab
+  // as `state.componentsPass` — a second, older picture of what a place holds,
+  // drawn under a list that had just been read. What a place holds is its own
+  // inventory (ui/src/host/components-view.ts `list`); what the pass did is an
+  // event, and ~/.clutch/tunnel.log is where events live.
   Promise.resolve()
     .then(() => components.ensureComponents(base, { progress: (m) => tunnelLog("[components] " + m) }))
     .then((r) => {
@@ -653,18 +659,17 @@ function installComponents(base, onPass = null) {
           `skipped=${r.skipped.length} deferred=${r.deferred.length} ` +
           `retired=${r.retired.map((x) => x.name).join(",") || 0} errors=${r.errors.length}`
       );
-      report({
-        at: Date.now(),
-        installed: r.installed.length,
-        retired: r.retired,
-        deferred: r.deferred.length,
-        errors: r.errors,
-      });
+      // a removal is a DELETE and leaves no row behind, so the reasons are said
+      // here or nowhere: "the market moved it" must not read as "it vanished"
+      for (const x of r.retired) {
+        tunnelLog(`[components] let go of ${x.name}${x.version ? " " + x.version : ""} (${x.reason})`);
+      }
+      for (const e of r.errors) {
+        tunnelLog(`[components] could not let go of ${e.name || "a component"} (${e.reason})`);
+      }
     })
     .catch((e) => {
-      const why = (e && e.message) || e;
-      tunnelLog("[components] pass failed: " + why);
-      report({ at: Date.now(), installed: 0, retired: [], deferred: 0, errors: [{ name: "", reason: why }] });
+      tunnelLog("[components] pass failed: " + ((e && e.message) || e));
     });
 }
 

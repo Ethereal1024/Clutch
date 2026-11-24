@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/preload.ts and run `npm run build:host`.
-// source sha256: 2810af1878028b83261311f666b91cc442e80ca27d0ead3ab82c0c4a6431420e
+// source sha256: 02d0f89eb3f70d3edc7a7196cabd9eac63c3ea2f9ebc17fe365c282b9328222d
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -51,11 +51,11 @@ contextBridge.exposeInMainWorld("clutchComponents", {
     list: (slotId) => ipcRenderer.invoke("components:list", slotId),
     market: (opts) => ipcRenderer.invoke("components:market", opts),
     install: (name, slotId) => ipcRenderer.invoke("components:install", name, slotId),
-    versions: (name, slotId) => ipcRenderer.invoke("components:versions", name, slotId),
-    remove: (name, opts, slotId) => ipcRenderer.invoke("components:remove", name, opts, slotId),
-    setDisabled: (name, disabled, slotId) => ipcRenderer.invoke("components:set-disabled", name, disabled, slotId),
-    settings: (name, slotId) => ipcRenderer.invoke("components:settings", name, slotId),
-    setSetting: (name, values, slotId) => ipcRenderer.invoke("components:set-setting", name, values, slotId),
+    versions: (name, place, slotId) => ipcRenderer.invoke("components:versions", name, place, slotId),
+    remove: (name, opts, place, slotId) => ipcRenderer.invoke("components:remove", name, opts, place, slotId),
+    setDisabled: (name, disabled, place, slotId) => ipcRenderer.invoke("components:set-disabled", name, disabled, place, slotId),
+    settings: (name, place, slotId) => ipcRenderer.invoke("components:settings", name, place, slotId),
+    setSetting: (name, values, place, slotId) => ipcRenderer.invoke("components:set-setting", name, values, place, slotId),
     mirrors: () => ipcRenderer.invoke("components:mirrors"),
     addMirror: (url) => ipcRenderer.invoke("components:mirror-add", url),
     removeMirror: (url) => ipcRenderer.invoke("components:mirror-remove", url),

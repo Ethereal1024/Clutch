@@ -33,7 +33,7 @@
 //
 // Three writes this page can perform, offered according to what each one costs.
 // A sentence that has to say WHERE says which of the two
-// places it means ("this client", "this session") and never offers a third; the
+// places it means ("this client", "the session machine") and never offers a third; the
 // confirmations say what the act actually costs (an install writes bytes over
 // whatever version is there; a removal DELETES them — neither is a rollback,
 // because nothing here keeps a copy of what it replaces or takes away), and the
@@ -83,16 +83,19 @@ export const plugState = {
   // holds nothing, and this is the bit that tells the two apart
   read: false,
   sessionBase: "", // the session machine supervisor URL, as the view resolved it
+  // WHICH machine the session half was asked of, as the view answered it
+  // (`list().target`): "none" until this tab has a session at all, then "local" or
+  // "remote". The difference is not cosmetic — no session YET is a wait (there is
+  // nobody to ask, and it ends by itself), while a machine that is there and will
+  // not answer is a failure — and the line under the list says the two in
+  // different weights (`plugReadNote`).
+  sessionKind: "",
   sessionError: null, // why the session machine cannot be AIMED at at all
   sessionHeldError: null, // why its own list did not arrive (the place itself is reachable)
   client: false, // this shell holds a client plugin domain
   clientError: null, // why that domain cannot be aimed at (or why it would not open)
   clientHeldError: null, // why its own list did not arrive
   held: [], // the rows BOTH places hold, each tagged with its own `place`
-  // what the last automatic pass over the session machine did — the names it let
-  // go of and the ones it could not ({at, installed, retired, deferred, errors}),
-  // or null when no pass has run against the machine this window is about
-  pass: null,
   market: null, // {entries, errors, unreachable}
   marketError: null, // why the market read itself failed
   pending: 0, // in-flight reads: the note line is derived from them
@@ -105,8 +108,8 @@ export const plugState = {
   mirrorResult: null, // {ok, text} — what the list said about the last add or remove
   busy: null, // {name, verb, stage} — a write in flight, nothing else may start
   result: null, // {ok, text} — the host's verdict on the last write
-  versions: null, // {name, rows, error} — the one open version list, as just read
-  versionsPending: null, // name whose version list is being read right now
+  versions: null, // {name, place, rows, error} — the one open version list, as just read
+  versionsPending: null, // {name, place} whose version list is being read right now
   versionsSeq: 0, // which version-list read is the current one (closing bumps it)
   // the one open settings form: the schema its declaration carries, the values
   // this machine holds, the key a write is in flight for, and what the host said
@@ -118,15 +121,25 @@ export const plugState = {
   query: "", // the name filter, as typed (never persisted)
 };
 
+// A read asked for again while one was still in flight (`plugSessionArrived`): the
+// news arrived between the ask and the answer, and plugRead refuses a second read
+// while `pending`. Spent by the settling read, once — never a loop.
+let plugAskAgain = false;
+
 // Where ONE row bytes live, in the two words the declaration speaks. This is not
 // a field and not a choice: `destinationOf` (ui/components.js) derives it from the
 // declaration, so it is the same in every session and there is no third value to
 // offer. The page says it only inside a sentence that would otherwise be about
 // nothing ("removed from where?"), never as a heading a user has to read.
+//
+// "this session" was the old word for the second place, and it named the wrong
+// thing: the session is the CLAIM (a tab, a base URL), while the bytes live on the
+// machine that runs its commands — which is a different machine whenever the
+// session is on the far side of a tunnel.
 export function plugPlace(item) {
   const place = item && item.place;
   if (place === "client") return "this client";
-  if (place === "session") return "this session";
+  if (place === "session") return "the session machine";
   return "";
 }
 
@@ -139,7 +152,7 @@ export function plugPlace(item) {
 export function plugPlaceName(item) {
   const place = typeof item === "string" ? item : item && item.place;
   if (place === "client") return "this client";
-  if (place === "session") return "this session";
+  if (place === "session") return "the session machine";
   return "the place its declaration names";
 }
 
@@ -386,12 +399,19 @@ export function plugSection(title, meta, rows, empty) {
 // offered is ONE row. The user never lines up two sections to learn whether
 // something is installed, and a row held in one place and offered for the other
 // says both, which is exactly how the declaration is meant to read.
+//
+// A name held in BOTH places is the one shape the join cannot decide: ONE name has
+// ONE place (the declaration says which), so one of the two copies is a leftover —
+// a component whose declaration changed under an install, or one put there by an
+// older build. Joining them by name alone HID that copy (it vanished from the page
+// while still sitting on disk), so the row keeps the copy the declaration names and
+// the other one rides along as `stray`, to be drawn and let go rather than forgotten.
 export function plugModel() {
   const byName = new Map();
   const order = [];
   const slot = (name) => {
     if (!byName.has(name)) {
-      byName.set(name, { name, entry: null, held: null });
+      byName.set(name, { name, entry: null, held: null, stray: null });
       order.push(name);
     }
     return byName.get(name);
@@ -401,10 +421,19 @@ export function plugModel() {
   for (const e of plugState.market ? plugState.market.entries : []) slot(e.name).entry = e;
   for (const h of plugState.held || []) {
     const cell = slot(h.name);
-    // ONE name has ONE place (the declaration says which), so when both domains
-    // hold the same name the row is the one the declaration names and the other is
-    // a leftover this page will not install over
-    if (!cell.held || (cell.entry && h.place === cell.entry.place)) cell.held = h;
+    if (!cell.held) {
+      cell.held = h;
+      continue;
+    }
+    // the second copy of this name: the declaration's place wins the row, and a
+    // row whose declaration has not been read keeps the copy that came first
+    const wanted = cell.entry ? cell.entry.place : "";
+    if (wanted && h.place === wanted && cell.held.place !== wanted) {
+      cell.stray = cell.held;
+      cell.held = h;
+    } else if (!cell.stray) {
+      cell.stray = h;
+    }
   }
   return order.map((n) => byName.get(n));
 }
@@ -599,11 +628,14 @@ export function plugItemMeta(item) {
     }
   }
   if (entry) {
-    // the one placement fact a row has: which of the two places its declaration
-    // names. It is not a choice and not a field — it is what the row IS
-    const place = plugPlace(entry);
-    if (place) meta.push("goes to " + place);
-    else if (plugPlaceUnread(entry)) meta.push("its place is its declaration's, read when something is installed from it");
+    // the place is transparent: it is what the declaration says, it is not a
+    // choice, and the row already draws what it MEANS ("installed", "not
+    // installed") — a tooltip line repeating the answer would be a rule the user
+    // has no use for. Only the unread case is said, because that one explains why
+    // the Install beside this row is live while no place is known yet.
+    if (!held && plugPlaceUnread(entry)) {
+      meta.push("its place is its declaration's, read when something is installed from it");
+    }
     if (entry.problem) meta.push("refused: " + entry.problem);
     if (!held) {
       // a place that could not be read, or one this build cannot reach, is why the
@@ -787,12 +819,56 @@ export function plugItemRow(item) {
     chips: plugItemChips(item),
     desc: plugItemDesc(item),
     actions: plugItemActions(item),
-    extra: plugItemExtra(item.held),
+    extra: plugItemExtra(item),
     state: plugItemState(item),
     // every fact the row no longer DRAWS is still answered, one hover away: the
     // list is for choosing, the tooltip for confirming (U-10)
     title: plugItemMeta(item).join(" · "),
   });
+}
+
+// The copy of this name the OTHER place holds (plugModel `stray`). It is drawn
+// under the row instead of being folded into it, because it is a fact about a
+// shelf nobody looked at: the same name is also on disk somewhere the declaration
+// says it does not belong, and a page that joined the two by name alone made that
+// copy disappear while its bytes stayed. "Let it go" is the ordinary removal —
+// aimed at the place that actually holds this copy, which is the whole reason the
+// verb carries a place — and the row above is the one the declaration names, so
+// letting this go changes nothing on screen but a stray line.
+export function plugStrayRow(stray) {
+  if (!stray) return null;
+  const box = document.createElement("div");
+  box.className = "plug-stray";
+  const line = document.createElement("div");
+  line.className = "plug-line";
+  line.textContent =
+    `also held on ${plugPlace(stray)} — a leftover: this row is the copy its declaration names`;
+  box.appendChild(line);
+  box.appendChild(plugStrayButton(stray));
+  return box;
+}
+
+export function plugStrayButton(stray) {
+  const busy = Boolean(plugState.busy && plugState.busy.name === stray.name);
+  const btn = document.createElement("button");
+  btn.className = "plug-remove";
+  btn.type = "button";
+  btn.textContent = busy ? plugBusyLabel(plugState.busy, "Letting go…") : "Let it go";
+  const refuse = plugPlaceReady(stray.place);
+  if (refuse) {
+    btn.disabled = true;
+    btn.title = refuse;
+  } else if (plugState.busy) {
+    btn.disabled = true;
+    btn.title = plugState.busy.name + " is " + plugBusyWord(plugState.busy);
+  } else {
+    const version = stray.version ? " " + stray.version : "";
+    btn.title =
+      `remove ${stray.name}${version} from ${plugPlace(stray)} — the copy this row is about ` +
+      "stays where it is, and nothing is moved between the two";
+  }
+  btn.addEventListener("click", () => plugRemove(stray));
+  return btn;
 }
 
 // The one row's own state line, and the reason the page's note line is no longer
@@ -828,7 +904,37 @@ export function plugEmptyText(known, shown) {
     return why ? "could not be read — " + why : "reading…";
   }
   if (known && !shown) return "no component here matches this filter";
+  // nothing this client holds, and no machine to ask about the rest: "nothing is
+  // installed" would be a claim nobody made
+  if (plugSessionMissing()) {
+    return "nothing this client holds, and this tab has no session yet — the session machine has not been asked";
+  }
   return "nothing is installed in either place, and the market lists nothing for this build";
+}
+
+// Is the session half unread because this tab has no session yet? Not the same
+// fact as a machine that would not answer, and not the same weight on the page: a
+// tab's session ARRIVES (`clutch:backend-changed` → plugSessionArrived below), so
+// this state ends by itself and the page says it as a wait.
+export function plugSessionMissing() {
+  return Boolean(plugState.sessionError) && plugState.sessionKind === "none";
+}
+
+// The one line under the list, in the two weights a read problem has. A machine
+// that is there and did not answer is a failure — the list is short because
+// something went wrong, and it is drawn in the error colour. A tab with no session
+// yet is not that: nobody failed, there is simply no machine to ask until the tab
+// has one, so it is said quietly and replaced by itself when the session lands.
+export function plugReadNote() {
+  const problem = plugReadProblem();
+  if (!problem) return { text: "", bad: false };
+  if (plugSessionMissing() && problem === plugState.sessionError) {
+    return {
+      text: "this tab has no session yet, so nothing is known about the session machine — the list is read as soon as it has one",
+      bad: false,
+    };
+  }
+  return { text: problem, bad: true };
 }
 
 // The page own read failures, in the order they explain an empty or short list:
@@ -847,35 +953,12 @@ export function plugReadProblem() {
   );
 }
 
-// What the automatic pass over the session machine's components did, in one
-// line, and only when it did something worth saying: a name it let go of (a
-// removal is otherwise invisible — it is a DELETE, not a row) and a name it
-// could not. The pass is not awaited by the connect and it keeps no state of its
-// own, so this is the one place its answer reaches a person; nothing is invented
-// when no pass has run against the machine this window is about (`pass` is null).
-export function plugPassLine() {
-  const pass = plugState.pass;
-  if (!pass) return null;
-  const retired = Array.isArray(pass.retired) ? pass.retired : [];
-  const errors = Array.isArray(pass.errors) ? pass.errors : [];
-  if (!retired.length && !errors.length) return null;
-  const at = pass.at ? new Date(pass.at).toTimeString().slice(0, 8) : "";
-  const parts = [];
-  if (retired.length) {
-    const names = retired
-      .map((r) => `${r.name}${r.version ? " " + r.version : ""} (${r.reason})`)
-      .join("; ");
-    parts.push(`let go of ${retired.length === 1 ? "" : retired.length + " names: "}${names}`);
-  }
-  if (errors.length) {
-    const why = errors.map((e) => `${e.name || "the pass"} (${e.reason})`).join("; ");
-    parts.push(`could not let go of ${why}`);
-  }
-  const el = document.createElement("p");
-  el.className = "plug-pass";
-  el.textContent = `the components pass ${at ? "at " + at : "run at the last connect"} ${parts.join(", and ")}`;
-  return el;
-}
+// What the automatic pass over the session machine's components did is not drawn
+// here. It is a thing that happened to one machine at one moment — a retirement, a
+// failed fetch — and it used to arrive as a second, older picture of what a place
+// holds, printed under a list that had just been read. What a place holds is the
+// two inventories and nothing else; the pass says its piece in the tunnel log,
+// where an event belongs (ui/src/host/tunnel-connect.ts).
 
 // The one list. It is not titled with a machine, because there is no single
 // machine this window acts on: some of what it holds belongs to this client and
@@ -889,10 +972,6 @@ export function plugList() {
   const items = plugModel();
   const shown = items.filter(plugItemShown);
   const sec = plugSection("", "", shown.map(plugItemRow), plugEmptyText(items.length, shown.length));
-  // what the pass at connect did to this machine, when it did anything: a name it
-  // let go of is drawn here because it is not a row any more
-  const pass = plugPassLine();
-  if (pass) sec.appendChild(pass);
   // a row that did not survive the index (a bad line, a manifest that failed its
   // pin) explains a short list: one line each, together at the end rather than
   // scattered through the rows it shortened
@@ -1232,7 +1311,7 @@ export function plugRemoveButton(held) {
 // keeps no second copy of a place's truth (frozen decision 3).
 export function plugVersionsButton(held) {
   const open = Boolean(plugState.versions && plugState.versions.name === held.name);
-  const reading = plugState.versionsPending === held.name;
+  const reading = Boolean(plugState.versionsPending && plugState.versionsPending.name === held.name);
   const btn = document.createElement("button");
   btn.className = "plug-versions" + (open ? " open" : "");
   btn.type = "button";
@@ -1269,7 +1348,7 @@ export function plugVersionsButton(held) {
 // is its own row naming ITSELF, so the remove beside it takes exactly that one:
 // taking the whole component is a different act and is drawn on the row above.
 export function plugVersionRows(held) {
-  const reading = plugState.versionsPending === held.name;
+  const reading = Boolean(plugState.versionsPending && plugState.versionsPending.name === held.name);
   const state = plugState.versions;
   if (!reading && !(state && state.name === held.name)) return null;
   const box = document.createElement("div");
@@ -1312,9 +1391,15 @@ export function plugVersionRows(held) {
 // this place holds, and the settings the component declares — and both hang off
 // the same row, because both are about it. One disclosure is that box; two are a
 // stack of them, and the row's own gap is what spaces them.
-export function plugItemExtra(held) {
-  if (!held) return null;
-  const boxes = [plugVersionRows(held), plugSettingsRows(held)].filter(Boolean);
+export function plugItemExtra(item) {
+  const boxes = [];
+  if (item.held) {
+    for (const box of [plugVersionRows(item.held), plugSettingsRows(item.held)]) {
+      if (box) boxes.push(box);
+    }
+  }
+  const stray = plugStrayRow(item.stray);
+  if (stray) boxes.push(stray);
   if (!boxes.length) return null;
   if (boxes.length === 1) return boxes[0];
   const wrap = document.createElement("div");
@@ -1354,11 +1439,11 @@ export function plugSettingsButton(held) {
       `what ${held.name} lets you set on ${plugPlace(held)} — the values live with ` +
       "the component, on the machine that runs it";
   }
-  btn.addEventListener("click", () => plugSettingsToggle(held.name));
+  btn.addEventListener("click", () => plugSettingsToggle(held.name, held.place));
   return btn;
 }
 
-export function plugSettingsToggle(name) {
+export function plugSettingsToggle(name, place) {
   if (plugState.form && plugState.form.name === name) {
     plugState.form = null;
     plugState.formPending = null;
@@ -1367,10 +1452,14 @@ export function plugSettingsToggle(name) {
     return;
   }
   plugState.form = null;
-  plugReadSettings(name);
+  plugReadSettings(name, place);
 }
 
-export function plugReadSettings(name) {
+// The form is read from ONE place — the row that asked names it, because a name
+// alone no longer says which machine is being asked (both ledgers are drawn in one
+// list) — and the place is kept on the form, so every value written from it goes
+// back to the machine that gave the schema.
+export function plugReadSettings(name, place) {
   const api = window.clutchComponents;
   if (!api || !api.settings) return;
   const seq = ++plugState.formSeq;
@@ -1378,19 +1467,19 @@ export function plugReadSettings(name) {
   plugState.formPending = name;
   renderPlugins();
   api
-    .settings(name, plugState.slot)
+    .settings(name, place, plugState.slot)
     .then((r) => {
       if (seq !== plugState.formSeq) return; // closed, or another row asked since
       plugState.formPending = null;
       plugState.form =
         r && r.ok
-          ? { name, schema: r.schema || {}, values: r.values || {}, busy: null, error: null, saved: null }
-          : { name, schema: {}, values: {}, busy: null, error: (r && r.error) || "the machine gave no answer", saved: null };
+          ? { name, place, schema: r.schema || {}, values: r.values || {}, busy: null, error: null, saved: null }
+          : { name, place, schema: {}, values: {}, busy: null, error: (r && r.error) || "the machine gave no answer", saved: null };
     })
     .catch((e) => {
       if (seq !== plugState.formSeq) return;
       plugState.formPending = null;
-      plugState.form = { name, schema: {}, values: {}, busy: null, error: (e && e.message) || String(e), saved: null };
+      plugState.form = { name, place, schema: {}, values: {}, busy: null, error: (e && e.message) || String(e), saved: null };
     })
     .then(() => {
       if (seq === plugState.formSeq) renderPlugins();
@@ -1411,7 +1500,7 @@ export function plugWriteSetting(name, key, value) {
   form.saved = null;
   renderPlugins();
   api
-    .setSetting(name, { [key]: value }, plugState.slot)
+    .setSetting(name, { [key]: value }, form.place, plugState.slot)
     .then((r) => {
       if (seq !== plugState.formSeq) return; // the form was closed while it flew
       form.busy = null;
@@ -1805,7 +1894,7 @@ export async function plugRemove(held) {
   renderPlugins();
   let res;
   try {
-    res = await api.remove(held.name, {}, plugState.slot);
+    res = await api.remove(held.name, {}, held.place, plugState.slot);
   } catch (e) {
     // the IPC hop itself failed: still the failure path, still with a reason
     res = { ok: false, name: held.name, error: (e && e.message) || String(e) };
@@ -1844,7 +1933,7 @@ export async function plugRemoveVersion(held, record) {
   renderPlugins();
   let res;
   try {
-    res = await api.remove(held.name, { version }, plugState.slot);
+    res = await api.remove(held.name, { version }, held.place, plugState.slot);
   } catch (e) {
     // the IPC hop itself failed: still the failure path, still with a reason
     res = { ok: false, name: held.name, error: (e && e.message) || String(e) };
@@ -1861,20 +1950,20 @@ export async function plugRemoveVersion(held, record) {
 // One component's version list, straight from the machine that holds it. A read
 // supersedes an older read of the same list, and closing the block bumps the
 // sequence: a late answer must never reopen what the user closed.
-export function plugReadVersions(name) {
+export function plugReadVersions(name, place) {
   const api = window.clutchComponents;
   if (!api || !api.versions) return;
   const seq = ++plugState.versionsSeq;
-  plugState.versionsPending = name;
+  plugState.versionsPending = { name, place };
   renderPlugins();
   let out;
   Promise.resolve()
-    .then(() => api.versions(name, plugState.slot))
+    .then(() => api.versions(name, place, plugState.slot))
     .then((r) => {
-      out = { name, rows: (r && Array.isArray(r.versions) ? r.versions : []), error: (r && r.error) || null };
+      out = { name, place, rows: (r && Array.isArray(r.versions) ? r.versions : []), error: (r && r.error) || null };
     })
     .catch((e) => {
-      out = { name, rows: [], error: (e && e.message) || String(e) };
+      out = { name, place, rows: [], error: (e && e.message) || String(e) };
     })
     .then(() => {
       if (seq !== plugState.versionsSeq) return; // superseded, or the block was closed
@@ -1885,21 +1974,23 @@ export function plugReadVersions(name) {
 }
 
 export function plugVersionsToggle(held) {
-  if (plugState.versionsPending === held.name) return; // that read is already running
+  const pending = plugState.versionsPending;
+  if (pending && pending.name === held.name && pending.place === held.place) return; // that read is already running
   if (plugState.versions && plugState.versions.name === held.name) {
     plugState.versions = null;
     plugState.versionsSeq++; // a late answer must not reopen what was closed
     renderPlugins();
     return;
   }
-  plugReadVersions(held.name);
+  plugReadVersions(held.name, held.place);
 }
 
 // An open version list is about what a machine HOLDS, so after any write that
-// changed that, it is read again rather than trusted as it was.
+// changed that, it is read again rather than trusted as it was — through the place
+// it was answered by, which is the only machine that can answer it again.
 export function plugRefreshVersions() {
-  const name = (plugState.versions && plugState.versions.name) || plugState.versionsPending;
-  if (name) plugReadVersions(name);
+  const cur = plugState.versions || plugState.versionsPending;
+  if (cur) plugReadVersions(cur.name, cur.place);
 }
 
 // Send the state being asked for, then let the host answer. What goes on the
@@ -1918,7 +2009,7 @@ export async function plugSwitch(held) {
   renderPlugins();
   let res;
   try {
-    res = await api.setDisabled(held.name, disabled, plugState.slot);
+    res = await api.setDisabled(held.name, disabled, held.place, plugState.slot);
   } catch (e) {
     // the IPC hop itself failed: still the failure path, still with a reason
     res = { ok: false, name: held.name, error: (e && e.message) || String(e) };
@@ -2060,14 +2151,16 @@ export function renderPlugins() {
   // and what the host answered are drawn on the row they are about (plugItemState),
   // so what is left here is what no row can say — this page's own reads. A read
   // that failed outranks everything (it is why the list is short), then a write
-  // whose row is not on screen, then a read still running.
-  const problem = plugReadProblem();
-  const orphan = problem ? null : plugOrphanLine();
+  // whose row is not on screen, then a read still running. A tab that simply has no
+  // session yet is said by the same line in the quiet weight (plugReadNote): it is
+  // a wait, not a failure, and it ends by itself.
+  const said = plugReadNote();
+  const orphan = said.text ? null : plugOrphanLine();
   let note = "";
   let bad = false;
-  if (problem) {
-    note = problem;
-    bad = true;
+  if (said.text) {
+    note = said.text;
+    bad = said.bad;
   } else if (orphan) {
     note = orphan.text;
     bad = orphan.bad;
@@ -2095,7 +2188,21 @@ export function renderPlugins() {
 // that shows it asks for it when it is opened (plugMirrorRead).
 export function plugRead({ force = false } = {}) {
   const api = window.clutchComponents;
-  if (!api || plugState.pending) return; // no channel, or a read already running
+  if (!api) return; // no channel to ask
+  // WHICH slot this read is for is the tab strip's answer, asked HERE, not the
+  // copy `plugSetSlot` took the last time it was told. A tab restored from the
+  // strip's saved state (`loadTabs`, ui/src/renderer/tab-bar.ts) sets
+  // `state.activeTabId` WITHOUT dispatching `clutch:tab-state`, and the restored
+  // tab is not always there when this module's opening `plugSetSlot` runs — a
+  // window booted onto one tab asked the tab strip before the tab existed, took
+  // the default slot ("", the window's own session), and then asked it forever:
+  // every read named a slot with no session while the tab on screen had one, so
+  // the quiet note stayed up and the reload button only re-asked the same empty
+  // slot. A slot that changed under us is taken on before the ask (and the state
+  // that described the old one dropped with it).
+  const live = activeSlotId();
+  if (live !== plugState.slot) plugSetSlot(live, { reread: false });
+  if (plugState.pending) return; // a read is already running
   // The read is for the slot the pane is showing NOW, and its answers are this
   // page's only while that is still the slot on screen: `plugSetSlot` takes the
   // number on, so a reply from the tab we left is dropped instead of painted.
@@ -2108,6 +2215,12 @@ export function plugRead({ force = false } = {}) {
     if (!current()) return;
     plugState.pending--;
     renderPlugins();
+    // news that arrived while this read was in flight (`plugSessionArrived`): spent
+    // here, once, because a second read cannot start while one is pending
+    if (!plugState.pending && plugAskAgain) {
+      plugAskAgain = false;
+      plugRead();
+    }
   };
   plugState.sessionError = null;
   plugState.sessionHeldError = null;
@@ -2121,6 +2234,7 @@ export function plugRead({ force = false } = {}) {
     .then((r) => {
       if (!current()) return;
       plugState.sessionBase = r.sessionBase || "";
+      plugState.sessionKind = r.target || "";
       // each half answers on its own, and the rows that DID arrive are drawn: a
       // place that could not be read is not a place holding nothing, and an empty
       // list is exactly the reading this page must not give
@@ -2130,11 +2244,11 @@ export function plugRead({ force = false } = {}) {
       plugState.clientError = r.clientError || null;
       plugState.clientHeldError = r.clientInventoryError || null;
       plugState.held = Array.isArray(r.held) ? r.held : [];
-      plugState.pass = r.pass || null;
       plugState.read = true;
     })
     .catch((e) => {
       if (!current()) return;
+      plugState.sessionKind = "";
       plugState.sessionError = (e && e.message) || String(e);
       plugState.read = true;
     })
@@ -2268,8 +2382,10 @@ export function pluginTabShown() {
 // machine holds is a fact of THAT machine, so the list follows the tab strip
 // instead of staying on whichever tab first opened it. Called on every
 // `clutch:tab-state` with the tab that is now open; an unchanged slot is a badge
-// moving in the background and costs nothing.
-export function plugSetSlot(slot) {
+// moving in the background and costs nothing. `reread: false` takes the slot on
+// without starting the read — for `plugRead`, which is already the read and asks
+// for the slot first so the one it starts names the tab on screen.
+export function plugSetSlot(slot, { reread = true } = {}) {
   const next = String(slot || "");
   if (next === plugState.slot) return;
   plugState.slot = next;
@@ -2278,10 +2394,12 @@ export function plugSetSlot(slot) {
   // travels is the lie in the direction a "cached" page would tell it
   plugState.read = false;
   plugState.sessionBase = "";
+  // which machine the last read was asked of goes with that read ("none" here is
+  // a fact about the tab we left, not about the one we are on)
+  plugState.sessionKind = "";
   plugState.sessionError = null;
   plugState.sessionHeldError = null;
   plugState.held = [];
-  plugState.pass = null;
   plugState.result = null;
   plugState.busy = null;
   plugState.versions = null;
@@ -2301,11 +2419,13 @@ export function plugSetSlot(slot) {
   plugState.formSeq++;
   plugState.versionsSeq++;
   plugState.pending = 0;
+  // the news a read was waiting to re-read for belonged to the tab we left
+  plugAskAgain = false;
   renderPlugins();
   // a pane nobody is looking at is read when somebody opens it, not before: a
   // hidden list would spend a network read on nothing (the same discipline as the
   // mirror list and the two events below)
-  if (plugPaneVisible()) plugRead();
+  if (reread && plugPaneVisible()) plugRead();
 }
 
 // Whether this list is on screen at all: the sidebar is open (ui/index.html
@@ -2320,7 +2440,43 @@ export function plugPaneVisible() {
   return !group.classList.contains("dock-collapsed") && !side.classList.contains("panel-hidden");
 }
 
+// The session this tab was WAITING for has arrived (`clutch:backend-changed`, sent
+// by slots.ts adoptBase the moment a tab's claim lands). A tab that had no session
+// when the list was asked has one now: the session half was never unreadable, it
+// was unread (plugReadNote said so quietly, and the row said `unknown`). This is
+// the other end of that wait — it ends by itself, without the user folding the
+// group or switching tabs to shake the pane loose.
+//
+// Why this signal and not the host's `backend:base-changed`: a FIRST claim is
+// answered silently by design (`ensureSlotBackend(..., notify = false)` in
+// ui/src/host/host-core.ts), because a base announcement makes every page in the
+// window reconnect its stream — a hiccup on a tab switch, for news that only this
+// list wanted. The renderer's own event is fired where the base is adopted, so it
+// is exactly the moment the machine became askable.
+export function plugSessionArrived() {
+  // a pane nobody is looking at is read when somebody opens it, not before (the
+  // same discipline as plugSetSlot and the two listeners below)
+  if (!plugPaneVisible()) return;
+  // a verdict belongs to the place it was written to, and that place just became
+  // a different machine (none → local/remote): the same line, for the same reason,
+  // as the base-changed listener below
+  plugState.result = null;
+  // the list is being read RIGHT NOW: this news arrived between the ask and the
+  // answer, so the read in flight is the one that missed it. Ask again when it
+  // settles — plugRead refuses a second read while one is pending, and the
+  // settling read spends plugAskAgain once (never a loop).
+  if (plugState.pending) {
+    plugAskAgain = true;
+    return;
+  }
+  plugRead();
+}
+
 document.addEventListener("clutch:tab-state", () => plugSetSlot(activeSlotId()));
+// ...and the session the pane is about ARRIVES after the tab is announced (the
+// claim is the next await), so the read plugSetSlot starts runs against a tab that
+// has no machine yet. This is the event that closes that race.
+document.addEventListener("clutch:backend-changed", () => plugSessionArrived());
 plugSetSlot(activeSlotId());
 
 // A session that MOVES is a different session machine, so what the session half of

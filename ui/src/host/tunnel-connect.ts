@@ -57,6 +57,10 @@ const REUSE_EXEC_MS = 12000;
 // The shape probe's own retry (see the gate): long enough for a retransmission,
 // short enough that a port which really is silent still fails promptly.
 const SHAPE_RETRY_MS = 700;
+// How long the far side gets to say what is on ITS port when the health gate
+// failed. Bounded, because remoteExec's default is a minute and this question is
+// asked on a wire that just failed to carry an answer (the healer's rule).
+const HEALTH_EXEC_MS = 12000;
 
 // How many dials have begun in this process. An attempt compares its own number
 // with this one when it fails: a bigger number means somebody started a NEWER
@@ -914,11 +918,29 @@ async function establishForwardAndHealth(localPort, client) {
   // session on this hop (ui/plugin-link.js offer, from main.js's api:base).
   const up = await waitForServer("http://127.0.0.1:" + localPort + "/api/health", CONNECT_TIMEOUT_MS);
   if (!up) {
-    return failConnect(
-      client,
-      "[health] FAIL: backend not reachable on the remote host",
-      "backend not reachable on the remote host"
-    );
+    // TWO machines can be the reason this gate failed, and the verdict used to
+    // name neither: the far side may have nothing listening (nothing to answer
+    // with), or it may be serving while THIS hop's forward is the casualty (a
+    // channel its sshd refused, a local port whose listener died under it). So
+    // ask the far side about its own port over exec — the path the failed forward
+    // does not share, exactly as the healer asks it — and put the answer in the
+    // sentence the user sees. Best-effort by construction: the gate has already
+    // failed, and a far side that cannot be asked must not change that verdict or
+    // hold it open (the ask has its own clock; ssh2's exec throws on a dead wire).
+    let far = "";
+    try {
+      far = await remoteServingState(state.lastProbe || {}, HEALTH_EXEC_MS);
+    } catch (e) {
+      far = "could not be asked: " + ((e && e.message) || e);
+    }
+    tunnelLog(`[health] the far side reports ${far || "nothing at all"} on 127.0.0.1:${REMOTE_API_PORT}`);
+    const why =
+      far === "SERVING"
+        ? `the far side serves 127.0.0.1:${REMOTE_API_PORT}, but this hop's forwarded port never answered — the wire, not the server; reconnect`
+        : far === "DOWN"
+          ? `nothing is listening on the far side's 127.0.0.1:${REMOTE_API_PORT} (its server is not running) — reconnect`
+          : "backend not reachable on the remote host";
+    return failConnect(client, "[health] FAIL: " + why, why);
   }
   // "the port answers" and "it is OUR supervisor" are two questions, and this one
   // used to get a single 3 s clock right after a gate that may have spent 15: a
@@ -945,15 +967,10 @@ async function establishForwardAndHealth(localPort, client) {
   state.currentUrl = "http://127.0.0.1:" + localPort;
   state.wasDisconnected = false;
   startHealing();
-  // the pass is not awaited (see ui/tunnel-bootstrap.js), so its answer is kept
-  // on the tunnel's state instead of on a promise nobody holds: the plugin tab
-  // reads it from there whenever it is opened, including in a window that did
-  // not exist when the pass ran. Captured before the assignment below, so the
-  // record names the machine the pass was actually about.
-  const passBase = state.currentUrl;
-  installComponents(passBase, (pass) => {
-    state.componentsPass = { ...pass, base: passBase };
-  });
+  // the pass is not awaited (see ui/src/host/tunnel-bootstrap.ts): what it did
+  // goes to the tunnel log, and the plugin tab reads what a place HOLDS from that
+  // place's own inventory instead of from an older report of a pass.
+  installComponents(state.currentUrl);
   return { ok: true, url: state.currentUrl };
 }
 

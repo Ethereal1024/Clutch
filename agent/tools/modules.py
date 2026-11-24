@@ -22,14 +22,16 @@ Three things every consumer of a module needs, kept in one place:
   python_exe()        the interpreter that runs it. Under a frozen build
                       sys.executable is the app bundle, not a Python, so it must
                       never be handed a `-m module` command line; CLUTCH_PYTHON
-                      names an interpreter explicitly, and PATH is the last
-                      resort.
+                      names an interpreter explicitly, PATH is asked next, and a
+                      LOGIN shell answers last — the PATH this process inherited
+                      is not the PATH the machine's own shell has.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from collections.abc import Iterable
 from pathlib import Path
@@ -71,33 +73,99 @@ def component_dir(name: str) -> Path | None:
     return components.installed(name)
 
 
+# The question a login shell is asked, verbatim, and the wall it may not cross:
+# `bash -lc` sources the machine's profile, which is the only place a conda/pyenv/
+# homebrew install puts itself on PATH — and it is a process, so it is asked once.
+LOGIN_PROBE = "command -v python3 || command -v python"
+LOGIN_PROBE_TIMEOUT = 8.0
+
+# One answer per process: [] = not asked yet, [""] = asked, and there is none.
+_INTERPRETER: list[str] = []
+
+
+def _login_shell_python() -> str:
+    """The interpreter a LOGIN shell finds, or "" when it finds none.
+
+    A process inherits the PATH of whatever started it, and for a packaged app
+    that is not the PATH the machine's own shell has: launched from Finder, or
+    from an ssh command that is not a login shell, the environment is the bare
+    `/usr/bin:/bin:/usr/sbin:/sbin`, and a `python3` installed under conda, pyenv
+    or homebrew is simply not in it. The commands this session runs DO start a
+    login shell (that is how a user's terminal is answered), so the interpreter
+    that exists for the user is the one this host should drive a component with —
+    otherwise a component that is installed and healthy is dropped as
+    "the host has no interpreter", which is a fact about this process and not
+    about the machine.
+
+    Only a path that is absolute, a file, executable and named `python*` is
+    taken: a shell answering with an alias, a function, or its own error text is
+    not something a `-m module` line can be handed to.
+    """
+    if os.name == "nt" or not shutil.which("bash"):
+        return ""
+    try:
+        out = subprocess.run(
+            ["bash", "-lc", LOGIN_PROBE],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=LOGIN_PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    for line in out.stdout.decode("utf-8", "replace").splitlines():
+        cand = line.strip()
+        if not cand.startswith("/"):
+            continue
+        path = Path(cand)
+        if not path.name.startswith("python"):
+            continue
+        if not path.is_file() or not os.access(path, os.X_OK):
+            continue
+        return str(path)
+    return ""
+
+
+def _interpreter() -> str:
+    """The one resolution both questions below share: CLUTCH_PYTHON, then PATH,
+    then the login shell — memoized, because the login shell answer costs a
+    process and cannot change under a running host."""
+    if _INTERPRETER:
+        return _INTERPRETER[0]
+    found = os.environ.get("CLUTCH_PYTHON") or ""
+    if not found:
+        for name in ("python3", "python"):
+            hit = shutil.which(name)
+            if hit:
+                found = hit
+                break
+    if not found:
+        found = _login_shell_python()
+    _INTERPRETER[:] = [found]
+    return found
+
+
 def python_exe() -> str:
     """The interpreter for `-m <module>` / `<module>/<script>.py` command lines.
 
     A frozen build's sys.executable is the app itself (it would relaunch the
-    UI), so the bundle falls back to CLUTCH_PYTHON and then PATH. A source
-    checkout uses its own interpreter, which is exactly the one the tests and
-    the dev server run under.
+    UI), so the bundle falls back to CLUTCH_PYTHON, then PATH, then the login
+    shell (`_login_shell_python`: the packaged app's PATH is not the machine's).
+    A source checkout uses its own interpreter, which is exactly the one the
+    tests and the dev server run under.
     """
     if not getattr(sys, "frozen", False):
         return sys.executable
-    override = os.environ.get("CLUTCH_PYTHON")
-    if override:
-        return override
-    for name in ("python3", "python"):
-        found = shutil.which(name)
-        if found:
-            return found
-    return sys.executable
+    return _interpreter() or sys.executable
 
 
 def python_missing() -> bool:
     """True when this host has no interpreter that can run a `-m` component: a
-    frozen build's sys.executable is the app itself, so it needs CLUTCH_PYTHON or
-    a python on PATH (the same order python_exe() falls back in)."""
+    frozen build's sys.executable is the app itself, so it needs CLUTCH_PYTHON, a
+    python on PATH, or one a login shell can name (the same order python_exe()
+    falls back in — one resolution, so the answer and the command line agree)."""
     if not getattr(sys, "frozen", False):
         return False
-    return not (os.environ.get("CLUTCH_PYTHON") or shutil.which("python3") or shutil.which("python"))
+    return not _interpreter()
 
 
 def module_env(import_dirs: Iterable[Path | str] = (), extra: dict[str, str] | None = None) -> dict[str, str]:
