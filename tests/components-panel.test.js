@@ -588,6 +588,10 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
         .filter((n) => /(^| )plug-mirrors( |$)/.test(n.className))
         .map((r) => walk(r).filter((c) => /(^| )plug-chip( |$)/.test(c.className)).map((c) => c.textContent).join("")),
     note: () => dom.byId.get("#plug-note"),
+    // the paragraph the page used to stand under the list to explain the three
+    // writes. It is gone (the confirmations say it where it is asked for), and
+    // this is how a test asks whether it came back.
+    caution: () => walk(dom.byId.get("#plug-body")).filter((n) => /(^| )plug-caution( |$)/.test(n.className)),
     text: () => drawnText(dom.byId.get("#plug-body")),
     // the state line of one component's row, or null when that row is not drawn
     state: (name) => stateOf(dom.byId.get("#plug-body"), name),
@@ -622,7 +626,12 @@ const CODE = mod ? rendererScript("components-panel") : "";
     check(p.buttons().map(ownerName).join(",") === "clutch-workspace,clutch-memory", "each control belongs to the row it installs");
     check(p.buttons().every((b) => b.textContent === "Install"), "a component the machine does not hold offers 'Install'");
     check(p.buttons().every((b) => !b.disabled), "and the control is live once the target is known");
-    check(/neither is a rollback/.test(p.text()), "the market says in plain words that a write is never a rollback (I5, visible without hovering)");
+    // I5 is a fact about the WRITES, and it is said where one is asked for — the
+    // confirmations in section 8/10 — not as a standing paragraph under the list.
+    // The list is the list: a page that explains itself at rest is a manual, and
+    // this build has none. Nothing is drawn in the place that paragraph held.
+    check(!/neither is a rollback/.test(p.text()), "the list carries no standing essay on what a write costs");
+    check(p.caution().length === 0, "and nothing is drawn where that paragraph used to be (.plug-caution)");
   }
 
   // 2. an unreachable target never draws a live button

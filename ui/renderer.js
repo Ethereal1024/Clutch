@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: e2ca089df4018c39f51d2863aa001119a67b31b14af252b520dfbe418c1a1ff6
+// sources sha256: d8cb0ba4aedb70f4c00f10603c74321c6ff35bd21ed1dffe4012d5defd79f1d7
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -7303,12 +7303,6 @@
     const sec = plugSection("", "", shown.map(plugItemRow), plugEmptyText(items.length, shown.length));
     const pass = plugPassLine();
     if (pass) sec.appendChild(pass);
-    if (plugState.market && plugState.market.entries.length) {
-      const caution = document.createElement("p");
-      caution.className = "plug-caution";
-      caution.textContent = "install writes bytes where the declaration puts them, and Remove deletes them \u2014 neither is a rollback, since nothing here keeps a copy of what it replaces or takes away (the switch is the third write: it deletes nothing, and pressing it again is the undo)";
-      sec.appendChild(caution);
-    }
     for (const reason of plugState.market && plugState.market.errors || []) {
       const el = document.createElement("p");
       el.className = "plug-source-error";

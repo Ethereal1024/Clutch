@@ -2457,7 +2457,6 @@ mjx-container[display="true"] {
 .plug-setting-input:focus, .plug-setting-select:focus { outline: none; border-color: var(--accent); }
 .plug-setting-check { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
 .plug-setting-reset { padding: 2px var(--s2); min-height: var(--ctl-h-sm); font-size: var(--fs-xs); background: transparent; color: var(--muted); }
-.plug-caution { margin: var(--s2) 0 0; font-size: var(--fs-xs); color: var(--muted); }
 /* what the automatic pass at connect did to this machine: a name it let go of is
    not a row any more, so this is the only place a removal is stated on the page.
    It sits with the list, not above it, and speaks only when there is something

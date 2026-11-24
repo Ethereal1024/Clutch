@@ -893,12 +893,6 @@ export function plugList() {
   // let go of is drawn here because it is not a row any more
   const pass = plugPassLine();
   if (pass) sec.appendChild(pass);
-  if (plugState.market && plugState.market.entries.length) {
-    const caution = document.createElement("p");
-    caution.className = "plug-caution";
-    caution.textContent = "install writes bytes where the declaration puts them, and Remove deletes them — neither is a rollback, since nothing here keeps a copy of what it replaces or takes away (the switch is the third write: it deletes nothing, and pressing it again is the undo)";
-    sec.appendChild(caution);
-  }
   // a row that did not survive the index (a bad line, a manifest that failed its
   // pin) explains a short list: one line each, together at the end rather than
   // scattered through the rows it shortened
