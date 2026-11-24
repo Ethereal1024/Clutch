@@ -11,81 +11,22 @@ timeout -> TransportError(timeout=True) surface.
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from agent.tools.localshell import local_shell, shq
 from agent.tools.transport import LocalTransport, SshTransport, TransportError
 from agent.tools.workspace import _EXEC_CHUNK_BYTES, LocalWorkspace, RemoteWorkspace
-from tests.testsupport import check, posix_shell_argv
+from tests.testsupport import MockBridge, check, posix_shell_argv, remote_root, start_bridge
 
 # the mock "remote" parses commands with a POSIX shell, exactly like the real
 # remote's exec bridge (/bin/sh on POSIX, Git Bash / MSYS2 bash on Windows)
 SH = posix_shell_argv()
-
-
-def remote_root(path: str) -> str:
-    """A local directory in the spelling the mock's POSIX shell resolves.
-
-    The mock remote IS this machine's directory tree, seen through a POSIX
-    shell: on Windows that shell (Git Bash) answers `/tmp` for %TEMP% (its own
-    mount point) and keeps POSIX spellings in every path it prints, so the
-    "remote" root must be spelled the way that shell spells it — the real
-    remote is POSIX and only the mock needs the translation."""
-    if os.name != "nt":
-        return path
-    return shell_pwd(path.replace("\\", "/"))
-
-
-def shell_pwd(path: str) -> str:
-    """How the mock's shell prints that directory (`pwd` under Git Bash answers
-    /c/Users/... for C:\\Users\\... — the same directory, other spelling)."""
-    r = subprocess.run([*SH, f"cd {shq(path)} && pwd"], capture_output=True, text=True, timeout=30)
-    return r.stdout.strip()
-
-
-class MockBridge(BaseHTTPRequestHandler):
-    # peak exec-command length seen (chunking caps under the sshd limit)
-    max_cmd_len = 0
-    # total /exec POSTs issued (list_many batches a level into one exec)
-    post_count = 0
-
-    def log_message(self, *a) -> None:  # silence request spam
-        pass
-
-    def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/exec":
-            self.send_response(404)
-            self.end_headers()
-            return
-        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-        cmd = body.get("command", "")
-        MockBridge.max_cmd_len = max(MockBridge.max_cmd_len, len(cmd.encode("utf-8")))
-        MockBridge.post_count += 1
-        timeout_ms = body.get("timeout", 60000)
-        try:
-            r = subprocess.run(
-                [*SH, cmd] if SH else cmd,
-                shell=SH is None,
-                capture_output=True,
-                text=True,
-                timeout=timeout_ms / 1000,
-            )
-            code, stdout, stderr = r.returncode, r.stdout or "", r.stderr or ""
-        except subprocess.TimeoutExpired:
-            code, stdout, stderr = -1, "", ""
-        resp = json.dumps({"code": code, "stdout": stdout, "stderr": stderr}).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(resp)
 
 
 def check_decoding() -> None:
@@ -136,9 +77,7 @@ def main() -> int:
         print("      cmd.exe cannot run heredocs/printf/base64, so this check needs one.")
         return 0
     with tempfile.TemporaryDirectory() as rtmp:
-        srv = ThreadingHTTPServer(("127.0.0.1", 0), MockBridge)
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        bridge = f"http://127.0.0.1:{srv.server_address[1]}"
+        srv, bridge = start_bridge()
 
         # regression (macOS SSH): constructing a RemoteWorkspace must not touch
         # the LOCAL filesystem — the root lives on the remote host, and macOS
@@ -248,20 +187,22 @@ def main() -> int:
         ws.append_line("log.txt", "second")
         check(ws.read("log.txt") == '{"a": "$x"}\nsecond\n', "remote append_line")
 
-        # The file tools belong to the workspace COMPONENT, and that component
-        # serves the workspace root's own filesystem — the machine the root lives
-        # on. This root is another machine's, so the component cannot serve it:
-        # the call is refused rather than quietly answered by the app host's own
-        # filesystem (which would be a different file). The tools come back with
-        # a component that runs over there (registry.module_blocked_reason).
+        # A session rooted on another machine is served the file tools by the
+        # HOST, over this very workspace (tools/host.py `_REMOTE_DECLARATIONS`,
+        # tools/filesystem.py: cat / ls / find|xargs grep / printf). The full
+        # suite for those four is tests/remote_filesystem_test.py; the point
+        # here is only that the wiring follows the ROOT — the tool list a run
+        # built with this workspace gets is the one that can actually answer.
         from agent.config import Config
         from agent.tools.registry import ToolRegistry, build_tools
 
         cfg = Config()
-        reg = ToolRegistry(build_tools(cfg))
-        refused = reg.execute(ws, cfg, "read_file", {"path": "log.txt"})
-        check(refused.error, "a remote root refuses the file tools instead of serving the wrong machine")
-        check("clutch-workspace" in refused.content, "and the refusal names the component that would serve it")
+        reg = ToolRegistry(build_tools(cfg, workspace=ws))
+        got = reg.execute(ws, cfg, "read_file", {"path": "log.txt"})
+        check(
+            not got.error and got.content == '{"a": "$x"}\nsecond\n',
+            "a remote root is served read_file by the host, over the bridge",
+        )
 
         # SshTransport surfaces a remote timeout as TransportError(timeout=True)
         try:

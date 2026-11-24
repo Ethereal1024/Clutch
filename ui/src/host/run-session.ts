@@ -179,9 +179,11 @@ async function createSessionRun({
   // otherwise trust the session.
   const resolvedMode = typeof modeOverride === "string" ? modeOverride : (typeof mode === "string" ? mode : "work");
 
-  // Tool surface: the declarations data, the session mode, and the log's open
-  // state (whether a project is open) all feed createTools. The session's own
-  // `project` flag is encoded in the declarations response.
+  // Tool surface: the declarations data, the session mode, the log's open
+  // state (whether a project is open) and the session's ROOT (a workspace on
+  // another machine, served through a shell) all feed createTools. The
+  // session's own `project` and `remote` flags are encoded in the declarations
+  // response, asked of the machine that owns the workspace.
   const tools = createTools({
     declarations: Array.isArray(declsData.declarations) ? declsData.declarations : [],
     available:    declsData.available   && typeof declsData.available   === "object" ? declsData.available   : {},
@@ -190,6 +192,7 @@ async function createSessionRun({
     facts:        declsData.facts       && typeof declsData.facts       === "object" ? declsData.facts       : {},
     host:         declsData.host        && typeof declsData.host        === "object" ? declsData.host        : {},
     project:      Boolean(declsData.project),
+    remote:       Boolean(declsData.remote),
     mode:         resolvedMode,
     warn:         typeof warn === "function" ? warn : undefined,
   });

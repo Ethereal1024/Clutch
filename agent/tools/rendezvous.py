@@ -301,16 +301,20 @@ def reaches_another_machine(mod: catalog.Component) -> bool:
 
       * `subject: foreign-fs` is 0.1.x's word for it (a component that reaches the
         far side of a channel), and a declaration carrying it still means that;
-      * since 0.2.0 the ssh plugin declares the workspace's OWN subject
+      * since 0.2.0 a client-side component declares the workspace's OWN subject
         (`workspace-fs`) and nothing but an `entry` — a FRONTEND half, whose code
         the client runs and whose commands travel down the tunnel to the machine
-        holding the root (clutch-ssh-workspace's README: "one that declares only
-        `entry` serves the root's machine over a channel"). What it contributes,
-        not what it is called, is where it runs.
+        holding the root. What it contributes, not what it is called, is where it
+        runs.
 
     Either way the root has to be somewhere else for the component's tools to
     mean anything: on a local workspace the same tools exist natively, and this
     one would read or write a different machine than the root names.
+
+    Nothing in this repo ships that shape any more (the ssh plugin was retired in
+    favour of the host's own four, tools/host.py `_REMOTE_DECLARATIONS`), but the
+    client can still push one, and this is the rule it is read by
+    (tests/channel_test.py drives both halves with a synthetic declaration).
     """
     if mod.subject == catalog.FOREIGN_FS:
         return True
@@ -335,10 +339,12 @@ def serves_foreign_fs(module: str) -> bool:
     """True when the component serves the root's filesystem from ANOTHER machine.
 
     The other half of the sentence above: the tools mean the machine at the far
-    end of a channel (clutch-ssh-workspace, over an ssh tunnel), so it is the
-    workspace that has to be elsewhere — and on a local session the same tools
-    exist natively, which is why they are dropped rather than shadowing them
-    (`registry._serves_this_workspace`, `prompt.module_blocked_reason`).
+    end of a channel, so it is the workspace that has to be elsewhere — and on a
+    local session the same tools exist natively, which is why they are dropped
+    rather than shadowing them (`registry._serves_this_workspace`,
+    `prompt.module_blocked_reason`). On a root that IS elsewhere the four names
+    are the host's own (`registry.build_tools` drops a component publishing one),
+    so this predicate's answer there is a diagnostic, not a tool.
     """
     mod = catalog.table().get(module)
     return mod is not None and reaches_another_machine(mod)

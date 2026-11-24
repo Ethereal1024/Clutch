@@ -50,7 +50,6 @@ CHECKOUTS = (
     "clutch-memory",
     "clutch-skills",
     "clutch-workspace",
-    "clutch-ssh-workspace",
 )
 
 # The machine's own values, fixed so the two readings are compared on one input.

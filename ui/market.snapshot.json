@@ -40,20 +40,6 @@
       "homepage": "https://github.com/Ethereal1024/clutch-skills",
       "license": "MIT",
       "manifest_sha256": "cafed0bb41ea7731181313baad775560cf45477ec828269bd1fddc0086321fa4"
-    },
-    {
-      "id": "Ethereal1024/clutch-ssh-workspace",
-      "name": "clutch-ssh-workspace",
-      "manifest": "https://github.com/Ethereal1024/clutch-ssh-workspace/releases/download/v0.1.1/clutch-component.json",
-      "version": "0.1.1",
-      "summary": "the same workspace files, on the machine at the other side of an SSH tunnel",
-      "tags": [
-        "workspace",
-        "ssh"
-      ],
-      "homepage": "https://github.com/Ethereal1024/clutch-ssh-workspace",
-      "license": "MIT",
-      "manifest_sha256": "a3a0b8379d33e237ae56f7cedb716d843eae12a2d55b7e92ada016aaa9bc2a4c"
     }
   ]
 }

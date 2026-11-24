@@ -496,11 +496,24 @@ def check_the_machine_a_component_serves() -> None:
 
     The situation the axis exists for: the workspace's own `read_file` (a
     `workspace-fs` component this host runs, spoken to the machine the root lives
-    on) and the ssh plugin's (the SAME subject, reached over a channel to another
-    machine — it declares an `entry` and no process here) publish the SAME name.
-    Whose tool the model is offered has to follow the root's machine, not the
-    order the table happened to fold — so both directions are pinned here, and so
-    are the two sentences a call would read when only the wrong one is installed.
+    on) and a client-side declaration of the SAME subject, reached over a channel
+    to another machine (it declares an `entry` and no process here), publish the
+    SAME name. Which of them — if any — the model is offered follows the root's
+    machine:
+
+      * a LOCAL root: the component that runs here, and only it. The far-side one
+        shares the name, so keeping it would shadow the `read_file` that really
+        works on this machine with one that reads some other machine a tunnel
+        happens to reach.
+      * a root on ANOTHER machine: NEITHER of them. That backend has no process
+        on the far side to serve the name, so the HOST declares it itself
+        (tools/host.py `_REMOTE_DECLARATIONS`) and `registry.build_tools` drops
+        a component publishing a name the host already holds, with one
+        non-fatal diagnostic: two wired readings of one name is exactly what the
+        tool constitution forbids.
+
+    Both directions are pinned here, and so are the sentences a call would read
+    when only the wrong component is installed.
     """
     client = Client()
     with isolated_host() as root:
@@ -517,12 +530,13 @@ def check_the_machine_a_component_serves() -> None:
                 "before any session, the local component's read_file is offered",
             )
 
-            _push(client, _plugin(name="clutch-ssh-workspace", tool="read_file", subject="workspace-fs"))
-            check(channel.holds("clutch-ssh-workspace"), "and the client's far-side component arrives over the channel")
+            far = "clutch-far-fs"
+            _push(client, _plugin(name=far, tool="read_file", subject="workspace-fs"))
+            check(channel.holds(far), "and the client's far-side component arrives over the channel")
 
-            # a LOCAL root: the plugin's tools are dropped, not merely shadowed —
-            # keeping them would put a foreign `read_file` in front of the one that
-            # really works here (the table folds pushed declarations last).
+            # a LOCAL root: the component that runs here, and only it — the
+            # far-side declaration of the same name is dropped, not folded over
+            # the one that really works here.
             here = LocalWorkspace(tempfile.mkdtemp(prefix="clutch-c94-"))
             local_set = build_tools(cfg, workspace=here)
             check(
@@ -534,36 +548,37 @@ def check_the_machine_a_component_serves() -> None:
                 "…the local component's, because this is the machine the root names",
             )
             check(
-                "another machine" in module_blocked_reason(here, "clutch-ssh-workspace"),
+                "another machine" in module_blocked_reason(here, far),
                 "and the far-side component answers for itself if it is asked anyway",
             )
 
-            # a root on ANOTHER machine: the plugin's tool is the one that works.
+            # a root on ANOTHER machine: the host's own four, and NEITHER
+            # component's — on that backend the component's daemon has nowhere to
+            # run, so the host brings the implementation itself (甲-P1).
             there = RemoteWorkspace("/srv/proj", "http://127.0.0.1:1/exec")
             remote_set = build_tools(cfg, workspace=there)
             check(
-                [t.name for t in remote_set].count("read_file") == 2,
-                "an ssh root sees both declarations of the name — the local one is kept on purpose",
+                [t.name for t in remote_set].count("read_file") == 1,
+                "an ssh root is offered ONE read_file as well — one name, one reading",
             )
             tool = ToolRegistry(remote_set).tool("read_file")
             check(
-                tool is not None and tool.inst is not None and tool.module == "clutch-ssh-workspace",
-                "…and the remote one is the tool the model calls (a push replaces by name, folded last)",
+                tool is not None and tool.host is not None and tool.module is None and tool.inst is None,
+                "…and it is the HOST's own declaration, with no component to ask",
             )
             check(
                 "another machine's" in module_blocked_reason(there, "clutch-workspace"),
                 "while the local component's call reads why it cannot serve this root",
             )
             check(
-                module_blocked_reason(there, "clutch-ssh-workspace") == "",
+                module_blocked_reason(there, far) == "",
                 "and the far-side component has nothing to explain for an ssh root",
             )
 
             # the same subject from two sides, and what it contributes is which
             # side a declaration is on
             check(
-                not rendezvous.serves_workspace_fs("clutch-ssh-workspace")
-                and rendezvous.serves_foreign_fs("clutch-ssh-workspace"),
+                not rendezvous.serves_workspace_fs(far) and rendezvous.serves_foreign_fs(far),
                 "the two predicates answer for the two halves of the axis and nothing else",
             )
             check(

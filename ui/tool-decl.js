@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tool-decl.ts and run `npm run build:host`.
-// source sha256: bb29a411e7d2757aa0afeb86514e15ec2ddcd4a116d57508c53cc26ae2d93fcb
+// source sha256: 33949bce54ea8951fcdd115e35d12ebbb3e8c03670ad988eca87c6f349d58e78
 
 "use strict";
 // The model-facing tool surface, derived HERE (host side), from declarations.
@@ -33,6 +33,10 @@
 //     facts,                 published host facts already answered, for `$<fact>`
 //     project,               whether a project log is open (the `project` gate)
 //     mode,                  "work" / "chat"
+//     remote,                whether the open workspace is ANOTHER machine's
+//                            (agent/tools/workspace.py RemoteWorkspace, the ssh
+//                            backend): the host then declares the four file
+//                            tools itself (REMOTE_DECLARATIONS below)
 //     host,                  {ui, access, gates} — the machine's own tables
 //                            (~/.clutch/host.json merged over the built-ins)
 //     prose(name, mode),     the host's own model-facing text for one of its tools
@@ -158,12 +162,120 @@ const HOST_DECLARATIONS = [
     },
 ];
 const HOST_TOOL_NAMES = HOST_DECLARATIONS.map((d) => d.name);
+// The four file tools, for the session whose ROOT is another machine's
+// (agent/tools/host.py `_REMOTE_DECLARATIONS`, same data). There is no daemon on
+// the far side to serve them — an sshd shell and nothing else — so the host
+// declares them, and the execution layer is what performs a call there
+// (agent/tools/filesystem.py over the remote workspace's plain POSIX sh).
+//
+// They are the same four names `clutch-workspace` declares for a local root, and
+// that is why they are NOT in HOST_TOOL_NAMES: a component may publish these, and
+// must, because a local machine has nothing else. createTools drops a component's
+// copy of one of them only when the host is holding it in THIS session
+// (`remote`), which is the one session where the component's daemon cannot run.
+const REMOTE_DECLARATIONS = [
+    {
+        name: "read_file",
+        parameters: {
+            properties: {
+                path: { type: "string", description: "file path OR directory path, relative to the workspace root" },
+                max_chars: { type: "integer", description: "max chars to read (default $config.read_max_chars)" },
+                offset: { type: "integer", description: "1-based start line for a line-range read" },
+                limit: { type: "integer", description: "max lines to read when offset is given" },
+            },
+            required: ["path"],
+        },
+        defaults: { max_chars: "$config.read_max_chars" },
+        access: "read",
+        ui: {
+            group: "read",
+            form: "row",
+            body: "code",
+            collapse: "always",
+            highlight: "path",
+            preview: "none",
+            summary: "read {path} ({lines} lines)",
+        },
+        host: true,
+    },
+    {
+        name: "grep",
+        parameters: {
+            properties: {
+                pattern: { type: "string", description: "regex to search for" },
+                path: { type: "string", description: "subdirectory or file to search (default: whole workspace)" },
+                include: { type: "string", description: "filename glob filter (e.g. '*.py')" },
+            },
+            required: ["pattern"],
+        },
+        defaults: { path: ".", include: "" },
+        access: "sweep",
+        ui: {
+            group: "read",
+            form: "row",
+            body: "code",
+            collapse: "always",
+            highlight: "path",
+            preview: "none",
+            summary: "grep {pattern} ({lines} lines)",
+        },
+        host: true,
+    },
+    {
+        name: "write_file",
+        parameters: {
+            properties: {
+                path: { type: "string", description: "file path, relative to the workspace root" },
+                content: { type: "string", description: "full file content" },
+            },
+            required: ["path", "content"],
+        },
+        access: "write",
+        snapshot: true,
+        modes: ["work"],
+        ui: {
+            chrome: "accent",
+            header: "✓ wrote {path}",
+            body: "diff",
+            collapse: "long",
+            preview: { mode: "content", keys: ["✎path", "content"] },
+        },
+        host: true,
+    },
+    {
+        name: "edit_file",
+        parameters: {
+            properties: {
+                path: { type: "string", description: "file path, relative to the workspace root" },
+                old_string: { type: "string", description: "exact text to replace (must appear exactly once)" },
+                new_string: { type: "string", description: "replacement text" },
+            },
+            required: ["path", "old_string", "new_string"],
+        },
+        access: "write",
+        snapshot: true,
+        modes: ["work"],
+        ui: {
+            chrome: "accent",
+            header: "✎ edited {path}",
+            body: "diff",
+            collapse: "long",
+            preview: { mode: "content", keys: ["✎path", "-old_string", "+new_string"] },
+        },
+        host: true,
+    },
+];
+const REMOTE_TOOL_NAMES = REMOTE_DECLARATIONS.map((d) => d.name);
 // The host's own prose for one of its tools: `tools/<name>.md`, or the `_chat`
 // file when the session is in chat mode (agent/tools/host.py:_prose). The files
 // are staged beside this module exactly as the loop's own prompts are, and
 // tests/prompt.test.js keeps them byte-identical to agent/prompts/tools/ until P4.
+//
+// The four file tools read ONE file in both modes, like their Python half: a read
+// means the same thing in chat and in work, and the two writers are not offered in
+// chat at all (`modes: ["work"]`), so there is no `_chat` twin to keep in sync.
 function hostProse(name, mode) {
-    const file = mode === "chat" ? `${name}_chat.md` : `${name}.md`;
+    const file = mode === "chat" && !REMOTE_TOOL_NAMES.includes(name) ? `${name}_chat.md` : `${name}.md`;
     if (file !== path.basename(file))
         throw new TypeError(`tool-decl: "${file}" is not a prose file name`);
     return fs.readFileSync(path.join(__dirname, "prompts", "tools", file), "utf8");
@@ -553,6 +665,9 @@ function createTools(input) {
     };
     const mode = opts.mode === undefined ? "work" : String(opts.mode);
     const project = Boolean(opts.project);
+    // The session's ROOT, not a preference: a workspace on another machine has no
+    // daemon to serve the four file tools, so the host declares them itself.
+    const remote = Boolean(opts.remote);
     const prose = typeof opts.prose === "function" ? opts.prose : hostProse;
     const warn = typeof opts.warn === "function" ? opts.warn : null;
     // One refusal said once per process, like registry._report (REPORTED above).
@@ -605,12 +720,22 @@ function createTools(input) {
     // The host's own tools come first, and are always here: a word the host itself
     // cannot honor is a host bug (its own declaration is data, so it is checked like
     // any other), and there is nothing for the model to fall back on if it is wrong.
-    for (const declared of HOST_DECLARATIONS) {
+    // In a session whose root is another machine's, the four file tools are the
+    // host's too (REMOTE_DECLARATIONS): there is no daemon over there to declare
+    // them, and the execution layer implements them.
+    for (const declared of remote ? HOST_DECLARATIONS.concat(REMOTE_DECLARATIONS) : HOST_DECLARATIONS) {
         const spec = toolOf({ ...declared, description: prose(declared.name, mode) });
         const fatal = toolDiagnostics("clutch-host", spec, host).filter((d) => d.fatal);
         if (fatal.length) {
             throw new Error(`tool-decl: the host's own ${declared.name} declaration is invalid: ${fatal.map((d) => d.message).join("; ")}`);
         }
+        // A host declaration carries `modes` like a component's (`write_file` and
+        // `edit_file` are `["work"]`, so chat offers no write at all) — and in a
+        // remote session this is the only place that filter can run: on a local root
+        // these four names are the component's declarations, filtered by the loop
+        // below.
+        if (!spec.modes.includes(mode))
+            continue;
         if (!gateOk(spec.gate))
             continue;
         const wired = wire(spec);
@@ -634,6 +759,21 @@ function createTools(input) {
                 continue;
             if (!gateOk(spec.gate))
                 continue;
+            // A name the host is holding ITSELF in this session: `clutch-workspace`
+            // still declares read_file and its three siblings (they are its names,
+            // and on a local root its daemon performs them), but in a remote session
+            // its statement is a daemon that cannot run over there. Wiring it after
+            // the host's own would shadow the only implementation that works, so the
+            // component's copy is dropped — said once, and not fatal to its other
+            // tools.
+            const held = tools.get(spec.name);
+            if (held && held.host) {
+                say([
+                    diagnostic(component.name, spec.name, "the host declares this name itself for a workspace on another machine, and this component's " +
+                        "daemon cannot run there — the host's own implementation is offered", false),
+                ]);
+                continue;
+            }
             const wired = wire(spec);
             tools.set(wired.name, wired);
         }
@@ -677,6 +817,8 @@ module.exports = {
     resolve,
     HOST_DECLARATIONS,
     HOST_TOOL_NAMES,
+    REMOTE_DECLARATIONS,
+    REMOTE_TOOL_NAMES,
     HOST_PROSE_DIR: path.join(__dirname, "prompts", "tools"),
     DEFAULT_UI,
     DEFAULT_ACCESS,

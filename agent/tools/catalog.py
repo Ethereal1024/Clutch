@@ -253,6 +253,17 @@ FACILITIES: tuple[str, ...] = ("python", "posix-shell", "curl")
 # component_diagnostics). The declarations behind the names live in
 # agent/tools/host.py; registry._check_vocabulary keeps the two lists equal.
 HOST_TOOL_NAMES: tuple[str, ...] = ("run_command", "grep_memory", "read_memory")
+# The names the host declares for ITSELF again when the session's root is on
+# another machine (the ssh backend: tools/host.py `_REMOTE_DECLARATIONS`). These
+# are NOT reserved the way HOST_TOOL_NAMES are: the same four names are what
+# `clutch-workspace` (subject workspace-fs) publishes on a local root, where its
+# own daemon really performs them — a component may declare them, and must,
+# because on a local machine there is nothing else. What the ssh backend adds is
+# the case no component can cover: a root with no process behind it, where the
+# host's own implementation (tools/filesystem.py) IS the tool. registry.
+# build_tools therefore drops a component's copy of a name the host already holds
+# in THIS session, and keeps it whenever the host holds nothing.
+REMOTE_TOOL_NAMES: tuple[str, ...] = ("read_file", "grep", "write_file", "edit_file")
 # facts: the host facts a component may PUBLISH, because only its own code can
 # compute them. `vars` is the other direction (what a component consumes from the
 # host); a `facts` key is a host fact a component ANSWERS — a component declares
@@ -1033,24 +1044,42 @@ def _scan(directory: Path) -> list[os.DirEntry]:
         return []
 
 
+def _version_dirs(component_dir: Path) -> tuple[str, ...]:
+    """The version directories one component holds, by name.
+
+    The signature needs these NAMES and cannot lean on the component directory's
+    mtime for them: a filesystem is free not to move a directory's mtime when an
+    entry inside it is removed (this one does not, for a rmdir), so "an install
+    landed" or "the payload was pruned" would otherwise be invisible until the
+    process restarted. Staging directories (`*.installing`) are left out — they
+    are an install in flight, not a shape a registration is read from.
+    """
+    return tuple(
+        entry.name
+        for entry in _scan(component_dir)
+        if entry.is_dir() and not entry.name.endswith(".installing")
+    )
+
+
 def source_signature() -> tuple:
     """What the one registration source looks like RIGHT NOW, cheaply.
 
-    Only the SHAPE is read — the directories a registration is read FROM, by
-    mtime and size — never a manifest, so a table built from them can be reused
-    while nothing has changed. It covers everything the loader looks at: an
-    install landing or a version being pruned (both touch the component's own
-    directory) and the environment variable that repoints the root. Cheap enough
-    to ask on every lookup, which is what makes the memoization safe rather than
-    stale.
+    Only the SHAPE is read — the directories a registration is read FROM, and the
+    version directories inside each component, by name — never a manifest, so a
+    table built from them can be reused while nothing has changed. It covers
+    everything the loader looks at: an install landing or a version being pruned
+    (both change the version names, whichever way the filesystem treats the
+    component directory's mtime) and the environment variable that repoints the
+    root. Cheap enough to ask on every lookup, which is what makes the
+    memoization safe rather than stale.
 
     Out of reach, deliberately: a file EDITED in place inside an installed
-    component's version directory (a hand-patched manifest) does not move any
-    directory's mtime — `catalog.invalidate()` is how a caller says so.
+    component's version directory (a hand-patched manifest) moves no name and no
+    directory mtime — `catalog.invalidate()` is how a caller says so.
     """
     install_root = components.root()
     installs = [
-        (entry.name, _stamp(entry.path))
+        (entry.name, _stamp(entry.path), _version_dirs(entry.path))
         for entry in _scan(install_root)
         if entry.is_dir() and entry.name != components.SCRATCH
     ]

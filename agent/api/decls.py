@@ -26,6 +26,9 @@ So this endpoint is DATA and nothing else:
                  over the built-ins (catalog.DEFAULTS / ACCESS_WORDS / GATE_WORDS)
   project        whether a project log is open (the `project` gate)
   mode           "work" / "chat"
+  remote         whether the open workspace is another machine's (a
+                 `RemoteWorkspace`: the ssh backend), in which case the host
+                 declares the four file tools itself
 
 There is no 409 here: a session with no project open still has a surface (the
 host's own tools), and the page asks for it before it can open one.
@@ -44,6 +47,7 @@ from collections.abc import Iterator
 from typing import Any, Mapping
 
 from ..tools import answers, catalog, gates, rendezvous
+from ..tools.workspace import RemoteWorkspace
 
 
 def _strings(node: Any) -> Iterator[str]:
@@ -116,5 +120,13 @@ class DeclsMixin:
                 # scratch log has no path and shuts the two readers
                 "project": gates.gate_project(cfg, project.log if project is not None else None),
                 "mode": cfg.mode,
+                # the session's ROOT: a workspace on another machine has no
+                # daemon to serve read_file/grep/write_file/edit_file, so the
+                # host declares them itself for that session (tools/host.py
+                # `_REMOTE_DECLARATIONS`) and the reading adds them on the same
+                # flag (ui/tool-decl.js REMOTE_DECLARATIONS). Both halves read
+                # ONE answer, so the schema and the implementation cannot
+                # disagree about which machine is being served.
+                "remote": isinstance(self._state.workspace, RemoteWorkspace),
             }
         )

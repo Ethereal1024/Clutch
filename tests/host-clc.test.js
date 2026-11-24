@@ -230,6 +230,18 @@ async function main() {
   const work = path.join(tmp, "work");
   fs.mkdirSync(work, { recursive: true });
   const names = Object.keys(GOLDEN.files);
+  // The `.clc` bytes are generated, not committed (`.gitignore`: *.clc) — only
+  // expected.json is in git. A fresh checkout must freeze them first, and the
+  // failure should say so instead of dying inside copyFileSync.
+  const missing = names.filter((name) => !fs.existsSync(path.join(FIX, name)));
+  if (missing.length) {
+    check(
+      false,
+      `the golden capture is incomplete (${missing.join(", ")} missing from tests/fixtures/clc) — ` +
+        "regenerate it with: .venv/bin/python -m tests.clc_capture"
+    );
+    return;
+  }
   for (const name of names) fs.copyFileSync(path.join(FIX, name), path.join(work, name));
   try {
     await capture(names, work);

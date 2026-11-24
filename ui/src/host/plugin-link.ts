@@ -19,9 +19,9 @@
 //     port nobody serves fails every call with "the channel is not answering",
 //     which is a worse lie than "this host has no channel".
 //   * A declaration ABOUT another machine — the root's filesystem reached over a
-//     channel (clutch-ssh-workspace) — is only offered while a hop is live
-//     (snapshot): its tools are only meaningful where the tunnel reaches, and on
-//     this side the same names belong to the local component.
+//     channel — is only offered while a hop is live (snapshot): its tools are
+//     only meaningful where the tunnel reaches, and on this side the same names
+//     belong to the local component.
 //   * A push is the WHOLE set (agent/tools/channel.py refuses a partial one), so
 //     a change is a re-push, and "I have no plugins" is a DELETE — the session's
 //     refusal is then a sentence about the state, not a dial that times out.
@@ -141,9 +141,9 @@ function session(method, base, payload?) {
 // Two declaration shapes say "another machine", and both are read here because
 // both are in the wild (agent/tools/rendezvous.py `reaches_another_machine` is
 // the same rule on the host's side): `subject: foreign-fs` is 0.1.x's word for
-// it, and since 0.2.0 the ssh plugin declares the workspace's own `workspace-fs`
-// with nothing but an `entry` — a frontend half, whose code the client runs and
-// whose commands travel the tunnel.
+// it, and 0.2.0 declares the workspace's own `workspace-fs` with nothing but an
+// `entry` — a frontend half, whose code the client runs and whose commands
+// travel the tunnel.
 const WORKSPACE_FS = "workspace-fs";
 const FOREIGN_FS = "foreign-fs";
 

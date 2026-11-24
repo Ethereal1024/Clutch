@@ -435,23 +435,23 @@ def main() -> int:
     for other in (modules.WEBSEARCH, modules.SKILLS):
         check(not rendezvous.serves_workspace_fs(other), f"{other} is not tied to the workspace's machine")
     check(not rendezvous.serves_workspace_fs("clutch-nope"), "an unknown component serves nothing")
-    # the OTHER half of the same axis: the same filesystem, reached from ANOTHER
-    # machine (clutch-ssh-workspace, a client plugin over the ssh tunnel). It is
-    # the first declaration in this repo with no process here at all, which is why
-    # the check below no longer claims that axis is unused — and since 0.2.0 it
-    # says so by DECLARING the workspace's own subject and no process here (an
-    # `entry` and nothing else), which is what makes it the frontend half rather
-    # than the backend one; `foreign-fs` is the word 0.1.x used for the same thing.
-    ssh_workspace = "clutch-ssh-workspace"
-    ssh_mod = catalog.table().get(ssh_workspace)
-    check(ssh_mod is not None and ssh_mod.client_side, "the ssh plugin declares no process on this host")
-    check(rendezvous.serves_foreign_fs(ssh_workspace), "the ssh plugin serves the root's filesystem from another machine")
-    for other in (modules.WORKSPACE, modules.WEBSEARCH, modules.WEBSEARCH, modules.SKILLS):
-        check(not rendezvous.serves_foreign_fs(other), f"{other} is not a filesystem on another machine")
+    # the OTHER half of the same axis: the same filesystem reached from ANOTHER
+    # machine. NOTHING in this table occupies it any more. The client-side plugin
+    # that did (an `entry` and no process here, so its commands travelled the ssh
+    # tunnel) was retired with 甲-P1: on a root that is another machine, the HOST
+    # declares read_file and its three siblings itself
+    # (agent/tools/host.py `_REMOTE_DECLARATIONS`), so a component publishing
+    # those names could only shadow the only implementation that works there.
+    # The two predicates still have their readers (registry._serves_this_workspace,
+    # prompt.module_blocked_reason) and a driver that is not this table
+    # (tests/channel_test.py pushes a synthetic client-side workspace-fs
+    # declaration and reads both halves through it), so what is pinned HERE is
+    # the empty answer: nothing in this repo claims that side of the axis.
+    for mod in catalog.table().values():
+        check(not rendezvous.serves_foreign_fs(mod.name), f"{mod.name} is not a filesystem on another machine")
     check(not rendezvous.serves_foreign_fs("clutch-nope"), "an unknown component serves nothing there either")
     elsewhere = [mod.name for mod in catalog.table().values() if mod.client_side]
-    check(elsewhere == [ssh_workspace],
-          f"exactly one component in the table runs somewhere else, and it is the ssh plugin ({elsewhere})")
+    check(elsewhere == [], f"no component in this table runs somewhere else ({elsewhere})")
     check(all(mod.requires for mod in catalog.table().values() if mod.runs_here),
           "every component the host drives declares what it stands on")
     check(

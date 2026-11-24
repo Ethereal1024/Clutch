@@ -17,6 +17,15 @@
 | I5 | **组件 = 贡献包**（提示词/事实、工具、纯数据/文件）。组件不必须是工具，可以既无工具声明也无调用入口；协议不得强迫每个组件声明并实现调用 | 无工具组件能通过声明校验并安装 |
 | I6 | **锁屏不打断**是属性，不是运气：loop 无内存态，每一步可从 `.clc` 最后一行推出 | 杀进程/解冻后接着跑，没有独立的 “resume 功能” |
 
+> **补记（I3 与模式三，2026-11-25；未拍板）**：判据里“搜不到降级”现在有一条**有意的例外**。
+> `ui/src/renderer/backend-lifecycle.ts:117` 的 `tryDegradeToSshTools()`（由 `ui/src/renderer/conn-flow.ts:441`
+> 在“远侧活着但装不上”时调用）把本地会话切成 `mode:"ssh"`，继续用
+> `read_file` / `grep` / `write_file` / `edit_file` / `run_command`。它不给 I3 判据打折：
+> 这就是模式三（只用 sshd 的远侧）本身，是产品承诺，也是 `ui/src/host/tunnel-bootstrap.ts:356`
+> 那句用户可见文案所描述的那条路。但字面上它确实是“换一条路继续”，所以 I3 应当读作
+> “**除模式三这一次显式、可见的降级之外**”。要不要把它升成一条 D 编号决策，留给下一轮拍板；
+> 在那之前，不要用 I3 去删模式三，也不要拿模式三去否认 I3。四个工具的落点见 §13 M7。
+
 ---
 
 ## 1. 术语（本仓固定含义）
@@ -560,6 +569,19 @@ flowchart TD
   - **实测**：`for t in tests/*_test.py` → **25 绿、1 红**，唯一红仍是 §13 M5-c 那条 `clutch-ssh-workspace` WIP（`subject: workspace-fs` vs 用例钉的 `foreign-fs`，不在本仓修）；`node tests/components.test.js` / `node tests/tool-decl.test.js`（8 vs 8）/ `python -m tests.channel_test` 全绿；`ruff check agent scripts` 仍是那 3 条既有；`node ui/build-renderer.js --check` 与 `node ui/build-host.js --check` 均 up to date。**门里仍红且与本次无关**：`tests/conformance_capture.py --check` 的两份 golden（`manifest.json` 的 VERSION 0.1.64→0.1.69、`sse_frames.json` 的 `read_only: null`），要重新生成得有人专门点头。
   - **还剩一处，本轮故意没动**：`ui/src/host/tool-decl.ts` 的 `refine()` / `tableOf()` 仍按名字把后来的声明合到前一条上（`ui/tool-decl.js` 里同名逻辑，`tests/tool-decl.test.js` 还有一组 `c-merge` 用例）。宿主现在每条声明只有一条来源，所以那段是**死代码**；但本机 `ui/node_modules` 里没有可执行的 `tsc`，改 `.ts` 就产不出新的 `ui/tool-decl.js`，`node ui/build-host.js --check` 会立刻红。等有 TypeScript 工具链时再删（连同 `c-merge` 用例与它第 8 行的 docstring）。
 
+- [x] **M7 甲-P1：模式三的四个文件工具回到执行层，“ssh 工作区”这一族退役（2026-11-25）**
+  - **改了什么**：`read_file` / `grep` / `write_file` / `edit_file` 不再是客户端组件的贡献，而是**宿主自己的工具**（`Tool.host` → `agent/tools/filesystem.py`），只在 `state.workspace` 是 `RemoteWorkspace` 时由宿主声明；本地根仍由 `clutch-workspace` 那条组件声明。`GET /api/declarations` 为此多一个 `remote` 字段（远侧根为真，页面据此知道四个名字是宿主的）。`clutch-ssh-workspace` 整族删除：子模块与 `.gitmodules` 那一节、`market/entries.json` / `ui/market.snapshot.json` 里的条目、`tests/ssh-workspace.test.js`、`tests/ssh-workspace-e2e.js`，以及 `.gitignore` 里为后者留的 `/.e2e-ssh-workspace-*/`。
+  - **为什么这是对的、不是又一条兜底**：远侧只有执行层；一个组件能持有**陈述**（清单、代码），只有**监督者**能持有**表**（Agent 工具名 → 命令的渲染）。模式三的远侧没有监督者，所以那张表只能在客户端的执行层里——`run_command` 一直是这个形态，9 月那 188 行 `agent/tools/filesystem.py` 也是。`clutch-ssh-workspace` 是把表放进了组件，它从 `foreign-fs` 改到自己也叫 `workspace-fs`、越改越不像设计初衷，根子就在这里。
+  - **“远侧没有 python 就没工具”这个收窄，现在由实现兑现了**：`ui/src/host/tunnel-bootstrap.ts:356` 在否决引导时对用户说 “Falling back to SSH-tools: file and command access over the tunnel still work”，而退役的插件把远侧那条命令译成组件自己的 CLI（`python3 -m clutch_workspace --json <tool>`，按 `<root>/clutch-workspace` 检出或 `~/.clutch/components/clutch-workspace/*/` 定位解释器，默认 `python3`，见 `SSH_WORKSPACE_PLAN.md` C9.2）——所以那句话在四个工具上曾经是反话。现在宿主这半边走 `RemoteWorkspace` 的 POSIX sh（`cat` / `ls` / `printf '%s'` 追加；`agent/tools/workspace.py` 的类注释写明 no base64、no SFTP），只要远侧 sshd 能跑 shell 就够。
+  - **与组件逐字对齐**：宿主这套的模型可见文本（答案串与错误串）与 `clutch-workspace --json` 的冻结文本逐字节相同，由 `tests/conform.test.js` 39 例钉住（两侧 dump 分别来自 `tests/filesystem_dump.py` 与组件自己；`tests/remote_filesystem_test.py` 钉远侧侧）。只有组件从不产出的宿主专有拒绝（受保护路径、路径逃逸、传输/IO 失败）保留 `ERROR: ` 前缀，理由写在 `filesystem.py` 的模块 docstring 里。`grep` 先在宿主上 `re.compile` 一次（坏正则在两边是同一句话）；`RemoteWorkspace.grep` 在同一个 exec 里用 `test -e` 探路径在不在（`CLUTCH_NO_PATH_*` 标记 + 退出码 64 → `FileNotFoundError`），不为此多一次往返。
+  - **同名谁赢**：组件声明了宿主已持有的名字 → 丢掉那条组件工具，只留一条非致命 `catalog.Diagnostic`（`registry.build_tools`）。所以“本地根 + 装了 `clutch-workspace`”仍是组件那份，“远侧根”是宿主那份，不要靠声明顺序定胜负。
+  - **验证**：`tests/decl_api_test.py` / `channel_test.py` / `rendezvous_test.py`（第 2b 节改成“表里没有任何组件声明 `foreign-fs`”，合成的这一幕搬去 `tests/channel_test.py`）/ `transport_test.py` / `remote_filesystem_test.py` 全绿；`node tests/conform.test.js` / `tool-decl.test.js` / `prompt.test.js` / `plugin-link.test.js`（第 11 节换成合成 fixture）全绿；`node ui/build-host.js --check` up to date。
+
+- [ ] **M8 P4 残渣：远侧会话的“反向转发模型通路”（8892）还留着（只记账，本轮没动）**
+  - **事实**：`ui/src/host/host-core.ts:9-13` 的 `deps.remoteLlmBase()` 给远侧会话的 `--base-url` 就是 `http://127.0.0.1:8892/v1`（反向转发回本窗口的模型代理），`host-core.ts:464-469` 每次 `supervisorSessionStart` 都带上 `remoteLlm()` / `remoteLlmModel()` / `remoteLlmKnobs()`；`ui/src/host/tunnel-connect.ts:516` 的注释仍写着那是 “the ONLY way a remote session reaches a model”。
+  - **为什么算残渣**：`agent/` 已经没有任何能发起模型请求的东西（I1 的判据 `tests/exec_layer_test.py`：第三方 import 为空、两个入口的可达图上没有模型、没有消息投影器）。两件事同时为真 ⇒ 这段接线在读者眼里等于“远侧还有一个循环”，正是 P4 要删掉的旧形状；它只是不会出错（远侧没人用它）。
+  - **为什么这轮不删**：删它要改 `--base-url` 的传递、隧道里那条反向转发的安装与重试梯子，以及钉着 8892 的 `tests/host-core.test.js`（67 / 101 / 532）与 `tests/tunnel-reverse-port-test.js` 整条链——超出 甲-P1 的范围。要动就单独立一笔，连同“远侧真的要用模型时谁提供”一起答。
+
 ---
 
 ## 14. 收尾验收（每阶段跑，不要攒到最后）
@@ -567,7 +589,7 @@ flowchart TD
 ```bash
 # 不降级
 node tests/no-local-fallback-test.js            # P0-3/P0-4 之后必须 0 FAIL
-# 执行层全量（26 个用例文件；25 绿、1 红，唯一红见 §13 M5-c）：没有 pytest——以 `-m` 逐个跑
+# 执行层全量（28 个用例文件，2026-11-25 全绿）：没有 pytest——以 `-m` 逐个跑
 # （脚本方式 `python3 tests/x_test.py` 只把 tests/ 放进 sys.path，只有本机 .venv
 #  里的 editable .pth 兜住了仓库根；`-m` 在哪台机器上都对）
 for t in tests/*_test.py; do python3 -m "tests.$(basename "${t%.py}")" >/dev/null || echo "FAIL $t"; done
@@ -578,14 +600,15 @@ python3 -m ruff check agent scripts --output-format concise   # 3 条既有告�
 (cd ui && npm run typecheck)
 
 # 渲染器 bundle 与源码逐字节保鲜（不依赖 esbuild，Android 发布 job 也能跑）
-node ui/build-renderer.js --check               # "up to date — 34 modules, 7660 lines"
+node ui/build-renderer.js --check               # "up to date — 35 modules, 8880 lines"
+node ui/build-host.js --check                   # "up to date — 43 modules"
 
 # 插件（子模块 clutch-websearch）：三个动词一个脚本
 (cd clutch-websearch && node scripts/build-plugin.js --typecheck)  # tsc --noEmit，rc=0
 (cd clutch-websearch && node scripts/build-plugin.js --check)      # 不用 tsc：比 banner 里的源 digest
 (cd clutch-websearch && node tests/plugin.test.js)                 # 50 项，含上面那三条的正面断言
 
-# 两条 JS sweep 全绿：84/84（*.test.js 与 *-test.js）
+# 两条 JS sweep 全绿：115/115（*.test.js 与 *-test.js，2026-11-25 实测）
 for t in tests/*.test.js tests/*-test.js; do node "$t" >/dev/null || echo "FAIL $t"; done
 
 # 日志端点（P2）：76 条 ok，rc=0；起真 server、开真 .clc
@@ -637,6 +660,14 @@ node tests/android-wake.test.js
 # 端到端（需要凭据）
 CLUTCH_E2E_HOST=… CLUTCH_E2E_USER=… CLUTCH_E2E_PASS=… node tests/remote-bootstrap-e2e.js
 ```
+
+**补记（2026-11-25，甲-P1 收尾的全量 sweep）**
+
+- **Python：28/28 全绿**（`tmp/pysweep.sh`，一文件一进程；`-m` 方式）。`rendezvous_test` 曾是唯一的红，根因不是子模块，而是本机文件系统上 `rmdir` **不更新父目录 mtime**（实测 0/30），`catalog.source_signature()` 因此看不见被删掉的版本目录、表一直用旧的；签名改为把每个组件的版本目录名（`_version_dirs`，排除 `*.installing`）也纳进去之后 12/12 稳定绿。`catalog_test` 的 memo 用例补了“prune 之后表要失效”这一条。
+- **JS：115/115 全绿**（`tmp/jssweep.sh`，`timeout 180 node <file>`）。首轮两红，都是用例本身过期，不是代码：
+  - `tests/market.test.js` 钉着 `entries.length >= 4`，而 `clutch-ssh-workspace` 的市场行已随甲-P1 退役（`market/entries.json` 与 `ui/market.snapshot.json` 都只剩 3 行）。改成 `>= 3`，并注明这是**下限**不是普查——行本身仍逐字段对 `market/entries.json` 比。
+  - `tests/host-clc.test.js` 崩在 `copyfile … fixtures/clc/compacted.clc → ENOENT`。`.gitignore:10` 是 `*.clc`，**只有 `expected.json` 进 git**，其余 6 个 `.clc` 是 `tests/clc_capture.py` 生成的。重新生成（`--check` → “7 files byte-identical”）后转绿；顺手在缺失时给出一句可执行的提示（“regenerate with: .venv/bin/python -m tests.clc_capture”）而不是 `copyFileSync` 的栈。**注意**：新克隆下来直接跑这条用例会缺文件，必须先跑 capture。
+- **门**：`(cd ui && npm run typecheck)` 两份配置 rc=0；`ui/build-host.js --check` 43 modules、`ui/build-renderer.js --check` 35 modules / 8880 lines，均 up to date；`python3 -m tests.clc_capture --check` 7 文件逐字节一致；`tests/prompt.test.js` 确认 `ui/prompts/tools/*.md` 与 `agent/prompts/tools/*.md` 同名且逐字节相同（四个新文件是待提交的新增件，不是产物）。
 
 **最终验收（一次说清什么叫做完了）**
 1. 桌面：一次带工具调用的 turn 跑完，关掉窗口不影响它，重开窗口看到它还在跑。

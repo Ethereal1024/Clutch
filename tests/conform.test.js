@@ -12,9 +12,12 @@
 //      manifest has its file, every case it lists is there, every recorded status
 //      is a number, and no golden leaked a machine path through the <ROOT>/<HOME>/
 //      <TMP> normalization);
-//   2. the four tools' frozen text, compared between the Python component
-//      (clutch-workspace) and lib/tools.js of clutch-ssh-workspace — the part of
-//      the seam that already exists on BOTH sides.
+//   2. the four tools' frozen text, compared between the component that serves
+//      a LOCAL root (clutch-workspace's CLI) and the implementation the HOST
+//      brings when the root is on another machine (agent/tools/filesystem.py,
+//      driven by tests/filesystem_dump.py). Same fixture tree, same cases,
+//      same frozen texts — that parity is what `agent/prompts/tools/<name>.md`
+//      promises the model, so it is what the seam is held to.
 //
 // `pending` is the M0 deliverable, not a TODO: it names the milestone that owes the
 // route. When ui/host/api.js exists, an endpoint flips to `enforced` in
@@ -219,22 +222,38 @@ function noLeakedPaths(manifest) {
 
 // ---- 2. the four tools' frozen text -------------------------------------
 //
-// The one pair of implementations that already exists twice: the Python component
-// (clutch-workspace) and this repo's lib/tools.js. Same fixture tree on both
-// sides, same answers — modulo the two divergences the plan documents (POSIX ERE
-// vs Python re, raw bytes vs universal newlines).
+// One pair of implementations, on purpose: the component that performs these
+// calls on a LOCAL root (clutch-workspace's CLI) and the HOST's own
+// (agent/tools/filesystem.py), which is what a root on another machine is
+// served by. Same fixture tree on both sides, same cases, same answers — a
+// call reads the same whichever machine answered it.
 
 const PYTHON = process.env.PYTHON || (fs.existsSync(".venv/bin/python") ? path.resolve(".venv/bin/python") : "python3");
 const COMPONENT = path.resolve("clutch-workspace");
 
-function runShell(cwd) {
-  return (command) =>
-    new Promise((resolve) => {
-      execFile("sh", ["-c", command], { cwd, maxBuffer: 64 * 1024 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
-        const code = error && typeof error.code === "number" ? error.code : error ? -1 : 0;
-        resolve({ code, stdout: stdout || "", stderr: stderr || "" });
-      });
-    });
+// The HOST's four (agent/tools/filesystem.py), as one stateful batch: the cases
+// run in order against one root, exactly like the component's CLI runs them in
+// order against the other root.
+function hostDump(root, cases) {
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      PYTHON,
+      [path.join("tests", "filesystem_dump.py")],
+      { cwd: path.resolve(__dirname, ".."), encoding: "utf8", maxBuffer: 256 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error((error.message || String(error)) + "\n" + stderr));
+          return;
+        }
+        try {
+          resolve(JSON.parse(stdout));
+        } catch (e) {
+          reject(new Error("not a batch of envelopes: " + stdout.slice(0, 300)));
+        }
+      }
+    );
+    child.stdin.end(JSON.stringify({ root, cases: cases.map(({ tool, args }) => ({ tool, args })) }));
+  });
 }
 
 function component(cwd, args, stdin) {
@@ -319,11 +338,11 @@ const TOOL_CASES = [
   { tool: "read_file", args: { path: "many.txt" } },
   { tool: "read_file", args: { path: "empty" } },
   { tool: "read_file", args: { path: "empty-file.txt" } },
-  { tool: "read_file", args: { path: "crlf.txt" }, diverge: "bytes" },
+  { tool: "read_file", args: { path: "crlf.txt" } },
   { tool: "read_file", args: { path: "unicode-é.txt" } },
   { tool: "grep", args: { pattern: "hit" } },
   { tool: "grep", args: { pattern: "aaa" } },
-  { tool: "grep", args: { pattern: "two", path: "crlf.txt" }, diverge: "bytes" },
+  { tool: "grep", args: { pattern: "two", path: "crlf.txt" } },
   { tool: "grep", args: { pattern: "first", include: "?.txt" } },
   { tool: "grep", args: { pattern: "unicode" } },
   { tool: "read_file", args: { path: "./src/../README.md" } },
@@ -351,49 +370,35 @@ function cliArgs(tool, args) {
 }
 
 async function toolsConformance() {
-  let tools;
-  try {
-    tools = require(path.resolve(__dirname, "..", "clutch-ssh-workspace", "lib", "tools"));
-  } catch (e) {
-    console.log(`skip: four-tool comparison (clutch-ssh-workspace/lib/tools.js not installed: ${e.code || e.message})`);
-    return;
-  }
   const A = fs.mkdtempSync(path.join(os.tmpdir(), "conform-a-"));
   const B = fs.mkdtempSync(path.join(os.tmpdir(), "conform-b-"));
   TEMP_DIRS.push(A, B);
   fixture(A);
   fixture(B);
-  const ctx = {
-    env: Object.assign({}, process.env, {
-      CLUTCH_SSH_WORKSPACE: B,
-      CLUTCH_EXEC_CHUNK_BYTES: "3500",
-      CLUTCH_EXEC_MAX_COMMAND_BYTES: "6000",
-    }),
-    run: runShell(B),
-  };
   let bad = 0;
-  let known = 0;
+  let host;
   try {
-    // a probe first: the Python side must be runnable, else say so instead of
+    // a probe first: both sides must be runnable, else say so instead of
     // reporting 39 mismatches against a broken interpreter
     const probe = await component(A, ["read_file", "--path", "README.md"]);
     if (!probe || typeof probe.content !== "string") {
       console.log("skip: four-tool comparison (the component answered no envelope)");
       return;
     }
+    host = await hostDump(B, TOOL_CASES);
+    if (!Array.isArray(host) || host.length !== TOOL_CASES.length) {
+      console.log("skip: four-tool comparison (the host dump answered the wrong number of cases)");
+      return;
+    }
   } catch (e) {
     console.log(`skip: four-tool comparison (${String(e.message).split("\n")[0]})`);
     return;
   }
-  for (const { tool, args, diverge } of TOOL_CASES) {
+  for (const [i, { tool, args }] of TOOL_CASES.entries()) {
     const want = await component(A, cliArgs(tool, args), tool === "write_file" ? args.content : undefined);
-    const got = await tools.run(ctx, tool, args);
-    const same = want.content === got.content && (want.diff || "") === got.diff && !!want.error === !!got.code;
+    const got = host[i];
+    const same = want.content === got.content && (want.diff || "") === got.diff && !!want.error === !!got.error;
     if (same) continue;
-    if (diverge === "bytes") {
-      known++;
-      continue;
-    }
     bad++;
     console.log(`  MISMATCH ${tool} ${JSON.stringify(args)}`);
     if (want.content !== got.content) {
@@ -404,10 +409,9 @@ async function toolsConformance() {
       console.log("    diff want:", JSON.stringify(String(want.diff || "").slice(0, 200)));
       console.log("    diff got :", JSON.stringify(String(got.diff || "").slice(0, 200)));
     }
-    if (!!want.error !== !!got.code) console.log("    error want:", want.error, "got:", got.code);
+    if (!!want.error !== !!got.error) console.log("    error want:", want.error, "got:", got.error);
   }
-  check(bad === 0, `four tools: the frozen texts match the Python component (${TOOL_CASES.length} cases, ${known} documented divergence(s))`);
-  check(known <= 2, "four tools: no NEW documented divergence appeared");
+  check(bad === 0, `four tools: the frozen texts match the Python component (${TOOL_CASES.length} cases)`);
 }
 
 const TEMP_DIRS = [];

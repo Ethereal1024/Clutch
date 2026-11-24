@@ -14,17 +14,23 @@ What it carries is the HOST's own bookkeeping, not the file tools: the .clc
 project file (byte offsets, the fixed-width memory index line), the per-file
 snapshot the UI's undo restores, the lazy indexed log reads, the transport every
 statement runs through, and the entries browsing.py walks into the UI's tree.
-The read_file / grep / write_file / edit_file tools are the workspace
-COMPONENT's and are spoken to directly (tools/filesystem.py keeps only the
-host's protected-path policy), so nothing here is a second implementation of
-them.
+
+`list` and `grep` are here because a root on another machine has no component
+that could serve them: a component needs a process on the machine the root is
+on, and the whole point of the ssh backend is that there is nothing to install
+there (agent/tools/filesystem.py is the tool face over these two, declared by
+the host in that one backend — tools/host.py). In the local backend the
+workspace COMPONENT declares those same names and the host does not, so these
+two exist for the ssh backend and are harmless elsewhere.
 """
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import posixpath
+import re
 import tempfile
 import threading
 import time
@@ -384,6 +390,10 @@ class Workspace(ABC):
         """Create or overwrite a file (parents created as needed)."""
 
     @abstractmethod
+    def list(self, path: str) -> list[str]:
+        """Directory entries (dirs end with '/'), protected files excluded; raise NotADirectoryError."""
+
+    @abstractmethod
     def append_line(self, path: str, line: str) -> None:
         """Append one line to a file (the remote .clc writer)."""
 
@@ -400,6 +410,11 @@ class Workspace(ABC):
         """Remove a file (the rollback of a CREATION: the journal is the only
         thing that knows a path did not exist before the task). Raises OSError
         when it cannot be removed."""
+
+    @abstractmethod
+    def grep(self, pattern: str, path: str = ".", include: str | None = None) -> list[tuple[str, int, str]]:
+        """Regex search over workspace files (skips hidden/binary/protected).
+        Returns [(root-relative path, 1-based line, text)], capped at 100 hits."""
 
 
 class LocalWorkspace(Workspace):
@@ -456,6 +471,12 @@ class LocalWorkspace(Workspace):
         # every \n into \r\n (that desynchronizes every stored offset).
         p.write_text(content, encoding="utf-8", newline="\n")
 
+    def list(self, path: str) -> list[str]:
+        p = self.resolve(path)
+        if not p.is_dir():
+            raise NotADirectoryError(path)
+        return sorted(f.name + ("/" if f.is_dir() else "") for f in self.visible_entries(p))
+
     def append_line(self, path: str, line: str) -> None:
         p = self.resolve(path)
         # one LF terminator per line (the remote bridge's `printf '%s\n'` shape):
@@ -473,6 +494,49 @@ class LocalWorkspace(Workspace):
         # missing_ok: same tolerance as the remote `rm -f` — the rollback that
         # un-creates a file must survive the user having removed it by hand
         self.resolve(path).unlink(missing_ok=True)
+
+    def grep(self, pattern: str, path: str = ".", include: str | None = None) -> list[tuple[str, int, str]]:
+        rx = re.compile(pattern)
+        root = self.resolve(path)
+        files = [root] if root.is_file() else self._grep_files(root)
+        out: list[tuple[str, int, str]] = []
+        for f in files:
+            if self.is_protected(f):
+                continue
+            rel = str(f.relative_to(self.root))
+            if include and not (fnmatch.fnmatch(f.name, include) or fnmatch.fnmatch(rel, include)):
+                continue
+            if self._is_binary(f):
+                continue
+            try:
+                with open(f, encoding="utf-8", errors="replace") as fh:
+                    for i, line in enumerate(fh, 1):
+                        if rx.search(line):
+                            out.append((rel, i, line.rstrip("\n")))
+                            if len(out) >= 100:
+                                return out
+            except OSError:
+                continue
+        return out
+
+    def _grep_files(self, dirpath: Path) -> list[Path]:
+        files: list[Path] = []
+        for ent in sorted(dirpath.iterdir()):
+            if ent.name.startswith(".") or ent.name == "__pycache__":
+                continue
+            if ent.is_dir():
+                files.extend(self._grep_files(ent))
+            elif ent.is_file():
+                files.append(ent)
+        return files
+
+    @staticmethod
+    def _is_binary(p: Path) -> bool:
+        try:
+            with open(p, "rb") as f:
+                return b"\x00" in f.read(1024)
+        except OSError:
+            return True
 
 
 # Minimal sshd drops a single exec over ~8KB: writes are chunked below it;
@@ -643,6 +707,14 @@ class RemoteWorkspace(Workspace):
         p = self.resolve(path)
         self._exec_append(p, content, first_op=">", add_trailing_nl=False, ensure_dir=True)
 
+    def list(self, path: str) -> list[str]:
+        p = self.resolve(path)
+        # test -d first: ls alone succeeds on a plain file
+        r = self._transport.run(f"test -d {shq(str(p))} && ls -1AF {shq(str(p))}", _REMOTE_IO_TIMEOUT)
+        if r.code != 0:
+            raise NotADirectoryError(str(p))
+        return self._parse_list_output(p, r.stdout)
+
     def _parse_list_output(self, p: Path, stdout: str) -> list[str]:
         """One shared ls parser + the protected-file filter (protected dirs stay
         listed — the agent sees the dir but cannot read inside it)."""
@@ -719,3 +791,59 @@ class RemoteWorkspace(Workspace):
         r = self._transport.run(f"rm -f {shq(str(p))}", _REMOTE_IO_TIMEOUT)
         if r.code != 0:
             raise OSError(f"cannot delete {p} (exit {r.code}): {(r.stderr or r.stdout)[:_ERR_SNIPPET]}")
+
+    def grep(self, pattern: str, path: str = ".", include: str | None = None) -> list[tuple[str, int, str]]:
+        # busybox grep lacks --include/dotfile awareness: use find, skip hidden
+        # files/dirs and the protected .clc
+        p = self.resolve(path)
+        # A path that is neither a file nor a directory is `file not found` on
+        # the component side, so probe for it IN the search's own exec (no extra
+        # round trip): `test -e` is false only when nothing is there, and the
+        # marked exit then stops the shell before find can print an error of its
+        # own — which is how the caller tells this apart from "no matches".
+        absent = f"CLUTCH_NO_PATH_{time.time_ns()}"
+        probe = f"test -e {shq(str(p))} || {{ echo {shq(absent)} >&2; exit 64; }}; "
+        find_cmd = f"find {shq(str(p))} -type f ! -path '*/.*' ! -path '*/.*/*'"
+        for prot in self._protected:
+            find_cmd += f" ! -name {shq(prot.name)}"
+        if include:
+            find_cmd += f" -name {shq(include)}"
+        cmd = f"{probe}{find_cmd} -print0 | xargs -0 grep -HnE {shq(pattern)} | head -n 100"
+        r = self._transport.run(cmd, _REMOTE_IO_TIMEOUT)
+        if not r.stdout.strip():
+            err = (r.stderr or "").strip()
+            if absent in err:
+                raise FileNotFoundError(str(p))
+            # No hits AND a diagnostic on stderr is a search that did not run:
+            # a malformed pattern, an unreadable directory, a missing xargs.
+            # Answering "(no matches)" there would tell the model the text is
+            # absent when nothing was actually read. The pipeline's own exit
+            # status is `head`'s, so stderr is the only signal that survives
+            # (`grep` says nothing at all for the genuine no-match, exit 1).
+            if err or r.code != 0:
+                raise OSError(err.splitlines()[0] if err else f"grep failed (exit {r.code})")
+            return []
+        out: list[tuple[str, int, str]] = []
+        for line in r.stdout.splitlines():
+            first = line.find(":")
+            if first < 0:
+                continue
+            rest = line[first + 1 :]
+            second = rest.find(":")
+            if second < 0:
+                continue
+            try:
+                lineno = int(rest[:second])
+            except ValueError:
+                continue
+            fpath = line[:first]
+            try:
+                # PurePosixPath: the remote prints POSIX paths; the host's Path
+                # flavor must not re-separator them (WindowsPath on Windows)
+                rel = str(PurePosixPath(fpath).relative_to(self.root))
+            except ValueError:
+                rel = fpath
+            out.append((rel, lineno, rest[second + 1 :]))
+            if len(out) >= 100:
+                break
+        return out

@@ -7,6 +7,3 @@
 [submodule "clutch-skills"]
 	path = clutch-skills
 	url = https://github.com/Ethereal1024/clutch-skills.git
-[submodule "clutch-ssh-workspace"]
-	path = clutch-ssh-workspace
-	url = https://github.com/Ethereal1024/clutch-ssh-workspace.git

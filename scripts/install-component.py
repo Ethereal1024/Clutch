@@ -25,7 +25,7 @@ installed WITH it, so what the host later parses is the file the component ships
 
 Usage:
   python3 scripts/install-component.py clutch-skills
-  python3 scripts/install-component.py clutch-skills clutch-ssh-workspace
+  python3 scripts/install-component.py clutch-skills clutch-websearch
   python3 scripts/install-component.py --list        # what this host holds
   python3 scripts/install-component.py --dry-run clutch-skills
 """

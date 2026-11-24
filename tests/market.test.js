@@ -57,7 +57,10 @@ async function main() {
   // as the release's market/index.json, and no window reads it from disk.
   const snapshot = readJSON(SNAPSHOT);
   check(snapshot.schema === 2, "the committed index is index schema 2");
-  check(Array.isArray(snapshot.entries) && snapshot.entries.length >= 4, `and it lists the modules this project publishes (${snapshot.entries.length})`);
+  // A floor, not a census: the published set is clutch-workspace, clutch-websearch
+  // and clutch-skills (clutch-ssh-workspace was retired with 甲-P1). The rows
+  // themselves are checked against the curation file below.
+  check(Array.isArray(snapshot.entries) && snapshot.entries.length >= 3, `and it lists the modules this project publishes (${snapshot.entries.length})`);
   check(!("generated" in snapshot) && !("updated" in snapshot), "with no timestamp in it: an unchanged market is byte-identical, so --check is a real staleness gate");
 
   const ids = snapshot.entries.map((e) => e.id);

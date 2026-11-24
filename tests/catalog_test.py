@@ -854,9 +854,18 @@ def check_table_is_memoized() -> None:
             check("clutch-late" in catalog.table(), "a registration landing IS picked up, without an invalidate")
             check(scans["n"] == 1, "and it cost exactly one re-read")
 
+            # Pruning the version directory is the other half of the same promise
+            # (and the one a directory mtime cannot be trusted for: this
+            # filesystem does not move the parent's mtime on an rmdir). The
+            # component directory stays, the payload is gone, so the table must
+            # be re-read and the name must fall out of it.
+            shutil.rmtree(components.root() / "clutch-late" / "1.0.0")
+            check("clutch-late" not in catalog.table(), "a payload pruned out of its component directory is picked up too")
+            check(scans["n"] == 2, "and that re-read costs one more")
+
             catalog.invalidate()
             catalog.table()
-            check(scans["n"] == 2, "invalidate() makes the next lookup re-read")
+            check(scans["n"] == 3, "invalidate() makes the next lookup re-read")
 
             catalog.table()["clutch-scribble"] = None  # type: ignore[assignment]
             check("clutch-scribble" not in catalog.table(), "the memo is not scribbled on through a returned table")

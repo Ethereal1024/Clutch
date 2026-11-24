@@ -421,7 +421,7 @@ async function main() {
 
   // ---- 11. a declaration about ANOTHER machine only travels with a live hop --
   //
-  // The ssh plugin says "the filesystem over there", so its tools are only
+  // Such a component says "the filesystem over there", so its tools are only
   // meaningful while a hop reaches there. Declared without one, it would shadow
   // the session's own filesystem component — whose `read_file` works on the
   // machine the root names — with one that can only answer "no tunnel". The gate
@@ -432,11 +432,14 @@ async function main() {
   // foreign-fs` is 0.1.x's word for it, and 0.2.0 declares the workspace's own
   // subject with nothing but an `entry` (its code is the client's, its commands
   // travel the tunnel) — the same rule the host reads in
-  // agent/tools/rendezvous.py `reaches_another_machine`.
+  // agent/tools/rendezvous.py `reaches_another_machine`. The fixtures are
+  // synthetic: no component in this repo ships that shape any more (the ssh
+  // plugin was retired with 甲-P1), but the client side of the wire still holds
+  // the rule, so the test keeps a declaration for it to hold.
   const sshShape = { entry: "plugin.js", tools: [{ name: "read_file", description: "read a file on the far side", parameters: { properties: {} } }] };
   const fixtures = [
-    ["clutch-ssh-workspace", { ...sshShape, subject: "workspace-fs" }],
-    ["clutch-legacy-ssh", { ...sshShape, subject: "foreign-fs" }],
+    ["clutch-far-fs", { ...sshShape, subject: "workspace-fs" }],
+    ["clutch-far-legacy", { ...sshShape, subject: "foreign-fs" }],
   ];
   for (const [name, manifest] of fixtures) {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "clutch-link-foreign-"));

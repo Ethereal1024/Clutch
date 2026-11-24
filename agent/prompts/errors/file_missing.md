@@ -1,1 +1,1 @@
-ERROR: not a file or missing: $path
+file not found: $path

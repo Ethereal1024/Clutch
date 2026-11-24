@@ -37,11 +37,6 @@ docs/
 /verify_win_artifact.py
 /watch_ci.sh
 
-# tests/ssh-workspace-e2e.js keeps its sandbox when it fails, on purpose ("a
-# failure leaves its evidence and a pass leaves nothing") — so the evidence must
-# never be one `git add` away from being committed
-/.e2e-ssh-workspace-*/
-
 # local scratch scripts/logs from ad-hoc testing sessions
 /tmp/
 /scratch-*.py
