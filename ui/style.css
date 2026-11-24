@@ -1726,7 +1726,8 @@ mjx-container[display="true"] {
    per tab: the layout is about the reader's screen, while what a group SHOWS is
    about the tab (see #plug-pane below). */
 .dock-group { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; }
-.dock-group + .dock-group { border-top: 1px solid var(--border); }
+/* The rule between the groups is the handle's now (#dock-split below): the two
+   groups are no longer adjacent siblings, so nothing else draws that hairline. */
 .dock-group.dock-collapsed { flex: 0 0 auto; }
 .dock-group.dock-collapsed > .panel-head { border-bottom: none; }
 .dock-group.dock-collapsed > .dock-body { display: none; }
@@ -1736,6 +1737,39 @@ mjx-container[display="true"] {
    class-only rule above loses the cascade, and a "collapsed" group kept its list
    on screen and its height. The fold is the PARENT's state, so it has to win. */
 #right .dock-group.dock-collapsed > .dock-body { display: none; }
+
+/* ---- the split between the two groups ---------------------------------------
+   The reader's own proportion, and it is a HANDLE, not a border that happens to be
+   draggable: seven pixels of dead space with the hairline drawn down its middle,
+   which is a target a hand can find and a line that still reads as a rule. It sits
+   between the groups as a real `role="separator"` with a tab stop (the arrow keys
+   move it in 16px steps, ui/src/renderer/dock.ts), and `touch-action: none` is what
+   makes a drag on a phone a resize instead of a scroll of the pane under it. */
+.dock-split {
+  flex: none;
+  position: relative;
+  height: 7px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: none;
+  cursor: row-resize;
+  touch-action: none;
+}
+.dock-split::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 3px;
+  height: 1px;
+  background: var(--border);
+}
+/* the line lights up under the pointer and while it is being dragged — the same
+   accent a focused row carries, because this IS the control that has the pointer */
+.dock-split:hover::before,
+.dock-split.dragging::before { background: var(--accent); }
+.dock-split:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
 
 .panel-head {
   display: flex;
@@ -1751,8 +1785,10 @@ mjx-container[display="true"] {
 }
 /* ...and the accent rule marks the SIDEBAR's edge, once: a second one under the
    first would read as a selected row rather than as the panel's own border. The
-   border keeps its width, so both titles sit on the same x. */
-.dock-group + .dock-group > .panel-head { border-left-color: transparent; }
+   border keeps its width, so both titles sit on the same x. Named by the group
+   because the handle between them (#dock-split) is between the two heads now, not
+   above the second one. */
+#dock-plugins > .panel-head { border-left-color: transparent; }
 /* the row contract every head shares: a label on the left, its tools pushed to
    the right edge. Unscoped on purpose — a head that reuses this markup inherits
    the alignment instead of re-deriving it, which is how a ✕ ends up sitting next
@@ -2130,7 +2166,10 @@ mjx-container[display="true"] {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-  padding: var(--s3);
+  /* the tree's own gutter (ui/style.css `#tree`): the list below this note is a
+     tree-shaped list, and two surfaces in one column whose rows start on different
+     x read as two panels rather than as one dock */
+  padding: 8px 12px;
 }
 /* the pane's paragraph rhythm, said once for the pane that now owns its own
    margins. Every line on this page is a `p` — a row's sentence, the note, an empty
@@ -2145,7 +2184,7 @@ mjx-container[display="true"] {
 #plug-pane select:focus { outline: none; border-color: var(--accent); }
 .plug-note, #plug-filter { flex: none; }
 .plug-mirror { flex: none; }
-.plug-body { margin-top: var(--s3); flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.plug-body { margin-top: var(--s2); flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 /* the filter row: the views of the ONE list, plus a box to narrow it by name. It
    sits OUTSIDE the scrolling list on purpose — which view is on screen must stay
    on screen while the rows under it move. */
@@ -2237,14 +2276,21 @@ mjx-container[display="true"] {
    publisher, so the controls are the column of their own, centred on the words.
    The row wraps for the one thing that belongs UNDER both: the version box
    below. */
+/* The row is the TREE's row (ui/style.css `.tree-node`), because the two lists are
+   one column stacked and a reader compares them: same 3px/6px box inside the same
+   12px gutter as the tree above, same hover wash, and NO hairline between rows — a
+   rule under every row turns a list into a table, and the tree next door has none.
+   The flex split is unchanged (words yield, controls do not): only the box moved. */
 .plug-row {
-  padding: var(--s2) 0;
-  border-top: 1px solid var(--border);
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 0;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: var(--s2) var(--s3);
+  gap: var(--s1) var(--s2);
 }
+.plug-row:hover { background: rgba(255, 255, 255, 0.04); }
 /* the words: EVERYTHING the row says is in here, so the column as a whole is what
    yields width — `flex-basis: 0`, not the sentence's own length, or one long
    sentence would push the controls onto a line under it (which is the shape this
@@ -2523,6 +2569,19 @@ mjx-container[display="true"] {
    every other failure on this page carries */
 .plug-mirrors-result { margin: var(--s2) 0 0; font-size: var(--fs-sm); color: var(--muted); overflow-wrap: anywhere; }
 .plug-mirrors-result.error { color: var(--accent); }
+
+/* ---- the mirrors box in the settings dialog ---------------------------------
+   The list the plugin page used to carry at its foot, now the second half of the
+   dialog's Mirrors pane (ui/index.html `#settings-pane-mirrors`). The pane already
+   sits in the box's padding and its first block is the source-mirror field with its
+   own rule under it, so the box takes no gutter of its own — only the room the box
+   gives every block, and rows roomier than the dock's (nothing here is being
+   compared against a tree). */
+#settings-mirrors { margin-top: var(--s3); }
+#settings-mirrors .plug-section { margin-bottom: 0; }
+#settings-mirrors .plug-section-title { margin-top: 0; }
+#settings-mirrors .plug-row { padding: var(--s2) var(--s1); }
+#settings-mirrors .plug-row + .plug-row { border-top: 1px solid var(--border); }
 
 .fs-conn { margin-bottom: var(--s3); padding-bottom: var(--s3); border-bottom: 1px solid var(--border); }
 /* when the picker body is collapsed (SSH connect/failure), the conn bar is the

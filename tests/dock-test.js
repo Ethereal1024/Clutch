@@ -37,7 +37,10 @@ function decls(sheet, selector) {
   return m ? m[1].replace(/\s+/g, " ").trim() : "";
 }
 
-// ---- a mini-DOM: the four elements the dock binds, plus the aside ----
+// ---- a mini-DOM: the elements the dock binds, plus the aside ----
+// Every node carries a `style` object and reports a height of 0 until a scenario
+// gives it one (`page().measure`): that is a DOM with no layout, which is one of
+// the two states the splitter has to survive (the other is a measured column).
 function makeDocument() {
   function node(cls) {
     const n = {
@@ -45,6 +48,9 @@ function makeDocument() {
       title: "",
       attrs: {},
       listeners: {},
+      style: {},
+      parentElement: null,
+      getBoundingClientRect: () => ({ height: 0 }),
       classList: {
         add(...cs) {
           const s = new Set(n.className.split(" ").filter(Boolean));
@@ -78,24 +84,36 @@ function makeDocument() {
     return n;
   }
   const shell = node(""); // #right: the aside the groups live in
+  // the handle sits between the two groups, exactly as it does in the page, and it
+  // measures its own height out of the column it divides
+  const split = node("dock-split");
+  split.parentElement = shell;
   const bySelector = new Map([
     ["#dock-toggle-workspace", node("")],
     ["#dock-workspace", node("dock-group")],
     ["#dock-toggle-plugins", node("")],
     ["#dock-plugins", node("dock-group")],
+    ["#dock-split", split],
   ]);
   const panelShown = [];
+  const resizes = [];
   return {
     node,
     shell,
+    split,
     bySelector,
     panelShown,
+    resizes,
     document: {
       querySelector: (sel) => bySelector.get(sel) || null,
       addEventListener(ev, fn) {
         // the one event dock.ts listens for: the panel is on screen again
         if (ev === "clutch:panel-shown") panelShown.push(fn);
       },
+    },
+    // ...and the one event it listens for on the window: a column that got shorter
+    addEventListener(ev, fn) {
+      if (ev === "resize") resizes.push(fn);
     },
   };
 }
@@ -104,7 +122,7 @@ function makeDocument() {
 // `layout` is what a previous window left in localStorage (the record dock.ts
 // writes), so a scenario can open on a folded group the way a returning reader
 // would.
-function page({ layout = null, narrow = false } = {}) {
+function page({ layout = null, split = null, narrow = false } = {}) {
   const dom = makeDocument();
   const world = {
     store: {},
@@ -113,9 +131,13 @@ function page({ layout = null, narrow = false } = {}) {
     narrow,
   };
   if (layout !== null) world.store.clutch_dock_groups = typeof layout === "string" ? layout : JSON.stringify(layout);
+  // what a previous window left as the boundary between the groups (px), when a
+  // scenario opens on one
+  if (split !== null) world.store.clutch_dock_split = String(split);
   const ctx = {
     console,
     document: dom.document,
+    addEventListener: dom.addEventListener,
     localStorage: {
       getItem: (k) => (k in world.store ? world.store[k] : null),
       setItem: (k, v) => {
@@ -178,6 +200,35 @@ function page({ layout = null, narrow = false } = {}) {
     reveal: () => vm.runInContext("revealPlugins()", ctx),
     open: (id) => vm.runInContext("dockIsOpen(" + JSON.stringify(id) + ")", ctx),
     shownEvent,
+    // ---- the splitter ----
+    splitEl: () => el("#dock-split"),
+    splitHidden: () => el("#dock-split").classList.contains("hidden"),
+    splitPx: () => vm.runInContext("dockSplit()", ctx),
+    setSplit: (px, remember) => vm.runInContext("dockSetSplit(" + Number(px) + (remember === false ? ", {remember:false}" : "") + ")", ctx),
+    savedSplit: () => (world.store.clutch_dock_split === undefined ? null : world.store.clutch_dock_split),
+    flex: () => el("#dock-workspace").style.flex,
+    // a height for one of the boxes the splitter measures (the column, a head, the
+    // handle); the handle's own rect is the one element measured twice
+    measure(sel, height) {
+      const target = sel === "#dock-split" ? dom.split : sel === "#right" ? dom.shell : el(sel);
+      if (!target) throw new Error("no node for " + sel);
+      target.getBoundingClientRect = () => ({ height });
+    },
+    // a pointer drag on the handle: down at y0, move to y1, let go
+    pointer(type, y, id = 1) {
+      for (const fn of dom.split.listeners[type] || []) fn({ clientY: y, pointerId: id, preventDefault() {} });
+    },
+    drag(fromY, toY) {
+      this.pointer("pointerdown", fromY);
+      this.pointer("pointermove", toY);
+      this.pointer("pointerup", toY);
+    },
+    key(name) {
+      for (const fn of dom.split.listeners.keydown || []) fn({ key: name, preventDefault() {} });
+    },
+    resize() {
+      for (const fn of dom.resizes) fn();
+    },
   };
 }
 
@@ -323,6 +374,122 @@ const CODE = mod ? rendererScript("dock") : "null";
     /content: "▸"/.test(css) && /content: "▾"/.test(css),
     "the caret is the state and it is the only thing that says a group can be put away at all"
   );
+}
+
+// ---- 8. how much of the column each open group gets ----
+// #dock-split is the line between the two groups and the control that moves it.
+// Three inputs reach one number — a drag, the arrow keys, the record a returning
+// window reads — and the number is the workspace group's height, because that is
+// the group a downward drag grows. Nothing is drawn between two groups only one of
+// which is open: a fold is already the whole column.
+{
+  const p = page();
+  check(/id="dock-workspace"[\s\S]*?id="dock-split"[\s\S]*?id="dock-plugins"/.test(html), "the handle is a real element BETWEEN the two groups, which is the boundary a reader sees");
+  check(/id="dock-split"[\s\S]{0,200}?role="separator"/.test(html), "it is a separator, so a screen reader is told what the line is");
+  check(/id="dock-split"[\s\S]{0,200}?tabindex="0"/.test(html), "with a tab stop: the keyboard has to be able to reach the control the mouse has");
+  check(!p.splitHidden(), "with both groups open the handle is on screen");
+  check(p.flex() === "", "and a window that has never been dragged leaves the halves to the sheet (no inline height)");
+  check(p.splitPx() === 0 && p.savedSplit() === null, "nothing is written until somebody moves it — opening the app is not a layout decision either");
+}
+
+// ---- 9. one number, written on the way out ----
+{
+  const p = page();
+  p.setSplit(240);
+  check(p.splitPx() === 240 && p.flex() === "0 0 240px", "a split is applied as a FIXED height on the workspace group, so a short window cannot eat the boundary the reader set");
+  check(p.savedSplit() === "240", "and it is remembered the way the fold is: a number of px in localStorage, not a fraction of a column that may not be the same size");
+
+  const q = page({ split: 300 });
+  check(q.splitPx() === 300 && q.flex() === "0 0 300px", "a returning window opens on the boundary it was left with");
+
+  // a record that is not a usable number is not a layout
+  const bad = page({ split: "half" });
+  check(bad.splitPx() === 0 && bad.flex() === "", "a record that is not a positive number falls back to the sheet's halves");
+}
+
+// ---- 10. neither group can be squeezed away ----
+{
+  const p = page();
+  p.setSplit(10);
+  check(p.splitPx() === 80 && p.flex() === "0 0 80px", "a boundary below the floor is held at the floor: a group is a head and at least one row");
+
+  // now the column can be measured: 600px, a 7px handle and a 30px plugin head
+  p.measure("#right", 600);
+  p.measure("#dock-split", 7);
+  p.measure("#dock-toggle-plugins", 30);
+  p.setSplit(10000);
+  check(p.splitPx() === 483, "and it cannot eat the plugin group: the ceiling is the column minus the handle, the plugin head and the same floor");
+
+  p.measure("#right", 0); // a DOM with no layout at all, which is also a hidden panel
+  p.setSplit(10000);
+  check(p.splitPx() === 10000, "with nothing to measure the floor still holds and the ceiling is nobody's (the splitter does not invent a height)");
+}
+
+// ---- 11. the handle goes with the fold it cannot divide ----
+{
+  const p = page({ split: 240 });
+  p.click("plugins");
+  check(p.splitHidden(), "folding one group puts the handle away with it: a grip over nothing moves no boundary");
+  check(p.flex() === "", "and the group that is left takes the whole column (the inline height is dropped, not merely ignored)");
+  p.click("plugins");
+  check(!p.splitHidden() && p.flex() === "0 0 240px", "reopening brings the boundary back exactly where the reader left it");
+}
+
+// ---- 12. the keyboard half of a separator ----
+{
+  const p = page({ split: 240 });
+  p.key("ArrowDown");
+  check(p.splitPx() === 256 && p.savedSplit() === "256", "one press down gives the workspace group a step, and it is remembered like a drag's");
+  p.key("ArrowUp");
+  p.key("ArrowUp");
+  check(p.splitPx() === 224, "and up gives the column back to the plugin group, one step a press");
+  p.key("Enter");
+  check(p.splitPx() === 224 && p.savedSplit() === "224", "a key that is not the separator's changes nothing and writes nothing");
+  p.setSplit(90);
+  p.key("ArrowUp");
+  p.key("ArrowUp");
+  check(p.splitPx() === 80, "the floor is a floor from the keyboard too");
+}
+
+// ---- 13. a drag is one number at the end, not one per frame ----
+{
+  const p = page({ split: 240 });
+  p.pointer("pointerdown", 300);
+  check(p.splitEl().classList.contains("dragging"), "the handle marks itself while a hand is on it, which is what lights the line");
+  p.pointer("pointermove", 260);
+  check(p.splitPx() === 200 && p.flex() === "0 0 200px", "moving up by 40px gives the plugin group those 40px");
+  check(p.savedSplit() === "240", "and nothing is written while the hand is still moving: a drag is not a frame's worth of layouts");
+  p.pointer("pointerup", 260);
+  check(!p.splitEl().classList.contains("dragging") && p.savedSplit() === "200", "letting go writes the one number it landed on");
+  p.pointer("pointermove", 100);
+  check(p.splitPx() === 200, "a pointer that is not dragging moves nothing (the move listener does not trust the window it is in)");
+}
+
+// ---- 14. a column that got shorter re-clamps, and keeps the reader's number ----
+{
+  const p = page({ split: 400 });
+  p.measure("#dock-toggle-plugins", 30);
+  p.measure("#dock-split", 7);
+  p.measure("#right", 300);
+  p.resize();
+  check(p.flex() === "0 0 183px", "a window that got shorter re-clamps the boundary it was showing, so the plugin group is never squeezed off the bottom");
+  check(p.splitPx() === 400 && p.savedSplit() === "400", "without rewriting the reader's number: the split is still theirs, it just cannot be taller than the column it divides");
+  p.measure("#right", 800);
+  p.resize();
+  check(p.flex() === "0 0 400px", "and a window that grows again gets that boundary back, not a new guess");
+}
+
+// ---- 15. the sheet draws the handle it was given ----
+{
+  const handle = decls(css, ".dock-split");
+  check(/height: 7px/.test(handle) && /cursor: row-resize/.test(handle), "the sheet draws a 7px strip with the row-resize pointer: the line is the control");
+  check(/touch-action: none/.test(handle), "and touch-action is off, so a drag on a phone resizes instead of scrolling the pane under the finger");
+  check(/flex: none/.test(handle), "the handle keeps its own height instead of sharing the column with the groups it divides");
+  check(
+    /\.dock-split:hover::before/.test(css) && /\.dock-split\.dragging::before/.test(css),
+    "the hairline lights up under the pointer and under a drag, the same accent any other control with the pointer carries"
+  );
+  check(!/\.dock-group \+ \.dock-group\s*\{/.test(css), "and the groups' own seam is gone: the handle is the only line between them, or there would be two");
 }
 
 summary("dock: the sidebar's groups, what folds, and what is read when one opens");

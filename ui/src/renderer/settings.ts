@@ -490,9 +490,11 @@ export function paintAbout() {
 // The strip is a real `role="tablist"` in index.html, and `aria-selected` is the
 // half of it a class cannot say: `.active` paints the tab, `aria-selected` is how
 // the pane that is showing is announced. No tab is removed from the tab order and
-// there are no arrow keys — with two of them, Tab reaches the other, which is what
-// a reader expects anyway.
-export const SETTINGS_TABS = ["llm", "about"];
+// there are no arrow keys — with three of them, Tab reaches the next, which is what
+// a reader expects anyway. `mirrors` is the mirror list `components-panel.ts` used
+// to draw inside the dock's plugin page: it is a fact about this machine, not about
+// the session that page is about, so it is a setting and lives here.
+export const SETTINGS_TABS = ["llm", "mirrors", "about"];
 
 // ---- the box follows its pane ----
 // The panes are different lengths and the box is only as tall as the one that

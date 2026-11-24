@@ -229,10 +229,15 @@ const IDS = [
   "dock-plugins",
   "right",
   // the source-mirror row the pane draws above the list (report: "downloads and
-  // uploads still needed a VPN" — the field is the only door to the knob)
+  // uploads still needed a VPN" — the field is the only door to the knob). It moved
+  // to the settings dialog with the mirror LIST it belongs beside
+  // (ui/index.html `#settings-pane-mirrors`), so the page has to hold both halves:
+  // the tab that shows that pane, and the box components-panel.ts paints into.
   "mirror-input",
   "mirror-save",
   "mirror-note",
+  "settings-tab-mirrors",
+  "settings-mirrors",
 ];
 
 const tick = () => new Promise((r) => setImmediate(r));
@@ -560,23 +565,26 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
         return true;
       })
       .map((n) => textOf(n)),
-    // the mirror rows themselves, and the controls/fields they carry
-    mirrorRows: () => walk(dom.byId.get("#plug-body")).filter((n) => /(^| )plug-mirrors( |$)/.test(n.className)),
-    mirrorRemoves: () => walk(dom.byId.get("#plug-body")).filter((n) => n.tag === "button" && /plug-mirrors-remove/.test(n.className)),
-    mirrorInput: () => walk(dom.byId.get("#plug-body")).find((n) => /(^| )plug-mirrors-input( |$)/.test(n.className)),
-    mirrorAddBtn: () => walk(dom.byId.get("#plug-body")).find((n) => /(^| )plug-mirrors-add-btn( |$)/.test(n.className)),
-    mirrorNote: () => walk(dom.byId.get("#plug-body")).find((n) => /(^| )plug-mirrors-note( |$)/.test(n.className)),
-    mirrorForced: () => walk(dom.byId.get("#plug-body")).find((n) => /(^| )plug-mirrors-forced( |$)/.test(n.className)),
-    mirrorResult: () => walk(dom.byId.get("#plug-body")).find((n) => /(^| )plug-mirrors-result( |$)/.test(n.className)),
+    // the mirror rows themselves, and the controls/fields they carry. They are
+    // drawn in the SETTINGS dialog's Mirrors pane now (`#settings-mirrors`), not at
+    // the foot of the plugin page: the list is a fact about this machine, and the
+    // page beside it is a fact about the open tab's session.
+    mirrorRows: () => walk(dom.byId.get("#settings-mirrors")).filter((n) => /(^| )plug-mirrors( |$)/.test(n.className)),
+    mirrorRemoves: () => walk(dom.byId.get("#settings-mirrors")).filter((n) => n.tag === "button" && /plug-mirrors-remove/.test(n.className)),
+    mirrorInput: () => walk(dom.byId.get("#settings-mirrors")).find((n) => /(^| )plug-mirrors-input( |$)/.test(n.className)),
+    mirrorAddBtn: () => walk(dom.byId.get("#settings-mirrors")).find((n) => /(^| )plug-mirrors-add-btn( |$)/.test(n.className)),
+    mirrorNote: () => walk(dom.byId.get("#settings-mirrors")).find((n) => /(^| )plug-mirrors-note( |$)/.test(n.className)),
+    mirrorForced: () => walk(dom.byId.get("#settings-mirrors")).find((n) => /(^| )plug-mirrors-forced( |$)/.test(n.className)),
+    mirrorResult: () => walk(dom.byId.get("#settings-mirrors")).find((n) => /(^| )plug-mirrors-result( |$)/.test(n.className)),
     // the Mirrors section itself, by its heading — so "the section is drawn" is a
     // claim about the page and not about a class that could be anything
     mirrorSection: () =>
-      walk(dom.byId.get("#plug-body")).find(
+      walk(dom.byId.get("#settings-mirrors")).find(
         (n) => /(^| )plug-section( |$)/.test(n.className) && walk(n).some((c) => /(^| )plug-section-title( |$)/.test(c.className) && c.textContent === "Mirrors")
       ) || null,
     // the chips inside the mirror rows, as drawn: "yours" / "shipped"
     mirrorChips: () =>
-      walk(dom.byId.get("#plug-body"))
+      walk(dom.byId.get("#settings-mirrors"))
         .filter((n) => /(^| )plug-mirrors( |$)/.test(n.className))
         .map((r) => walk(r).filter((c) => /(^| )plug-chip( |$)/.test(c.className)).map((c) => c.textContent).join("")),
     note: () => dom.byId.get("#plug-note"),
@@ -588,6 +596,12 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
       return el ? el.textContent : "";
     },
     open: async () => { vm.runInContext("pluginTabShown()", ctx); await settle(); },
+    // ...and the other surface: the settings dialog's Mirrors tab is what the list
+    // is drawn behind now, and its click is what starts the list's own read
+    showMirrors: async () => {
+      dom.byId.get("#settings-tab-mirrors").click();
+      await settle();
+    },
   };
 }
 
@@ -1666,8 +1680,8 @@ const CODE = mod ? rendererScript("components-panel") : "";
       "which names the setting and the file it goes in, because there is no other way to change where the bytes come from"
     );
     check(
-      /box above/.test(hints()[0].textContent),
-      "and points at the field drawn above the list, which is the door on a machine whose HOME nobody can write to"
+      /box there/.test(hints()[0].textContent),
+      "and points at the field on that settings page, which is the door on a machine whose HOME nobody can write to"
     );
     check(
       /github\.com/.test(hints()[0].textContent) && /pin/.test(hints()[0].textContent),
@@ -1816,9 +1830,10 @@ const CODE = mod ? rendererScript("components-panel") : "";
   }
 
   // 38. the mirror list: where a release host that could not be reached is retried
-  //     (ui/mirrors.js). One more section of the SAME page, because it serves the
-  //     same list — and it is drawn only when this shell has the channel for it,
-  //     so a bridge that predates the feature draws exactly what it drew before.
+  //     (ui/mirrors.js). It is a SETTING, not a fact about the session the plugin
+  //     page is about, so it is drawn in the settings dialog's Mirrors pane
+  //     (`#settings-mirrors`) and read when that pane is opened — and the plugin
+  //     page below draws no part of it.
   {
     const MINE = { url: "https://mine.example/", source: "user" };
     const list = [MINE, { url: "https://gh-proxy.com/", source: "builtin" }, { url: "https://ghfast.top/", source: "builtin" }];
@@ -1827,16 +1842,22 @@ const CODE = mod ? rendererScript("components-panel") : "";
     {
       const none = page();
       await none.open();
+      await none.showMirrors();
       check(none.mirrorSection() === null, "a shell with no mirror channel draws no Mirrors section");
       check(none.mirrorInput() === undefined && none.mirrorAddBtn() === undefined, "and no field or button for a list it cannot read");
+      check(/cannot read or write the mirror list/.test(textOf(none.el("settings-mirrors"))), "the pane says so in its own line rather than offering a field that could not be read from or written to");
       check(none.names().join(",") === "clutch-workspace,clutch-memory", "the components it does know are drawn exactly as before");
     }
 
-    // (b) the section: the user's entries first, the build's after
+    // (b) the section: the user's entries first, the build's after — and it is the
+    //     DIALOG that draws it, because the page below is about another machine
     {
       const p = page({ mirror: { list } });
       await p.open();
-      check(p.world.mirrorCalls === 1, "opening the tab reads the mirror list, once");
+      check(p.world.mirrorCalls === 0, "the plugin page does not read the mirror list: it is not a fact about the session it reports on");
+      check(!/plug-mirrors/.test(walk(p.body()).map((n) => n.className).join(" ")), "and it draws no mirror row or field of its own");
+      await p.showMirrors();
+      check(p.world.mirrorCalls === 1, "opening the Mirrors tab reads the mirror list, once");
       check(p.mirrorRows().length === 3, "one row per mirror this machine would try");
       check(
         p.mirrorRows().map((r) => textOf(nameOf(r))).join(",") === "https://mine.example/,https://gh-proxy.com/,https://ghfast.top/",
@@ -1858,13 +1879,13 @@ const CODE = mod ? rendererScript("components-panel") : "";
     {
       const q = page({ mirror: { list } });
       await q.open();
+      await q.showMirrors();
       const input = q.mirrorInput();
       check(Boolean(input) && input.getAttribute("aria-label") === "a mirror to add, as an https URL", "the field names itself, and says what a mirror is");
       check(q.mirrorAddBtn().disabled, "with nothing typed the Add button is dead");
       input.value = "https://new.example";
       input.handlers.input[0]();
-      vm.runInContext("renderPlugins()", q.ctx);
-      check(!q.mirrorAddBtn().disabled, "typing one makes it live");
+      check(!q.mirrorAddBtn().disabled, "typing one makes it live, without a redraw moving the caret");
       q.mirrorAddBtn().click();
       await settle();
       check(q.world.mirrorAdds.join(",") === "https://new.example", "the value in the field is what the list is asked to hold");
@@ -1873,7 +1894,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
         "and the section is redrawn from the list that was written, with the new entry among the user's own"
       );
       const ok1 = q.mirrorResult();
-      check(/is in your list/.test(ok1.textContent) && !/(^| )error( |$)/.test(ok1.className), "the write is confirmed in the list's own words, as an answer and not a failure");
+      check(/is in your list/.test(ok1.textContent) && !/(^| )error( |$)/.test(ok1.className), "the write is confirmed in the list's own words, as an answer and not as a failure");
       check(q.mirrorInput().value === "", "and the field is empty again, because the list took what it was given");
     }
 
@@ -1881,10 +1902,10 @@ const CODE = mod ? rendererScript("components-panel") : "";
     {
       const refused = page({ mirror: { list, addError: "https://gh-proxy.com/ is already in the list (this build ships it)" } });
       await refused.open();
+      await refused.showMirrors();
       const ri = refused.mirrorInput();
       ri.value = "https://gh-proxy.com/";
       ri.handlers.input[0]();
-      vm.runInContext("renderPlugins()", refused.ctx);
       refused.mirrorAddBtn().click();
       await settle();
       const line = refused.mirrorResult();
@@ -1900,6 +1921,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     {
       const gone = page({ mirror: { list } });
       await gone.open();
+      await gone.showMirrors();
       gone.mirrorRemoves()[0].click();
       await settle();
       check(gone.world.mirrorRemoves.join(",") === "https://mine.example/", "Remove asks for exactly the row's own prefix");
@@ -1919,6 +1941,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     {
       const forced = page({ mirror: { list, forced: "https://gh-proxy.com/" } });
       await forced.open();
+      await forced.showMirrors();
       check(
         Boolean(forced.mirrorForced()) && /not used while that is set/.test(forced.mirrorForced().textContent),
         "with source_mirror set the section names the prefix that outranks the list"
@@ -1936,23 +1959,43 @@ const CODE = mod ? rendererScript("components-panel") : "";
     {
       const broken = page({ mirror: { list, error: "EACCES: permission denied, open ~/.clutch/components.mirrors.json" } });
       await broken.open();
+      await broken.showMirrors();
       check(broken.mirrorRows().length === 0, "a list that could not be read draws no rows it does not have");
       check(broken.mirrorInput() === undefined, "and no field to add to it");
       check(
-        walk(broken.body()).some((n) => /(^| )plug-source-error( |$)/.test(n.className) && /EACCES/.test(n.textContent)),
+        walk(broken.el("settings-mirrors")).some((n) => /(^| )plug-source-error( |$)/.test(n.className) && /EACCES/.test(n.textContent)),
         "the reason is drawn in the failure's own voice"
       );
       check(/unreadable/.test(textOf(broken.mirrorSection())), "and the heading says the list is unreadable rather than empty");
+
+      // ...and a failure is the one answer worth asking again: the pane draws no
+      // retry control (the field is not drawn while the list is unreadable), so
+      // coming back to the tab is the only door there is
+      broken.world.mirrorControl = defer();
+      await broken.showMirrors();
+      check(broken.world.mirrorCalls === 2, "coming back to the tab asks an unreadable list again, because nothing else can");
+      check(/reading…/.test(textOf(broken.mirrorSection())), "and the pane says it is reading instead of keeping the old failure on screen");
+      check(/reading the list/.test(textOf(broken.el("settings-mirrors"))), "with the line under the heading saying what is being read");
+      broken.world.mirrorControl.res({ mirrors: list.map((e) => ({ ...e })), forced: "", error: null });
+      await settle();
+      check(broken.mirrorRows().length === 3, "so a file that was fixed on disk heals the pane without restarting the app");
     }
 
-    // (h) the third read is not a second chance to be wrong: while it is still in
-    //     flight the page says it is reading, not that there is no mirror
+    // (h) the read is the PANE's, and a read in flight is not started twice: while
+    //     it travels the pane says it is reading, not that there is no mirror, and
+    //     the plugin page's own line says nothing about a list it does not read
     {
       const d = page({ mirror: { list } });
       d.world.mirrorControl = defer();
       await d.open();
-      check(d.note().textContent === "reading…", "while the list is still being read the page is still reading");
-      check(/reading the list/.test(d.text()), "and the section says so in its own voice, instead of claiming there is no mirror");
+      check(d.note().textContent === "", "the plugin page's line is about its own reads, and the mirror list is not one of them");
+      await d.showMirrors();
+      check(d.world.mirrorCalls === 1, "opening the pane asks for the list once");
+      await d.showMirrors();
+      check(d.world.mirrorCalls === 1, "and a second look at a pane whose read is still travelling does not start a second read");
+      check(d.mirrorRows().length === 0, "no rows are drawn before the answer lands");
+      check(/reading…/.test(textOf(d.mirrorSection())), "and the section says it is reading in its own voice, instead of claiming there is no mirror");
+      check(/reading the list/.test(textOf(d.el("settings-mirrors"))), "with one more line saying what is being read");
       d.world.mirrorControl.res({ mirrors: list.map((e) => ({ ...e })), forced: "", error: null });
       await settle();
       check(d.mirrorRows().length === 3, "when the read lands, the rows are there");

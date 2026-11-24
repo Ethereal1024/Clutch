@@ -213,9 +213,9 @@
     max-width: 420px;
   }
 
-  /* the plugin list scrolls INSIDE the drawer on a phone — the group's head, the
-     mirror row and the filter row stay where the thumb can reach them, which is
-     the one thing a full-screen-height list takes away */
+  /* the plugin list scrolls INSIDE the drawer on a phone — the group's head and
+     the filter row stay where the thumb can reach them, which is the one thing a
+     full-screen-height list takes away */
   .plug-body {
     -webkit-overflow-scrolling: touch;
   }
@@ -223,14 +223,21 @@
      written against these names — they are the only rules in the sheet that are —
      so raising the names here replaces the second copy of every size that used to
      live below: a chip, the filter box, a row button and the reload icon all grow
-     together, which is what a finger needs (36px, not a pointer's 26px). */
-  #plug-pane {
+     together, which is what a finger needs (36px, not a pointer's 26px). The
+     mirrors list moved to the settings dialog and its controls are the same
+     family, so the Mirrors pane takes the same scale. */
+  #plug-pane,
+  #settings-pane-mirrors {
     --ctl-h: 40px;
     --ctl-h-sm: 36px;
     --tap: 36px;
     --fs-xs: 12px;
     --fs-sm: 13px;
   }
+  /* the dock's split handle is a THUMB target here, not a 7px rule: the drawer is
+     the full height of the phone and the two groups inside it are its halves */
+  .dock-split { height: 14px; }
+  .dock-split::before { top: 6px; }
   /* the tab strip's targets are finger-sized here, not pointer-sized */
   .modal-tab { padding: 8px 4px 10px; font-size: 13px; }
   /* a write button in a row is a finger target too: the height comes from the

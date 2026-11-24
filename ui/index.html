@@ -143,15 +143,24 @@
   <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="modal-box">
       <h3 id="settings-title">Settings</h3>
-      <!-- two surfaces in one modal: the model this client runs, and the build's
-           name plate. This box used to hold a third — the plugin page — and it
-           moved out (aside#right, `<aside>` below): which components a session has
-           is a fact of THAT session, and a dialog covers the tab strip that says
-           which session you are looking at. ui/js/settings.js owns the switch,
-           ui/src/renderer/components-panel.ts owns the sidebar's plugin group. -->
+      <!-- three surfaces in one modal: the model this client runs, where those
+           reads are sent (the source mirror and the fallback list), and the build's
+           name plate. The box used to hold a fourth — the plugin page — and it moved
+           out (aside#right, `<aside>` below): which components a session has is a
+           fact of THAT session, and a dialog covers the tab strip that says which
+           session you are looking at. The mirrors did not go with it: they are not a
+           fact about any session (one is this window's network, the other a file on
+           the machine the window runs on), so they belong here, beside the model.
+           ui/src/renderer/settings.ts owns the switch, ui/src/renderer/components-
+           panel.ts owns what the mirrors pane draws. -->
       <div class="modal-tabs" role="tablist">
         <button id="settings-tab-llm" class="modal-tab active" type="button" role="tab"
           aria-selected="true" aria-controls="settings-pane-llm">Model</button>
+        <!-- where every read this build makes is SENT: a client setting with a
+             network consequence, which is why it is a page here and not a row of the
+             component list it silently serves. -->
+        <button id="settings-tab-mirrors" class="modal-tab" type="button" role="tab"
+          aria-selected="false" aria-controls="settings-pane-mirrors">Mirrors</button>
         <!-- the build's own name plate: a place a user goes to read a number off,
              not a form. It is the last tab because it is the last thing anyone
              opens, and it is the FIRST thing a report asks for. -->
@@ -166,6 +175,36 @@
         <button id="llm-profile-edit" title="edit the selected profile">Edit</button>
         <button id="llm-profile-del" title="delete the selected profile">Delete</button>
       </div>
+      </div>
+      <div id="settings-pane-mirrors" class="modal-pane hidden" role="tabpanel" aria-labelledby="settings-tab-mirrors">
+        <!-- Where every source this build ships is read from (report: "downloads and
+             uploads to the server still need a VPN — the domestic mirror never took
+             effect"). The knob used to exist only as CLUTCH_SOURCE_MIRROR or a hand-
+             written ~/.clutch/settings.json key, and on Android HOME is the app's own
+             filesDir: neither is reachable on a phone. It is a CLIENT setting (this
+             window's network, ui/net-fetch.js reads it per fetch), so it is the first
+             field on this page and the only door to it there is. -->
+        <div class="plug-mirror">
+          <label for="mirror-input">Source mirror</label>
+          <div class="fs-conn-row">
+            <input id="mirror-input" type="text" autocomplete="off" spellcheck="false"
+              placeholder="https://accelerator.example/ — empty reads github.com directly" />
+            <!-- the field is saved, not typed-at-the-backend: it is a decision with a
+                 network consequence, so it is one deliberate act -->
+            <button id="mirror-save" class="ghost" type="button"
+              title="save the mirror and read the sources again">Save</button>
+          </div>
+          <!-- the verdict on that save (what it applies to, or why it was refused):
+               the same `role="status"` line the plugin pane uses above its list -->
+          <p id="mirror-note" class="plug-mirror-note" role="status" aria-live="polite"></p>
+        </div>
+        <!-- the fallback list — where a release host that could not be reached is
+             retried, in the order it is tried. Drawn by
+             ui/src/renderer/components-panel.ts when this pane is opened, because it
+             is a READ of two files (ui/mirrors.js) and a pane nobody opened asks for
+             nothing. This page is the only door to it; the plugin list no longer
+             carries it, and could not: neither list is a fact about a session. -->
+        <div id="settings-mirrors" class="settings-mirrors"></div>
       </div>
       <div id="settings-pane-about" class="modal-pane hidden" role="tabpanel" aria-labelledby="settings-tab-about">
         <!-- What this build IS. The number is read from ui/version.js — a stamp the
@@ -487,7 +526,14 @@
            sessions on possibly two machines, and what is installed is a fact of the
            machine the session's commands run on. That is why it could not stay in
            the settings dialog — a dialog covers the strip that names the tab it
-           would be reporting on. -->
+           would be reporting on.
+
+           How much of the column each group gets is the reader's, not the layout's:
+           the two bodies are equal halves by default and the rule between them is a
+           DRAG HANDLE (#dock-split, ui/src/renderer/dock.ts), because a tree wants
+           depth on one screen and the plugin list wants it on the next. It is the
+           same kind of state as which groups are open — the reader's partition —
+           and it is remembered the same way. -->
       <div id="dock-workspace" class="dock-group" data-group="workspace">
         <!-- device report #2/#3: the panel's dismissal is a bare ✕ at the head's
              right edge — never mid-row, never boxed. The project actions live in
@@ -506,6 +552,14 @@
         <div id="tree" class="dock-body scroll"></div>
       </div>
 
+      <!-- the drag handle between the two groups: the reader's split of the column,
+           not a border that happens to be draggable (ui/src/renderer/dock.ts owns the
+           drag, the keyboard and the remembered number). It is a real separator for a
+           screen reader, and it is put away with the fold it cannot divide. -->
+      <div id="dock-split" class="dock-split" role="separator" aria-orientation="horizontal"
+        tabindex="0" aria-label="resize the workspace and plugin groups"
+        title="drag to resize the workspace and plugin groups"></div>
+
       <div id="dock-plugins" class="dock-group" data-group="plugins">
         <div class="panel-head">
           <button id="dock-toggle-plugins" class="panel-title dock-toggle" type="button"
@@ -519,28 +573,14 @@
           </div>
         </div>
         <div id="plug-pane" class="dock-body plug-pane">
-          <!-- Where every source this build ships is read from (report: "downloads
-               and uploads to the server still need a VPN — the domestic mirror never
-               took effect"). The knob used to exist only as CLUTCH_SOURCE_MIRROR or a
-               hand-written ~/.clutch/settings.json key, and on Android HOME is the
-               app's own filesDir: neither is reachable on a phone. It is a CLIENT
-               setting (this window's network, ui/net-fetch.js reads it per fetch), so
-               it is drawn above the component list rather than among its rows — and
-               it is the only door to it there is. -->
-          <div class="plug-mirror">
-            <label for="mirror-input">Source mirror</label>
-            <div class="fs-conn-row">
-              <input id="mirror-input" type="text" autocomplete="off" spellcheck="false"
-                placeholder="https://accelerator.example/ — empty reads github.com directly" />
-              <!-- the field is saved, not typed-at-the-backend: it is a decision with
-                   a network consequence, so it is one deliberate act -->
-              <button id="mirror-save" class="ghost" type="button"
-                title="save the mirror and read the sources again">Save</button>
-            </div>
-            <!-- the verdict on that save (what it applies to, or why it was refused):
-                 the same `role="status"` line the pane uses above the list -->
-            <p id="mirror-note" class="plug-mirror-note" role="status" aria-live="polite"></p>
-          </div>
+          <!-- Two things this pane used to carry are GONE, and both are settings
+               rather than facts about the session's machine: the source mirror (the
+               prefix every read is sent through) and the list of mirrors a failed
+               release host is retried through. Neither is about the tab that is open
+               — one is this window's network, the other is a file on the machine the
+               window runs on — so they are drawn where the Model's own knobs are
+               drawn (ui/index.html `#settings-pane-mirrors`). What is left here is
+               the list of components, and only that. -->
           <!-- no machine is named here, and none is offered: WHERE a component goes
                is a fact of its declaration (ui/components.js destinationOf), the same
                one in every session, so there is nothing to choose and nothing to

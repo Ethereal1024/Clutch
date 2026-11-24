@@ -58,6 +58,11 @@ export const plugBodyEl = $("#plug-body");
 export const plugFilterEl = $("#plug-filter");
 export const plugNoteEl = $("#plug-note");
 export const plugReloadBtn = $("#plug-reload");
+// the mirrors are NOT this pane's any more (ui/index.html `#settings-pane-mirrors`):
+// both surfaces below are the settings dialog's, and this file still owns what they
+// draw because they are the same list. The ids did not move with them — a field, its
+// save and its verdict are one thing however far from here they are drawn.
+export const plugMirrorsEl = $("#settings-mirrors");
 export const plugMirrorInput = $("#mirror-input");
 export const plugMirrorSaveBtn = $("#mirror-save");
 export const plugMirrorNoteEl = $("#mirror-note");
@@ -93,6 +98,7 @@ export const plugState = {
   pending: 0, // in-flight reads: the note line is derived from them
   mirrors: null, // [{url, source}] — the list a failed fetch is retried through, or null while unread
   mirrorsError: null, // why that list could not be read
+  mirrorsPending: false, // a read of that list is in flight (it is the settings pane's, not this one's)
   mirrorForced: "", // the prefix every source is forced through, when one is set
   mirrorDraft: "", // the mirror being typed into the field (never persisted)
   mirrorBusy: false, // an add/remove in flight: the field and the buttons are dead behind it
@@ -333,21 +339,28 @@ export function plugRow(name, { chips = [], desc = "", lines = [], actions = [],
 export function plugSection(title, meta, rows, empty) {
   const sec = document.createElement("div");
   sec.className = "plug-section";
-  const head = document.createElement("h4");
-  // the heading is the MACHINE's name — DATA, never a field label — so it is the
-  // one heading in this modal that must not be set in caps (.modal-box h4 does
-  // that to every h4 it meets, and the same screen then read `SSH ubuntu@box` up
-  // here and `SSH UBUNTU@BOX` in the row beside it)
-  head.className = "plug-section-title";
-  head.textContent = title;
-  if (meta) {
-    // the title is the MACHINE; the counts are what is behind it
-    const el = document.createElement("span");
-    el.className = "plug-meta";
-    el.textContent = meta;
-    head.appendChild(el);
+  // a section with NO title is a bare list, and that is what the plugin pane draws:
+  // the group's own head already says "plugins", so a heading over the rows would be
+  // the page naming itself twice, and the counts under it repeat what the filter
+  // chips count one line lower. The Mirrors page — a dialog pane with no head of its
+  // own — is the one surface that still needs a heading.
+  if (title) {
+    const head = document.createElement("h4");
+    // the heading is the MACHINE's name — DATA, never a field label — so it is the
+    // one heading in this modal that must not be set in caps (.modal-box h4 does
+    // that to every h4 it meets, and the same screen then read `SSH ubuntu@box` up
+    // here and `SSH UBUNTU@BOX` in the row beside it)
+    head.className = "plug-section-title";
+    head.textContent = title;
+    if (meta) {
+      // the title is the MACHINE; the counts are what is behind it
+      const el = document.createElement("span");
+      el.className = "plug-meta";
+      el.textContent = meta;
+      head.appendChild(el);
+    }
+    sec.appendChild(head);
   }
-  sec.appendChild(head);
   if (rows.length) {
     // the rows ARE a list, and saying so gives them a count and an item boundary
     // ("list, 12 items") instead of twelve anonymous boxes. The list is the rows
@@ -867,25 +880,15 @@ export function plugPassLine() {
 // The one list. It is not titled with a machine, because there is no single
 // machine this window acts on: some of what it holds belongs to this client and
 // some to the session machine, and WHICH is which is a fact of each row
-// declaration, not of the page. The counts say how much of the list is held
-// somewhere, and how much of it the market offers.
+// declaration, not of the page. It is not titled with anything else either: the
+// pane it lives in is a group of the sidebar with a head that already says what it
+// is, the way the tree above it has none. How much the list holds is the filter
+// chips' business — they count the views of it one line lower — so a second set of
+// counts over the rows would be the same numbers said twice.
 export function plugList() {
   const items = plugModel();
   const shown = items.filter(plugItemShown);
-  const meta = [];
-  if (plugState.read) meta.push(`${plugState.held.length} installed`);
-  else meta.push("reading");
-  if (plugState.market) meta.push(`${plugState.market.entries.length} known`);
-  else if (plugState.marketError) meta.push("market unreadable");
-  // a filtered list says so: the count behind the title is about both places,
-  // this one about what is on screen
-  if (shown.length !== items.length) meta.push(`${shown.length} shown`);
-  const sec = plugSection(
-    "Components",
-    meta.join(" · "),
-    shown.map(plugItemRow),
-    plugEmptyText(items.length, shown.length)
-  );
+  const sec = plugSection("", "", shown.map(plugItemRow), plugEmptyText(items.length, shown.length));
   // what the pass at connect did to this machine, when it did anything: a name it
   // let go of is drawn here because it is not a row any more
   const pass = plugPassLine();
@@ -908,18 +911,17 @@ export function plugList() {
   // ...and when the failure is the network rather than an answer (the view says
   // which: `unreachable`), one more line says what can be done about it. Two
   // answers, and the page has to name both: a fetch that fails for a
-  // network-looking reason is retried through the mirror list (the Mirrors
-  // section below — this build's own entries plus the user's), while the
-  // `source_mirror` FIELD drawn above this list moves every read there was,
-  // manifest included. This line is the pointer to both, and the file it names
-  // is where the same key lands on a desktop.
+  // network-looking reason is retried through the mirror list (Settings → Mirrors —
+  // this build's own entries plus the user's), while the `source_mirror` field on
+  // that same page moves every read there was, manifest included. This line is the
+  // pointer to both, and the file it names is where the same key lands on a desktop.
   if (plugState.market && plugState.market.unreachable) {
     const hint = document.createElement("p");
     hint.className = "plug-source-hint";
     hint.textContent =
       "the market index and every release manifest are read from github.com. A fetch that " +
-      "fails for a network reason is retried through the mirrors listed under Mirrors below, " +
-      "and the source mirror box above (it writes \"source_mirror\" into " +
+      "fails for a network reason is retried through the mirrors listed under Settings → Mirrors, " +
+      "and the source mirror box there (it writes \"source_mirror\" into " +
       "~/.clutch/settings.json) moves every read there was. Either way a mirror only moves " +
       "the bytes: every digest is still checked against the release's own pin";
     sec.appendChild(hint);
@@ -932,8 +934,10 @@ export function plugList() {
 // Where a fetch the release host cannot answer is retried (ui/mirrors.js). The
 // retry happens on the PLACE the install is aimed at — its own fetch of the
 // bytes is the one that failed (ui/components.js fetchInstall) — so this section
-// owns one thing only: the LIST as this client reads it, which is why it is one
-// more read beside the inventory and the market and not a setting of its own.
+// owns one thing only: the LIST as this client reads it. It is drawn in the
+// settings dialog's Mirrors pane and read when that pane is opened
+// (plugMirrorRead), because it is a fact about the machine this window runs on,
+// not about the session the plugin list is about.
 //
 // A shipped entry carries no Remove: it is what the fallback is made of, and a
 // build whose list could be emptied from here would lose the feature without
@@ -985,9 +989,12 @@ export function plugMirrorForm() {
   input.disabled = Boolean(forced || plugState.mirrorBusy);
   input.setAttribute("aria-label", "a mirror to add, as an https URL");
   // no redraw per keystroke: the caret stays where the user is typing, and the
-  // field's value is state (a redraw puts it back)
+  // field's value is state (a redraw puts it back). The button follows the field
+  // directly — it is the one thing on this form a keystroke changes, and waiting for
+  // a read to redraw the pane would leave Add dead under a typed URL.
   input.addEventListener("input", () => {
     plugState.mirrorDraft = input.value || "";
+    btn.disabled = Boolean(forced || plugState.mirrorBusy || !plugState.mirrorDraft.trim());
   });
   const btn = document.createElement("button");
   btn.className = "plug-mirrors-add-btn";
@@ -1003,8 +1010,11 @@ export function plugMirrorForm() {
   return wrap;
 }
 
-// The mirror list, as one more section of the same page — directly under the
-// components, because that is what it silently serves.
+// The mirror list: the settings dialog's Mirrors pane draws it now, and only that
+// pane does. It is not a fact about a session — one list is on the machine this
+// window runs on, the other is what the build ships — so it does not belong under a
+// head that says "plugins", and it is not read until the pane that shows it is
+// opened (plugMirrorRead below).
 export function plugMirrors() {
   const list = plugState.mirrors || [];
   const mine = list.filter((m) => m.source === "user").length;
@@ -1056,6 +1066,80 @@ export function plugMirrors() {
     sec.appendChild(line);
   }
   return sec;
+}
+
+// What the settings pane's box holds, redrawn from the state above — a full redraw
+// of ONE container, the way renderPlugins redraws the list. Nothing here is drawn
+// when this shell has no mirror channel: a build whose preload predates the feature
+// says so in the pane's own line rather than offering a field that cannot be read
+// from or written to.
+export function paintSettingsMirrors() {
+  if (!plugMirrorsEl) return;
+  plugMirrorsEl.innerHTML = "";
+  if (!window.clutchComponents || !window.clutchComponents.mirrors) {
+    const p = document.createElement("p");
+    p.className = "plug-note";
+    p.textContent = "this shell cannot read or write the mirror list";
+    plugMirrorsEl.appendChild(p);
+    return;
+  }
+  plugMirrorsEl.appendChild(plugMirrors());
+}
+
+// The mirror list's own read, asked for by the pane that SHOWS it (the settings
+// dialog's Mirrors tab) and by nothing else: it is two local files, but a list
+// nobody opened is still a read for nothing, and it is not about any session the
+// plugin list is about. A read in flight is not started twice — the second press
+// would only make the pane flicker between two answers.
+export function plugMirrorRead() {
+  const api = window.clutchComponents;
+  if (!api || !api.mirrors || plugState.mirrorsPending) return;
+  plugState.mirrorsPending = true;
+  plugState.mirrorsError = null;
+  // the pane draws "reading…" while the answer travels, which is a different claim
+  // from "no mirror is tried" — so the list it may still be holding is dropped for
+  // the length of the read (an unreadable one was empty anyway, and nothing else
+  // re-reads)
+  plugState.mirrors = null;
+  paintSettingsMirrors();
+  api
+    .mirrors()
+    .then((m) => {
+      plugState.mirrors = (m && m.mirrors) || [];
+      // the list's own reason, when it could not be read at all (a file this
+      // machine cannot open): the section says so instead of drawing "none"
+      plugState.mirrorsError = (m && m.error) || null;
+      plugState.mirrorForced = (m && m.forced) || "";
+    })
+    .catch((e) => {
+      plugState.mirrors = null;
+      plugState.mirrorsError = (e && e.message) || String(e);
+    })
+    .then(() => {
+      plugState.mirrorsPending = false;
+      paintSettingsMirrors();
+    });
+}
+
+// Being SHOWN is this list's entry point, exactly as it is the plugin list's: the
+// settings strip's Mirrors tab is a click away (ui/index.html `#settings-tab-
+// mirrors`), and the pane is drawn on that click. A list that was read once is drawn
+// again from the state it has — the answer does not change between two looks unless
+// something wrote it, and every write repaints. A read that FAILED is the one answer
+// worth asking again: the pane has no other door (the field is not drawn while the
+// list is unreadable), so a file that was fixed on disk or a host that was down
+// would otherwise stay unreadable for as long as this window lives.
+export function settingsMirrorsShown() {
+  paintSettingsMirrors();
+  if (plugState.mirrors === null || plugState.mirrorsError) plugMirrorRead();
+}
+
+// the tab's own listener, next to the pane it paints — the same shape
+// ui/src/renderer/settings.ts uses for About (a pane is painted on the tap that
+// shows it, not inside the switch, which is the modal's mechanics)
+if (window.document && typeof document.getElementById === "function") {
+  const tab = document.getElementById("settings-tab-mirrors");
+  if (tab) tab.addEventListener("click", settingsMirrorsShown);
 }
 
 // What an in-flight write is doing, in one word, for the titles of the controls
@@ -1859,15 +1943,15 @@ export async function plugSwitch(held) {
 // The two mirror writes. Neither installs anything anywhere, so neither asks:
 // a confirmation in front of a field the user just typed into is a second place
 // to say the same thing, and an entry added by mistake is undone by the Remove
-// on the row it creates. Both answer with the list AS IT NOW IS — the page then
-// draws what was written, not what it hoped it asked for.
+// on the row it creates. Both answer with the list AS IT NOW IS — the settings
+// pane then draws what was written, not what it hoped it asked for.
 export async function plugMirrorAdd() {
   const api = window.clutchComponents;
   const raw = String(plugState.mirrorDraft || "").trim();
   if (!api || !api.addMirror || plugState.mirrorBusy || !raw) return;
   plugState.mirrorBusy = true;
   plugState.mirrorResult = null;
-  renderPlugins();
+  paintSettingsMirrors();
   let res;
   try {
     res = await api.addMirror(raw);
@@ -1885,7 +1969,7 @@ export async function plugMirrorAdd() {
     // the list's own refusal, quoted: it says which list already has the entry
     plugState.mirrorResult = { ok: false, text: (res && res.error) || "no answer" };
   }
-  renderPlugins();
+  paintSettingsMirrors();
 }
 
 export async function plugMirrorRemove(url) {
@@ -1893,7 +1977,7 @@ export async function plugMirrorRemove(url) {
   if (!api || !api.removeMirror || plugState.mirrorBusy) return;
   plugState.mirrorBusy = true;
   plugState.mirrorResult = null;
-  renderPlugins();
+  paintSettingsMirrors();
   let res;
   try {
     res = await api.removeMirror(url);
@@ -1908,7 +1992,7 @@ export async function plugMirrorRemove(url) {
   } else {
     plugState.mirrorResult = { ok: false, text: (res && res.error) || "no answer" };
   }
-  renderPlugins();
+  paintSettingsMirrors();
 }
 
 // Ask, then write. The question names the place and states the one fact the
@@ -2005,18 +2089,16 @@ export function renderPlugins() {
   }
   plugDrawFilter();
   plugBodyEl.appendChild(plugList());
-  // the mirrors are one more section of the same page, and only when this shell
-  // has the channel for them: a build whose preload predates them draws the
-  // components and says nothing about a list it cannot read
-  if (window.clutchComponents.mirrors) plugBodyEl.appendChild(plugMirrors());
+  // ...and nothing about mirrors: that list is the settings dialog's now
+  // (paintSettingsMirrors), because it is not a fact about this session
 }
 
-// Read all three halves, render each as it lands: the two inventories are two
-// local calls, the market is ONE read (the index; a module's manifest is read
-// when something is installed from it, and
-// every read is a network hop that can take its time), and the mirror list is a
-// read of two local files (ui/mirrors.js). A shell with no mirror channel — an
-// older bridge — has two reads, not three with one that never lands.
+// Read both halves of the inventory, render each as it lands: the two are two
+// local calls and the market is ONE read (the index; a module's manifest is read
+// when something is installed from it, and every read is a network hop that can
+// take its time). The mirror list is NOT here: it belongs to the machine this
+// window runs on, not to the session this list is about, and the settings pane
+// that shows it asks for it when it is opened (plugMirrorRead).
 export function plugRead({ force = false } = {}) {
   const api = window.clutchComponents;
   if (!api || plugState.pending) return; // no channel, or a read already running
@@ -2038,9 +2120,7 @@ export function plugRead({ force = false } = {}) {
   plugState.clientError = null;
   plugState.clientHeldError = null;
   plugState.marketError = null;
-  plugState.mirrorsError = null;
-  const mirrors = api.mirrors ? api.mirrors() : null;
-  plugState.pending = mirrors ? 3 : 2;
+  plugState.pending = 2;
   renderPlugins();
   api
     .list(slot)
@@ -2076,23 +2156,6 @@ export function plugRead({ force = false } = {}) {
       plugState.marketError = (e && e.message) || String(e);
     })
     .then(settled);
-  if (mirrors) {
-    mirrors
-      .then((m) => {
-        if (!current()) return;
-        plugState.mirrors = (m && m.mirrors) || [];
-        // the list's own reason, when it could not be read at all (a file this
-        // machine cannot open): the section says so instead of drawing "none"
-        plugState.mirrorsError = (m && m.error) || null;
-        plugState.mirrorForced = (m && m.forced) || "";
-      })
-      .catch((e) => {
-        if (!current()) return;
-        plugState.mirrors = null;
-        plugState.mirrorsError = (e && e.message) || String(e);
-      })
-      .then(settled);
-  }
 }
 
 // ---- the source mirror ------------------------------------------------------
@@ -2231,6 +2294,10 @@ export function plugSetSlot(slot) {
   plugState.versionsPending = null;
   plugState.form = null;
   plugState.formPending = null;
+  // NOTE what is NOT reset here: the mirror list. It is a fact about the machine
+  // this window runs on, not about the tab's session, so a tab switch is no
+  // reason to forget a list that was already read (and no reason to re-read it —
+  // settingsMirrorsShown draws it from the state it has).
   // abandon the read in flight — its answers are the tab we left (`readSeq`
   // above), and its slot may be a machine this tab cannot even reach
   plugState.readSeq++;

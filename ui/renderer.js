@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 7612352f9fcebd5f771425042066eb618d270b2eb781907aa819ae76dc35ea2e
+// sources sha256: e2ca089df4018c39f51d2863aa001119a67b31b14af252b520dfbe418c1a1ff6
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -5479,7 +5479,7 @@
     set("about-platform", aboutPlatform());
     set("about-backend", aboutBackend());
   }
-  var SETTINGS_TABS = ["llm", "about"];
+  var SETTINGS_TABS = ["llm", "mirrors", "about"];
   var SETTINGS_HEIGHT_MS = 420;
   var settingsHeightAnim = null;
   function settingsBoxWants(box) {
@@ -6795,6 +6795,7 @@
   var plugFilterEl = $("#plug-filter");
   var plugNoteEl = $("#plug-note");
   var plugReloadBtn = $("#plug-reload");
+  var plugMirrorsEl = $("#settings-mirrors");
   var plugMirrorInput = $("#mirror-input");
   var plugMirrorSaveBtn = $("#mirror-save");
   var plugMirrorNoteEl = $("#mirror-note");
@@ -6841,6 +6842,8 @@
     // [{url, source}] — the list a failed fetch is retried through, or null while unread
     mirrorsError: null,
     // why that list could not be read
+    mirrorsPending: false,
+    // a read of that list is in flight (it is the settings pane's, not this one's)
     mirrorForced: "",
     // the prefix every source is forced through, when one is set
     mirrorDraft: "",
@@ -6980,16 +6983,18 @@
   function plugSection(title, meta, rows, empty) {
     const sec = document.createElement("div");
     sec.className = "plug-section";
-    const head = document.createElement("h4");
-    head.className = "plug-section-title";
-    head.textContent = title;
-    if (meta) {
-      const el = document.createElement("span");
-      el.className = "plug-meta";
-      el.textContent = meta;
-      head.appendChild(el);
+    if (title) {
+      const head = document.createElement("h4");
+      head.className = "plug-section-title";
+      head.textContent = title;
+      if (meta) {
+        const el = document.createElement("span");
+        el.className = "plug-meta";
+        el.textContent = meta;
+        head.appendChild(el);
+      }
+      sec.appendChild(head);
     }
-    sec.appendChild(head);
     if (rows.length) {
       const list = document.createElement("div");
       list.className = "plug-items";
@@ -7295,18 +7300,7 @@
   function plugList() {
     const items = plugModel();
     const shown = items.filter(plugItemShown);
-    const meta = [];
-    if (plugState.read) meta.push(`${plugState.held.length} installed`);
-    else meta.push("reading");
-    if (plugState.market) meta.push(`${plugState.market.entries.length} known`);
-    else if (plugState.marketError) meta.push("market unreadable");
-    if (shown.length !== items.length) meta.push(`${shown.length} shown`);
-    const sec = plugSection(
-      "Components",
-      meta.join(" \xB7 "),
-      shown.map(plugItemRow),
-      plugEmptyText(items.length, shown.length)
-    );
+    const sec = plugSection("", "", shown.map(plugItemRow), plugEmptyText(items.length, shown.length));
     const pass = plugPassLine();
     if (pass) sec.appendChild(pass);
     if (plugState.market && plugState.market.entries.length) {
@@ -7324,7 +7318,7 @@
     if (plugState.market && plugState.market.unreachable) {
       const hint = document.createElement("p");
       hint.className = "plug-source-hint";
-      hint.textContent = `the market index and every release manifest are read from github.com. A fetch that fails for a network reason is retried through the mirrors listed under Mirrors below, and the source mirror box above (it writes "source_mirror" into ~/.clutch/settings.json) moves every read there was. Either way a mirror only moves the bytes: every digest is still checked against the release's own pin`;
+      hint.textContent = `the market index and every release manifest are read from github.com. A fetch that fails for a network reason is retried through the mirrors listed under Settings \u2192 Mirrors, and the source mirror box there (it writes "source_mirror" into ~/.clutch/settings.json) moves every read there was. Either way a mirror only moves the bytes: every digest is still checked against the release's own pin`;
       sec.appendChild(hint);
     }
     return sec;
@@ -7365,6 +7359,7 @@
     input.setAttribute("aria-label", "a mirror to add, as an https URL");
     input.addEventListener("input", () => {
       plugState.mirrorDraft = input.value || "";
+      btn.disabled = Boolean(forced || plugState.mirrorBusy || !plugState.mirrorDraft.trim());
     });
     const btn = document.createElement("button");
     btn.className = "plug-mirrors-add-btn";
@@ -7409,6 +7404,45 @@
       sec.appendChild(line);
     }
     return sec;
+  }
+  function paintSettingsMirrors() {
+    if (!plugMirrorsEl) return;
+    plugMirrorsEl.innerHTML = "";
+    if (!window.clutchComponents || !window.clutchComponents.mirrors) {
+      const p = document.createElement("p");
+      p.className = "plug-note";
+      p.textContent = "this shell cannot read or write the mirror list";
+      plugMirrorsEl.appendChild(p);
+      return;
+    }
+    plugMirrorsEl.appendChild(plugMirrors());
+  }
+  function plugMirrorRead() {
+    const api = window.clutchComponents;
+    if (!api || !api.mirrors || plugState.mirrorsPending) return;
+    plugState.mirrorsPending = true;
+    plugState.mirrorsError = null;
+    plugState.mirrors = null;
+    paintSettingsMirrors();
+    api.mirrors().then((m) => {
+      plugState.mirrors = m && m.mirrors || [];
+      plugState.mirrorsError = m && m.error || null;
+      plugState.mirrorForced = m && m.forced || "";
+    }).catch((e) => {
+      plugState.mirrors = null;
+      plugState.mirrorsError = e && e.message || String(e);
+    }).then(() => {
+      plugState.mirrorsPending = false;
+      paintSettingsMirrors();
+    });
+  }
+  function settingsMirrorsShown() {
+    paintSettingsMirrors();
+    if (plugState.mirrors === null || plugState.mirrorsError) plugMirrorRead();
+  }
+  if (window.document && typeof document.getElementById === "function") {
+    const tab = document.getElementById("settings-tab-mirrors");
+    if (tab) tab.addEventListener("click", settingsMirrorsShown);
   }
   function plugBusyWord(busy2) {
     if (busy2.verb === "remove") return "being removed";
@@ -7988,7 +8022,7 @@
     if (!api || !api.addMirror || plugState.mirrorBusy || !raw) return;
     plugState.mirrorBusy = true;
     plugState.mirrorResult = null;
-    renderPlugins();
+    paintSettingsMirrors();
     let res;
     try {
       res = await api.addMirror(raw);
@@ -8004,14 +8038,14 @@
     } else {
       plugState.mirrorResult = { ok: false, text: res && res.error || "no answer" };
     }
-    renderPlugins();
+    paintSettingsMirrors();
   }
   async function plugMirrorRemove(url) {
     const api = window.clutchComponents;
     if (!api || !api.removeMirror || plugState.mirrorBusy) return;
     plugState.mirrorBusy = true;
     plugState.mirrorResult = null;
-    renderPlugins();
+    paintSettingsMirrors();
     let res;
     try {
       res = await api.removeMirror(url);
@@ -8026,7 +8060,7 @@
     } else {
       plugState.mirrorResult = { ok: false, text: res && res.error || "no answer" };
     }
-    renderPlugins();
+    paintSettingsMirrors();
   }
   async function plugInstall(entry) {
     const api = window.clutchComponents;
@@ -8094,7 +8128,6 @@
     }
     plugDrawFilter();
     plugBodyEl.appendChild(plugList());
-    if (window.clutchComponents.mirrors) plugBodyEl.appendChild(plugMirrors());
   }
   function plugRead({ force = false } = {}) {
     const api = window.clutchComponents;
@@ -8112,9 +8145,7 @@
     plugState.clientError = null;
     plugState.clientHeldError = null;
     plugState.marketError = null;
-    plugState.mirrorsError = null;
-    const mirrors = api.mirrors ? api.mirrors() : null;
-    plugState.pending = mirrors ? 3 : 2;
+    plugState.pending = 2;
     renderPlugins();
     api.list(slot).then((r) => {
       if (!current()) return;
@@ -8139,18 +8170,6 @@
       if (!current()) return;
       plugState.marketError = e && e.message || String(e);
     }).then(settled);
-    if (mirrors) {
-      mirrors.then((m) => {
-        if (!current()) return;
-        plugState.mirrors = m && m.mirrors || [];
-        plugState.mirrorsError = m && m.error || null;
-        plugState.mirrorForced = m && m.forced || "";
-      }).catch((e) => {
-        if (!current()) return;
-        plugState.mirrors = null;
-        plugState.mirrorsError = e && e.message || String(e);
-      }).then(settled);
-    }
   }
   function plugMirrorStored() {
     try {
@@ -8282,6 +8301,9 @@
 
   // src/renderer/dock.ts
   var STORE = "clutch_dock_groups";
+  var SPLIT_STORE = "clutch_dock_split";
+  var SPLIT_MIN = 80;
+  var SPLIT_STEP = 16;
   var SPECS = [
     { id: "workspace", head: "#dock-toggle-workspace", group: "#dock-workspace" },
     { id: "plugins", head: "#dock-toggle-plugins", group: "#dock-plugins", opened: () => pluginTabShown() }
@@ -8309,6 +8331,96 @@
     for (const g of groups) layout[g.id] = g.open;
     localStorage.setItem(STORE, JSON.stringify(layout));
   }
+  var splitEl = $("#dock-split");
+  var splitPx = 0;
+  var dragFrom = 0;
+  var dragPx = 0;
+  var dragging = false;
+  function rememberedSplit() {
+    try {
+      const n = Math.round(Number(localStorage.getItem(SPLIT_STORE)));
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+  function saveSplit() {
+    try {
+      localStorage.setItem(SPLIT_STORE, String(Math.round(splitPx)));
+    } catch (e) {
+    }
+  }
+  function boxPx(el) {
+    if (!el || typeof el.getBoundingClientRect !== "function") return 0;
+    return Math.round(el.getBoundingClientRect().height) || 0;
+  }
+  function headPx(g) {
+    const head = g && g.head;
+    return head && typeof head.getBoundingClientRect === "function" ? Math.round(head.getBoundingClientRect().height) || 0 : 0;
+  }
+  function splitBounds() {
+    const workspace = byId2("workspace");
+    const plugins = byId2("plugins");
+    const min = headPx(workspace) + SPLIT_MIN;
+    const column = boxPx(splitEl ? splitEl.parentElement : null);
+    const handle = boxPx(splitEl);
+    if (!column) return { min, max: Infinity };
+    return { min, max: Math.max(min, column - handle - headPx(plugins) - SPLIT_MIN) };
+  }
+  function clampSplit(px) {
+    const b = splitBounds();
+    const n = Math.round(Number(px));
+    if (!Number.isFinite(n)) return b.min;
+    return Math.min(Math.max(n, b.min), b.max);
+  }
+  function applySplit() {
+    const workspace = byId2("workspace");
+    const plugins = byId2("plugins");
+    const both = Boolean(workspace && plugins && workspace.open && plugins.open);
+    if (splitEl) splitEl.classList.toggle("hidden", !both);
+    const style = workspace && workspace.group ? workspace.group.style : null;
+    if (!style) return;
+    if (both && splitPx) style.flex = "0 0 " + clampSplit(splitPx) + "px";
+    else style.flex = "";
+  }
+  function dockSetSplit(px, { remember = true } = {}) {
+    splitPx = clampSplit(px);
+    applySplit();
+    if (remember) saveSplit();
+  }
+  function splitDragStart(ev) {
+    if (!splitEl || !dockIsOpen("workspace") || !dockIsOpen("plugins")) return;
+    dragging = true;
+    dragFrom = Number(ev && ev.clientY) || 0;
+    dragPx = splitPx || boxPx(byId2("workspace") ? byId2("workspace").group : null);
+    splitEl.classList.add("dragging");
+    if (typeof splitEl.setPointerCapture === "function" && ev && ev.pointerId !== void 0) {
+      try {
+        splitEl.setPointerCapture(ev.pointerId);
+      } catch (e) {
+      }
+    }
+    if (ev && typeof ev.preventDefault === "function") ev.preventDefault();
+  }
+  function splitDragMove(ev) {
+    if (!dragging) return;
+    dockSetSplit(dragPx + (Number(ev && ev.clientY) || 0) - dragFrom, { remember: false });
+    if (ev && typeof ev.preventDefault === "function") ev.preventDefault();
+  }
+  function splitDragEnd() {
+    if (!dragging) return;
+    dragging = false;
+    if (splitEl) splitEl.classList.remove("dragging");
+    saveSplit();
+  }
+  function splitKey(ev) {
+    const key = ev && ev.key;
+    if (key !== "ArrowUp" && key !== "ArrowDown") return;
+    if (typeof ev.preventDefault === "function") ev.preventDefault();
+    const base = splitPx || boxPx(byId2("workspace") ? byId2("workspace").group : null) || splitBounds().min;
+    const next = base + (key === "ArrowDown" ? SPLIT_STEP : -SPLIT_STEP);
+    dockSetSplit(next);
+  }
   function paint(g) {
     g.group.classList.toggle("dock-collapsed", !g.open);
     g.head.setAttribute("aria-expanded", g.open ? "true" : "false");
@@ -8319,6 +8431,7 @@
     g.open = open;
     paint(g);
     save();
+    applySplit();
     if (open && g.opened) g.opened();
   }
   function dockOpen(id, open) {
@@ -8344,6 +8457,18 @@
   for (const g of groups) {
     paint(g);
     g.head.addEventListener("click", () => setOpen(g, !g.open));
+  }
+  splitPx = rememberedSplit();
+  applySplit();
+  if (splitEl) {
+    splitEl.addEventListener("pointerdown", splitDragStart);
+    splitEl.addEventListener("pointermove", splitDragMove);
+    splitEl.addEventListener("pointerup", splitDragEnd);
+    splitEl.addEventListener("pointercancel", splitDragEnd);
+    splitEl.addEventListener("keydown", splitKey);
+  }
+  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("resize", () => applySplit());
   }
 
   // src/renderer/status-bar.ts

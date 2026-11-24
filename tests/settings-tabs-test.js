@@ -1,7 +1,8 @@
 "use strict";
 
-// The settings modal's two panes are different lengths (a profile form, the build's
-// name plate) and the box is only as tall as the one that is showing, so a tab
+// The settings modal's three panes are different lengths (a profile form, the mirror
+// list, the build's name plate) and the box is only as tall as the one that is
+// showing, so a tab
 // click RESIZES the box. That is the part of this modal a user notices, and it is
 // the part a stylesheet cannot do: the height belongs to no element of its own, and
 // it keeps moving after the tab lands — a validation line appears under a field, a
@@ -27,10 +28,11 @@
 //   the height is released to the stylesheet the moment the travel is over, so
 //   every later resize is one frame again.
 //
-// The two panes used to be three: the plugin list left the dialog for a group of the
-// right dock (ui/src/renderer/dock.ts), because what a machine holds is a fact about
-// the tab that is open and a dialog covers the strip that names it. What is left is
-// still two panes of two heights, which is the whole mechanism below.
+// The panes used to be three, became two when the plugin list left the dialog for a
+// group of the right dock (ui/src/renderer/dock.ts), and are three again now that the
+// mirror list has moved in from that same dock page: a mirror list is a fact about
+// this machine, not about the session the plugin page is about, so it is a setting.
+// Either way the mechanism below is the same — panes of different heights, one box.
 //
 // The same run checks the stylesheet facts the design leans on: the box's height is
 // NOT transitioned anywhere (nothing in CSS fights the tween), the box does not
@@ -55,7 +57,7 @@ const html = fs.readFileSync(path.join(UI, "index.html"), "utf8");
 // lives on, to the switch that starts it. Sliced out of the page's own source
 // (harness.js reads the script list index.html declares), so a module this page
 // forgets to load fails here rather than passing against a copy.
-const REGION = slicer(uiSource()).region('const SETTINGS_TABS = ["llm", "about"]', "showSettingsTab");
+const REGION = slicer(uiSource()).region('const SETTINGS_TABS = ["llm", "mirrors", "about"]', "showSettingsTab");
 
 // one rule's declarations, with its whitespace folded away
 function decls(sheet, selector) {
@@ -135,16 +137,18 @@ function makePage(opts) {
     return n;
   }
 
-  const panes = { llm: node("modal-pane"), about: node("modal-pane hidden") };
-  const tabs = { llm: node("modal-tab active"), about: node("modal-tab") };
+  const panes = { llm: node("modal-pane"), mirrors: node("modal-pane hidden"), about: node("modal-pane hidden") };
+  const tabs = { llm: node("modal-tab active"), mirrors: node("modal-tab"), about: node("modal-tab") };
   tabs.llm.setAttribute("aria-selected", "true");
+  tabs.mirrors.setAttribute("aria-selected", "false");
   tabs.about.setAttribute("aria-selected", "false");
 
-  // what the two panes measure when each is showing on its own: the model form is
-  // the long one, the name plate is three lines. `about` is what MOVES in this run:
-  // a pane can change height while the box is on its way to it (a validation line
-  // arriving, a notice drawn), which is the fact the whole design is built around
-  const natural = { llm: 300, about: 480 };
+  // what the three panes measure when each is showing on its own: the model form is
+  // the long one, the mirror list sits in the middle, the name plate is three lines.
+  // `about` is what MOVES in this run: a pane can change height while the box is on
+  // its way to it (a validation line arriving, a notice drawn), which is the fact
+  // the whole design is built around
+  const natural = { llm: 300, mirrors: 600, about: 480 };
 
   const box = node("modal-box");
   // the sheet owns the height until a switch puts a number on the element, so the
@@ -155,15 +159,17 @@ function makePage(opts) {
     // which is why the box is measured by clearing it first
     if (box.style.height) return { height: parseFloat(box.style.height) };
     if (!o.visible) return { height: 0 }; // display: none, the modal not yet opened
-    const showing = ["llm", "about"].find((t) => !panes[t].classList.contains("hidden"));
+    const showing = ["llm", "mirrors", "about"].find((t) => !panes[t].classList.contains("hidden"));
     return { height: showing ? natural[showing] : 0 };
   };
 
   const bySelector = new Map([
     ["#settings-modal .modal-box", box],
     ["#settings-tab-llm", tabs.llm],
+    ["#settings-tab-mirrors", tabs.mirrors],
     ["#settings-tab-about", tabs.about],
     ["#settings-pane-llm", panes.llm],
+    ["#settings-pane-mirrors", panes.mirrors],
     ["#settings-pane-about", panes.about],
   ]);
   const clock = makeClock();
@@ -187,7 +193,7 @@ function makePage(opts) {
     held: () => box.style.height,
     anim: () => vm.runInContext("settingsHeightAnim", ctx),
     click: (name) => vm.runInContext("showSettingsTab(" + JSON.stringify(name) + ")", ctx),
-    showing: () => ["llm", "about"].filter((t) => !panes[t].classList.contains("hidden")),
+    showing: () => ["llm", "mirrors", "about"].filter((t) => !panes[t].classList.contains("hidden")),
   };
 }
 
@@ -208,7 +214,7 @@ function makePage(opts) {
   );
   check(
     p.anim() && p.anim().from === 300 && p.clock.pending() === 1 && p.rect() === 300,
-    "the travel is ARMED for the next frame and not started in this one: the plugin pane's reading state is drawn by a second listener in the same task, and that is the height to go to"
+    "the travel is ARMED for the next frame and not started in this one: the mirror pane is painted by a second listener in the same task (components-panel.ts), and that is the height to go to"
   );
 
   // ---- 2. it travels, and follows a pane that is still filling ----
@@ -282,7 +288,7 @@ function makePage(opts) {
   check(p.rect() === 0, "a modal that has not been opened measures nothing (this is where openSettings switches tabs from)");
   p.click("about");
   check(p.held() === "" && p.anim() === null && p.clock.pending() === 0, "no height to hold and no travel booked — a pane change and nothing else");
-  check(p.showing().join() === "about", "the pane still changes: opening straight onto the plugin tab works");
+  check(p.showing().join() === "about", "the pane still changes: opening straight onto a pane other than the model one works");
 }
 
 // ---- 7. less motion means no travel ----
@@ -294,6 +300,27 @@ function makePage(opts) {
     "a reader who asked for less motion gets the pane change and no travel: reduce-motion stops the sheet's transitions, and this is not one"
   );
   check(p.showing().join() === "about", "the pane change is still a pane change");
+}
+
+// ---- 7b. the mirror list is a pane of the same strip ----
+// It moved here from the dock's plugin page (components-panel.ts used to draw it),
+// so the one thing worth asking is that it is switched by the SAME mechanism as the
+// other two and not by a listener of its own: one class on the pane, aria-selected
+// on the tab, and the box held across the swap like any other click.
+{
+  const p = makePage();
+  p.click("mirrors");
+  check(p.showing().join() === "mirrors", "the mirror tab shows the mirror pane, and no other");
+  check(p.panes.llm.classList.contains("hidden") && p.panes.about.classList.contains("hidden"), "...the two that were not chosen are hidden, not left showing underneath");
+  check(
+    p.tabs.mirrors.attrs["aria-selected"] === "true" && p.tabs.llm.attrs["aria-selected"] === "false",
+    "and the strip announces it the same way it announces the other two"
+  );
+  check(p.held() === "300px" && p.anim() && p.anim().from === 300, "a mirror click books the same travel as any other tab: the box is held at the height it had");
+  p.clock.advance(600);
+  check(p.rect() === 600 && p.held() === "", "and it arrives at the mirror pane's own height, then lets go");
+  p.click("llm");
+  check(p.showing().join() === "llm" && p.tabs.llm.attrs["aria-selected"] === "true", "leaving the mirror pane is an ordinary tab click too");
 }
 
 // ---- 8. the stylesheet facts the design leans on ----
@@ -338,17 +365,31 @@ function makePage(opts) {
   // the strip is real in the markup, and it OPENS agreeing with itself: the swap
   // moves a class and writes aria-selected, so a page that started the two out of
   // step would open lying about which pane is showing
-  check(/id="settings-tab-llm"[^>]*role="tab"/.test(html) && /id="settings-tab-about"[^>]*role="tab"/.test(html), "index.html declares the strip as role=tablist's tabs");
-  check(/id="settings-pane-llm"[^>]*role="tabpanel"/.test(html) && /id="settings-pane-about"[^>]*role="tabpanel"/.test(html), "over two role=tabpanel panes");
+  check(
+    /id="settings-tab-llm"[^>]*role="tab"/.test(html) &&
+      /id="settings-tab-mirrors"[^>]*role="tab"/.test(html) &&
+      /id="settings-tab-about"[^>]*role="tab"/.test(html),
+    "index.html declares the strip as role=tablist's three tabs"
+  );
+  check(
+    /id="settings-pane-llm"[^>]*role="tabpanel"/.test(html) &&
+      /id="settings-pane-mirrors"[^>]*role="tabpanel"/.test(html) &&
+      /id="settings-pane-about"[^>]*role="tabpanel"/.test(html),
+    "over three role=tabpanel panes"
+  );
   check(
     /id="settings-pane-about"[^>]*class="[^"]*hidden/.test(html) && /id="settings-tab-about"[\s\S]*?aria-selected="false"/.test(html),
     "and the About pane opens hidden with its tab saying so (aria-selected=false), the state the first switch moves away from"
   );
+  check(
+    /id="settings-pane-mirrors"[^>]*class="[^"]*hidden/.test(html) && /id="settings-tab-mirrors"[\s\S]*?aria-selected="false"/.test(html),
+    "the mirror pane opens hidden too, its tab saying the same, because the model pane is where the dialog opens"
+  );
   check(!/id="settings-pane-llm"[^>]*hidden/.test(html), "while the model pane is the one showing");
-  // ...and the strip is exactly those two: the plugin list left the dialog for a
-  // group of the right dock, and a third tab still pointing at a pane that no longer
-  // exists would be the same page lying in a quieter way
-  check(!/settings-(tab|pane)-plugins/.test(html), "and there is no third tab: the plugin list is a view of the sidebar now, not a pane of this dialog");
+  // ...and the strip carries no fourth: the plugin list left the dialog for a group
+  // of the right dock, and a tab still pointing at a pane that no longer exists would
+  // be the same page lying in a quieter way
+  check(!/settings-(tab|pane)-plugins/.test(html), "and no plugins tab: the plugin list is a view of the sidebar now, not a pane of this dialog");
 
   // the focus look of a box you type in is ONE line: the border goes accent and no
   // ring is drawn around it, because the ring cannot be handed to the keyboard alone
