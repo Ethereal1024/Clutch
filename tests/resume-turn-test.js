@@ -76,6 +76,17 @@ function handlerBody(src, name) {
     /e\.code === "run_active"/.test(body) && /another window/.test(body),
     "another window's driver is reported as such, not as a dead session"
   );
+  // A turn another window is running is not a resume this page failed at: the
+  // claim pill is the account of it (render-events.ts announceProjectClaim), so a
+  // toast here would be one window announcing another's work as a fault.
+  const atForeign = body.indexOf('e.code === "run_elsewhere"');
+  const foreign = body.slice(atForeign, body.indexOf("return;", atForeign) + 7);
+  check(
+    atForeign > atRefusal &&
+      /setStatus\("idle"\)/.test(foreign) &&
+      !/notice\(|connectionLost\(/.test(foreign),
+    "another window's run is a fact, not a failure: no toast, and the optimistically painted badge goes back"
+  );
 
   // the Run button's own door: a refusal is not a failed run
   const runBody = slicer(src).fnBody("run");

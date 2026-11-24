@@ -80,7 +80,6 @@ async function main() {
   assert.deepStrictEqual(
     arityOf({
       clutchApi: globalThis.clutchApi,
-      clutchLocks: globalThis.clutchLocks,
       clutchRun: globalThis.clutchRun,
       clutchSettings: globalThis.clutchSettings,
       clutchComponents: globalThis.clutchComponents,
@@ -148,21 +147,6 @@ async function main() {
   });
   FakeES.instances[0].emit("tunnel:progress", ["health"]);
   assert.deepStrictEqual(got.progress, ["probe", "health"], "stream survives a bad listener");
-
-  // 8. locks: the page asks the host that HOLDS the lock, and reclaim names the
-  //    one project — the bridge never touches a lock file and never names a
-  //    window (the host knows which one is asking)
-  fakes.next = { json: async () => ({ ok: true, result: { locks: [] } }) };
-  assert.deepStrictEqual(await globalThis.clutchLocks.list(), { locks: [] }, "list resolves the host's answer");
-  assert.strictEqual(fakes.fetches.at(-1).url, BRIDGE + "api/clutchLocks/list", "list hits its own bridge route");
-  fakes.next = { json: async () => ({ ok: true, result: { revoked: false, why: "not an orphan" } }) };
-  assert.deepStrictEqual(
-    await globalThis.clutchLocks.reclaim("/p/x.clc"),
-    { revoked: false, why: "not an orphan" },
-    "reclaim returns the host's verdict whole (a refusal is information, not an error)"
-  );
-  assert.strictEqual(fakes.fetches.at(-1).url, BRIDGE + "api/clutchLocks/reclaim");
-  assert.strictEqual(fakes.fetches.at(-1).opts.body, '["/p/x.clc"]', "the .clc is the only argument");
 
   console.log("bridge-shim: all checks passed");
 }

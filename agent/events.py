@@ -122,13 +122,19 @@ class StateUpdateEvent(Event):
     type: str = "state_update"
     key: str = "execution_status"
     value: str | bool = ""
-    # Set on the status frame of a connect (and on a live claim change): whether
-    # the project this stream watches is open for WRITE in this session. None
-    # means "no claim to report" (the frame is about another window's project,
-    # or there is no project at all), so the window leaves its badge alone.
-    # A reconnect used to carry no answer to this at all, which left a window
-    # that once fell back to read-only wearing that badge forever.
+    # Set on the status frame of a connect: whether the project this stream
+    # watches was OPENED as a viewer in this session (a file this window may
+    # never write). None means "no answer to report" (the frame is about another
+    # window's project, or there is no project at all), so the window leaves its
+    # badge alone. A reconnect used to carry no answer to this at all, which left
+    # a window that once fell back to read-only wearing that badge forever.
     read_only: bool | None = None
+    # Whether ANOTHER session is running this project right now — the other
+    # reason a view is read-only, and a temporary one: it ends with the other
+    # session's run, and this very window may then send again. Same None rule as
+    # read_only. Reported on the status frame of a connect and, as a
+    # key="running_elsewhere" frame, on every change while the stream is open.
+    running_elsewhere: bool | None = None
 
 
 @dataclass

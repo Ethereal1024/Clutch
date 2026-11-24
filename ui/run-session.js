@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/run-session.ts and run `npm run build:host`.
-// source sha256: 6e8e966ece3efd5ae984b82a56f51bea8fa44765212491d2bac8018fe5bdf457
+// source sha256: 5f99e93c98a971ca49f60b0b74c4ef3bce137c664f3c302f8beae1e3ad4d6566
 
 // Composition root for one session's run loop (P3-2 wiring).
 //
@@ -277,6 +277,10 @@ async function createSessionRun({ base, mode: modeOverride, project, onEvent, wa
         const err = new Error(`POST /api/run/state answered ${r.status}: ${(parsed && parsed.error) || r.statusText}`);
         err.status = r.status;
         err.code = (parsed && parsed.code) || null;
+        // a refusal about somebody ELSE carries their own statement about themselves
+        // (pid, session, since): the page names them, and knows which session's run
+        // to wait for
+        err.owner = (parsed && parsed.owner) || null;
         throw err;
     }
     // A lease that could not be renewed or released is not the turn's failure: it
@@ -305,8 +309,12 @@ async function createSessionRun({ base, mode: modeOverride, project, onEvent, wa
         if (typeof leaseTimer.unref === "function")
             leaseTimer.unref();
     }
-    // Claim the slot (or renew the claim we already hold). Throws only when the
-    // slot is somebody else's: that is the one answer the work must not ignore.
+    // Claim the run (or renew the claim we already hold). Throws only when the RUN
+    // is somebody else's — the one answer the work must not ignore. That refusal
+    // is `run_elsewhere`, never `run_active`: `run_active` already means "this
+    // window is driving this turn" (ui/src/host/main.ts refuseIfDriving), which
+    // the page treats as a fact and stays on, while this one is another window's
+    // run on the same .clc, which the page must show as read-only instead.
     async function hold() {
         if (leaseUnsupported)
             return;
@@ -316,9 +324,10 @@ async function createSessionRun({ base, mode: modeOverride, project, onEvent, wa
         }
         catch (e) {
             if (e && e.code === "run_active") {
-                const err = new Error(`${e.message} — another window is driving this turn`);
+                const err = new Error("another window is running this project");
                 err.status = e.status;
-                err.code = "run_active";
+                err.code = "run_elsewhere";
+                err.owner = e.owner || null;
                 throw err;
             }
             leaseTrouble(e);

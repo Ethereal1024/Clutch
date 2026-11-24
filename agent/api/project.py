@@ -16,7 +16,7 @@ import json
 from pathlib import Path, PurePosixPath
 from urllib.parse import parse_qs, urlparse
 
-from ..core.project_lock import ProjectLock, ProjectOpenConflict, owner_summary
+from ..core.project_lock import ProjectOpenConflict
 from ..events import event_to_json
 from ..project import ProjectExists, create_project, open_project_lazy
 
@@ -59,10 +59,10 @@ class ProjectMixin:
                 status=409,
             )
         except ProjectOpenConflict as e:
-            # the file this create would write is another window's project: same
-            # answer as an open conflict, so the UI can say what actually happened
+            # the file this create would write is being RUN by another window:
+            # same answer as an open conflict, so the UI can say what happened
             payload: dict = {
-                "error": "project is open in another window",
+                "error": "another window is running this project",
                 "code": "project_open_conflict",
             }
             if e.owner is not None:
@@ -102,38 +102,16 @@ class ProjectMixin:
 
     def _open_stream_start(self, full: Path, read_only: bool = False) -> None:
         # build the workspace first (ssh mode -> RemoteWorkspace over the bridge),
-        # so the lock and index/load/append all hit the same remote host
+        # so index/load/append all hit the same remote host
         ws = self._state.build_workspace(str(full.parent))
-        # write lock: the window that opens a project for write is its only
-        # writer. Conflict -> HTTP 409 + code so the UI can offer read-only
-        # without parsing the NDJSON stream for the error line. The lock of the
-        # project this open REPLACES is handed back by set_project (below), the
-        # choke point where a project stops being the active one.
-        lock = None
-        if not read_only:
-            lock = ProjectLock.acquire(str(full))
-            if lock is None:
-                # Say WHO holds it, as far as the holder's own record knows: its
-                # pid, the host it runs on, since when, and the window process
-                # that claimed it. The UI shows this instead of a bare "another
-                # window", and the host's reconciler (GET /api/locks) can free
-                # the project when that window is PROVEN gone. A holder that
-                # wrote no record (an older build) yields no owner — the honest
-                # answer, never a guess.
-                payload: dict = {
-                    "error": "project is open in another window",
-                    "code": "project_open_conflict",
-                    # the exact file that is locked, so the UI can look it up in
-                    # the host's lock list (GET /api/locks) without re-resolving
-                    # a relative path the child resolved for it
-                    "project": str(full),
-                }
-                owner = owner_summary(ProjectLock.owner(str(full)))
-                if owner is not None:
-                    payload["owner"] = owner
-                return self._json(payload, status=409)
-        # stream the open as NDJSON so the UI can show real file-parse progress;
-        # errors are reported inline as an {"error": ...} line
+        # NO LOCK IS TAKEN HERE. Opening a project is a read: the .clc is claimed
+        # by the session that RUNS it (agent/base.py RunState.claim_run), not by
+        # the windows looking at it, so an idle project opens everywhere. If
+        # another window happens to be running it this very moment the open still
+        # succeeds — the page then paints that run's stream read-only until it
+        # ends (the claim watch loop in agent/server.py says when). Refusing the
+        # open would have made the claim an OPEN claim, and an idle project would
+        # belong to whoever happened to look at it first.
         self.send_response(200)
         self._cors()
         self.send_header("Content-Type", "application/x-ndjson")
@@ -149,17 +127,7 @@ class ProjectMixin:
 
         try:
             project = open_project_lazy(full, on_progress=on_progress, workspace=ws, read_only=read_only)
-        except ProjectOpenConflict as e:
-            if lock is not None:
-                ProjectLock.release(lock)
-            conflict: dict = {"error": str(e), "code": e.code}
-            if e.owner:
-                conflict["owner"] = e.owner
-            emit(conflict)
-            return
         except (OSError, ValueError) as e:
-            if lock is not None:
-                ProjectLock.release(lock)
             emit({"error": f"cannot open project: {e}"})
             return
         self._state.set_project(project, workspace=ws)

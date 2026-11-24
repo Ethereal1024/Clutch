@@ -26,6 +26,7 @@ export const els = {
   run: $("#run-btn"),
   mode: $("#mode-btn"),
   trust: $("#trust-btn"),
+  claim: $("#claim-pill"),
   status: $("#status"),
   tree: $("#tree"),
   workspace: $("#sb-workdir"),

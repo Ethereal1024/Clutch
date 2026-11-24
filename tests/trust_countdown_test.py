@@ -46,7 +46,7 @@ from agent.core.permission import (
     PermissionGate,
     PermissionRequired,
 )
-from agent.project import ProjectLock, create_project
+from agent.project import create_project
 from agent.server import RunState, build
 from agent.tools.workspace import LocalWorkspace
 from tests.testsupport import check, http_post, ui_source
@@ -305,8 +305,6 @@ def _endpoint_arms_the_live_gate() -> None:
             if watcher is not None:
                 broadcaster.unsubscribe(watcher)
             srv.shutdown()
-            ProjectLock.release(project.lock)
-            project.lock = None
 
 
 def main() -> int:

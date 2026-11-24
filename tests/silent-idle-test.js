@@ -182,6 +182,9 @@ global.closePerm = () => {};
 // the answered-ask marks addEvent clears at a run boundary (js/permissions.js):
 // this runner drives the real final/addEvent paths, but no prompt is involved
 global.forgetAnsweredPerm = () => {};
+// the send outbox (js/render-events.ts noteUserMessage): it empties the composer
+// when the log confirms a task. This runner replays frames, it never sends one.
+global.noteUserMessage = () => {};
 global.clearStreamPreviews = () => {};
 global.clearRetryNote = () => {};
 global.refreshTree = () => {};

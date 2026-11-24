@@ -166,9 +166,9 @@ async function main() {
   // ---- 4) loading it wires the whole program ----
   const real = load(onDisk);
   check(!real.error, "loading the bundle wires the page with no load-time throw (" + describe(real) + ")");
-  const PUBLISHED = ["clutchComponents", "clutchLocks", "clutchRun", "clutchSettings", "clutchUpdate"];
+  const PUBLISHED = ["clutchComponents", "clutchRun", "clutchSettings", "clutchUpdate"];
   check(real.added.slice().sort().join() === PUBLISHED.join(),
-        `the only names it puts on window are the host bridge's five namespaces (got ${JSON.stringify(real.added)})`);
+        `the only names it puts on window are the host bridge's namespaces (got ${JSON.stringify(real.added)})`);
   const body = onDisk.replace(/^(?:\/\/[^\n]*\n)+/, "");
   check(/^\(\(\) => \{/.test(body) && /\}\)\(\);\s*$/.test(body),
         "and the whole renderer is inside ONE function scope: the file is one IIFE from top to bottom");

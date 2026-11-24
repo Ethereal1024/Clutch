@@ -24,12 +24,12 @@ import {
   setPane,
   type PaneState,
 } from "./pane";
-import { resumeTurn } from "./render-events";
-import { askConfirm, notice } from "./settings";
+import { endSend, resumeTurn } from "./render-events";
+import { notice } from "./settings";
 import { closeSSE, reconnectSSE } from "./sse-stream";
 import { state } from "./state";
 import { addEvent, dropOrphanLive, settleCatchUp } from "./stream-events";
-import { endCatchUp, nearBottom, setJumpVisible, setStatus } from "./stream-view";
+import { endCatchUp, nearBottom, setClaimed, setJumpVisible, setReadOnly, setStatus } from "./stream-view";
 import { eventsEl, stream } from "./els";
 import { refreshRollbackAnchors, resetRollbackAnchors } from "./task-rollback";
 import { enterWorkspace, refreshTree } from "./workspace-panel";
@@ -317,28 +317,54 @@ export async function loadOlder() {
 // which only worked while the whole renderer was one file.
 $("#older-pill").addEventListener("click", loadOlder);
 
-// read-only badge: visible only while the active project is read-only
-export function showReadOnlyBadge(readOnly) {
-  const badge = document.getElementById("readonly-badge");
-  if (badge) badge.classList.toggle("hidden", !readOnly);
-}
-
-// The host owns the claim, so it also owns the badge. A (re)connect re-asks for
-// a project this window once had to open read-only, and the session's watchdog
-// takes the claim back as soon as the other holder is gone; both announce it
-// (render-events.ts). Clearing the badge from that is the whole point: the
-// ghost read-only was this state outliving the lock, and only this file's
-// open-time meta used to be allowed to clear it.
+// The session owns both answers, so it owns both controls: this file only hands
+// them to the view. Every (re)connect re-asks them (the status frame, which knows
+// both the open's mode and whether ANOTHER window holds the run), and the
+// session's watchdog announces the changes it sees (server.py claim_watch_loop) —
+// which is the whole point: a foreign run ENDS by itself, and the composer comes
+// back then, with no reload and no retry here.
+//
+// Two announcements because there are two facts (render-events.ts):
+//   * clutch:project-read-only — this project is OPENED as a viewer here;
+//   * clutch:project-claim — another window is RUNNING it right now, which is
+//     what the pill beside the run controls says and what its click reloads.
+//
+// Neither is answered here at open time: the flags are the last thing the session
+// said about the project the stream is on, and setProjectInfo deliberately leaves
+// them alone. A tab switch therefore keeps the claim state it had for the instant
+// before its stream's status frame arrives, and that frame is the one authority.
 document.addEventListener("clutch:project-read-only", (ev) => {
   const d = ((ev as any) && (ev as any).detail) || {};
-  if (d.project && currentProject && d.project !== currentProject) return;
-  showReadOnlyBadge(!!d.readOnly);
+  setReadOnly(!!d.readOnly);
 });
+
+document.addEventListener("clutch:project-claim", (ev) => {
+  const d = ((ev as any) && (ev as any).detail) || {};
+  setClaimed(!!d.claimed);
+});
+
+// The pill's click: re-open the project this window is already showing. The
+// pane keeps the picture it has (paintCachedView), and the stream reconnects at
+// its own watermark — the same door a reload takes, and the same answer: the
+// session reads the foreign run's lines out of the file and hands them over
+// (`since`, a .clc byte offset).
+//
+// `currentProject = ""` first is what makes that a re-open: openProject answers
+// an already-active tab with an early return, and that no-op would leave the
+// pane exactly as it is.
+export async function reloadActiveProject() {
+  const tab = activeTab();
+  if (!tab || !tab.path) return;
+  currentProject = "";
+  await activateTab(tab);
+}
+
+const claimPill = $("#claim-pill");
+if (claimPill) claimPill.addEventListener("click", () => { void reloadActiveProject(); });
 
 export function setProjectInfo(info) {
   currentProject = info.project || "";
   if (info.workdir) els.workspace.textContent = info.workdir;
-  showReadOnlyBadge(!!info.read_only);
   setStatus("idle");
   // notify status-bar.ts
   document.dispatchEvent(new CustomEvent("clutch:project-info", { detail: { project: currentProject, name: info.name } }));
@@ -363,7 +389,8 @@ export function showWelcome() {
   // goes with the same state (it also clears the stream, so there is no second
   // call to keep in order here)
   apply(paneWelcome());
-  showReadOnlyBadge(false);
+  setReadOnly(false);
+  setClaimed(false);
   setStatus("idle");
   document.dispatchEvent(new CustomEvent("clutch:project-info", { detail: { project: "", name: "" } }));
 }
@@ -381,56 +408,6 @@ export function describeHolder(owner) {
     bits.push(`since ${new Date(owner.since * 1000).toLocaleString()}`);
   }
   return bits.length ? `Held by ${bits.join(" ")}.` : "";
-}
-
-// Is this project's lock a PROVEN orphan? Only a kernel can answer — the fact
-// about the claiming window belongs to the machine that window runs on — and the
-// host reports it in one of two shapes, both of them proof:
-//   * state "orphan": the holder is on the host's machine and its window is gone
-//   * claim_liveness "dead": the holder is elsewhere and the claim names OUR
-//     machine, whose kernel has just said that window no longer exists (the host
-//     kept the claim because a far kernel cannot read our process table; the
-//     witness that frees it is this very verdict, relayed by ui/main.js)
-// Every other shape belongs to somebody, and a host that cannot answer is no
-// reason to take anything.
-//
-// `slotId` is the TAB whose session was refused, and it is not optional in
-// spirit: the lock lives on the machine the project lives on, and the shell can
-// only reach that machine's supervisor through the claim of the slot that has
-// it. Asked without a slot, the shell answers about the window's default claim —
-// this machine — so a project on a far host came back as "no such lock" and the
-// pane fell through to "open read-only?" even though nobody else had it open
-// (the fix-train report: a far side kept a claim whose window was long gone, and
-// the only machine that could prove that was never asked).
-export async function provenOrphan(project, slotId) {
-  const api = window.clutchLocks;
-  if (!project || !api || typeof api.list !== "function") return false;
-  try {
-    const res = await api.list(slotId);
-    const locks = (res && res.locks) || [];
-    const mine = locks.find((lk) => lk && lk.project === project);
-    return !!(mine && (mine.state === "orphan" || mine.claim_liveness === "dead"));
-  } catch {
-    return false;
-  }
-}
-
-// Take a proven-orphaned project back: the host stops the dead window's session
-// (the one still holding the flock), and then the open can succeed. The verdict
-// is the host's, so a refusal is reported instead of retried. Same `slotId` as
-// provenOrphan: the reclaim has to reach the supervisor that HOLDS the lock, and
-// that is the one behind this tab's claim.
-export async function reclaimLock(project, slotId) {
-  const api = window.clutchLocks;
-  if (!api || typeof api.reclaim !== "function") return false;
-  try {
-    const res = await api.reclaim(project, slotId);
-    if (res && res.revoked) return true;
-    notice("The host would not release it: " + ((res && (res.why || res.error)) || "no answer"));
-  } catch (e) {
-    notice("Could not reach the host: " + (e && e.message));
-  }
-  return false;
 }
 
 // ---- a pane that has to explain itself --------------------------------------
@@ -693,7 +670,6 @@ async function openInTab(tab, base, readOnly = false, seq = openSeq): Promise<Pa
             project: msg.meta.project,
             name: msg.meta.name,
             workdir: msg.meta.workdir,
-            read_only: !!msg.meta.read_only,
           });
           started = true;
         } else if (msg.count) {
@@ -740,65 +716,6 @@ async function openInTab(tab, base, readOnly = false, seq = openSeq): Promise<Pa
     // load card for an open that is still going (a reclaim that worked re-opens on
     // it), the panel for one that is over. The caller applies it, so no path here
     // can leave the card standing over an open that has finished.
-    // same project open for write in another window: offer read-only instead of failing
-    if (e && e.code === "project_open_conflict") {
-      const held = describeHolder(e.owner);
-      const name = tabLabel(tab);
-      // The one case a user can undo without hunting for a dead process: the
-      // window that claimed this project is PROVEN gone and the session it left
-      // behind is still holding the lock. The host decides (only it can read the
-      // kernel's answer); this page asks and reports, then reopens.
-      if (isStale(seq)) return null;
-      if (await provenOrphan(e.project, tab.id)) {
-        if (isStale(seq)) return null;
-        const take = await askConfirm({
-          title: "Take this project back?",
-          text:
-            "The window that held this project is gone, but its session still holds the lock.\n" +
-            (held ? held + "\n" : "") +
-            "Reclaim the project and open it?",
-          ok: "Reclaim",
-          cancel: "Leave it",
-        });
-        if (isStale(seq)) return null;
-        if (!take) {
-          // "Leave it" is an answer about THIS pane too: the project stays held,
-          // and the panel says so instead of the load card that will never land
-          return paneBlocked(
-            tab.id,
-            (held ? held + "\n" : "") +
-              `${name} is still held by a session whose window is gone. Take it back to open it here.`
-          );
-        }
-        if (await reclaimLock(e.project, tab.id)) {
-          if (isStale(seq)) return null;
-          return await openInTab(tab, base, readOnly, seq);
-        }
-        // the host refused the release (reclaimLock reported its words)
-        return paneBlocked(
-          tab.id,
-          (held ? held + "\n" : "") + `${name} is still held, and the host would not release it.`
-        );
-      }
-      if (isStale(seq)) return null;
-      const wantReadOnly = await askConfirm({
-        title: "Already open elsewhere",
-        text:
-          (held ? held + "\n" : "") +
-          "This project is already open in another window.\n" +
-          "Open it read-only? Read-only mode cannot run tasks.",
-        ok: "Open read-only",
-      });
-      if (isStale(seq)) return null;
-      if (wantReadOnly) {
-        return await openInTab(tab, base, true, seq); // retry without the write lock
-      }
-      // declined: not open here, and the pane still has to say who holds it
-      return paneBlocked(
-        tab.id,
-        (held ? held + "\n" : "") + `${name} is open in another window, so it stays closed here.`
-      );
-    }
     // A tab from a store that predates machine tracking claimed a LOCAL session
     // for a file that lives on another machine: the diagnosis above says which
     // machine, and the tab learns it — the claim that follows dials that machine
@@ -975,7 +892,6 @@ async function restoreTabView(tab, base, seq: number): Promise<boolean> {
     project,
     name: tab.name || project.split("/").pop() || project,
     workdir: m.workdir || dirOf(project),
-    read_only: false, // the stream's status frame carries the real claim
   });
   // pages were fetched backward; paint them oldest-first — and move the bar with
   // the records actually painted, yielding between bursts: a synchronous loop
@@ -1074,7 +990,6 @@ function paintCachedView(tab): boolean {
     project: projectPath,
     name: tab.name || projectPath.split("/").pop() || projectPath,
     workdir: (m && m.workdir) || dirOf(projectPath),
-    read_only: false,
   });
   // the older-pill count the tab had when it was last seen; the SSE catch-up may
   // append records but cannot add new older ones
@@ -1125,6 +1040,12 @@ export async function activateTab(tab, readOnly = false) {
   // it live through the next replay is how one project's records landed in the
   // other tab's pane
   closeSSE();
+  // ...and that stream is the one fact that would have confirmed a send in
+  // flight (render-events.ts outbox): the wait ends here, with the message still
+  // in the box. A send belongs to the tab that started it, and this box is about
+  // to belong to another project — the tab it came from replays its own row when
+  // the reader comes back to it.
+  endSend();
   const changed = state.activeTabId !== tab.id;
   state.activeTabId = tab.id;
   if (changed) document.dispatchEvent(new CustomEvent("clutch:tab-state"));

@@ -42,6 +42,7 @@ from urllib.parse import quote
 
 from agent.base import Broadcaster, RunState
 from agent.config import Config
+from agent.core.project_lock import ProjectLock
 from agent.project import create_project, open_project_lazy
 from agent.server import build
 from tests.testsupport import check, http_get, http_post
@@ -301,18 +302,18 @@ def slot_check(tmp: Path) -> None:
     check(state.release_run(str(path)) is True, "the holder gives it back")
     check(state.busy is False and state.run_project is None, "and the slot is empty")
 
-    # run_active: the slot is still tagged with the .clc the session has since
-    # switched away from (`set_project` does not release a live lease, because a
-    # switch while a turn is driven is exactly what must not happen). A claim
-    # from the newly open project would put two drivers on one session.
+    # a switch HANDS THE CLAIM BACK. The claim is the active project's turn and
+    # nothing else, so leaving a project ends the claim on its .clc: an idle
+    # project must never stay locked against every other window.
     check(state.claim_run(str(path), 30.0) == "", "the first project takes the slot")
+    check(ProjectLock.held(str(path)), "and the claim is a lock on that file")
     state.set_project(open_project_lazy(other, workspace=None))
+    check(not ProjectLock.held(str(path)), "switching away hands the claim back")
     check(
-        state.claim_run(str(other), 30.0) == "run_active",
-        "the slot still held for the previous .clc refuses the newly open project",
+        state.claim_run(str(path), 30.0) == "project_mismatch",
+        "and the project it left can no longer be claimed here",
     )
-    check(state.release_run(str(path)) is True, "the old holder gives it back")
-    check(state.claim_run(str(other), 30.0) == "", "and then the new project claims it")
+    check(state.claim_run(str(other), 30.0) == "", "the newly open project claims instead")
     check(state.release_run(str(other)) is True, "then releases it")
 
 

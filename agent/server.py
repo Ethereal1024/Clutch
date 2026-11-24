@@ -176,48 +176,77 @@ def peer_gone(conn) -> bool:
         return True
 
 
-# How often a WATCHING window asks the kernel for its write claim back. Read-only
-# is only ever the fallback for a conflict (ui/js/project.js offers it on a 409
-# and says so), never a mode the user chose, so the moment the other holder is
-# gone the window still looking at the .clc has to become its writer again —
-# without sending a task and without reopening the project (that would repaint
-# its whole transcript). Until something asked, read_only was a one-way latch:
-# the badge, and every run refused behind it, outlived the lock by hours.
+# How often a session asks the kernel what its project's run claim is doing.
 #
-# Nothing here hands a claim BACK. The ask either wins a lock the kernel says is
-# free or is refused by it, and a session no longer releases its claim for being
-# quiet: the host's reconciler ends an orphaned session instead, from the window's
-# own pid (agent/core/lock_reconcile.py). Two seconds is a poll on the KERNEL,
-# not a guess about a window — what decides is the claim, never elapsed time.
-CLAIM_REASK_POLL_S = 2.0
+# The claim is a RUN claim, so it changes without anybody telling this process:
+# the other window's run ends, or a run STARTS in another window on the .clc this
+# one is merely looking at. Three things follow from the answer, and all three
+# have to be said out loud, because no other process can say them here:
+#
+#   * "this project is somebody else's run now" -- `running_elsewhere`, which is
+#     the page's pill and its read-only composer. The session's own "opened as a
+#     viewer" mode is NOT re-announced here: it is fixed at open and the status
+#     frame says it on every connect;
+#   * that run's transcript, which is on disk and in nobody's resident log here
+#     (:func:`LazyEventLog.catch_up`), published row by row to whoever is watching;
+#   * a lease of ours that lapsed while the process lived (a frozen window, a
+#     tunnel that ate the heartbeats). The watchdog frees it here, so the file can
+#     be claimed again instead of waiting for the next claimant to notice.
+#
+# Two seconds is a poll on the KERNEL, not a guess about a window — it is the same
+# question every endpoint that writes asks, asked on a timer because a page has no
+# way to ask it itself.
+CLAIM_WATCH_POLL_S = 2.0
 
 
-def claim_reask_loop(
-    state: RunState, broadcaster: Broadcaster, poll_s: float = CLAIM_REASK_POLL_S
+def claim_watch_loop(
+    state: RunState, broadcaster: Broadcaster, poll_s: float = CLAIM_WATCH_POLL_S
 ) -> None:
-    """Keep a watching window's fallback honest, one kernel question at a time.
+    """Follow the run claim on this session's project and say what it means.
 
-    Only a project that is read-only, actively open here and WATCHED (at least
-    one live stream on its key) is a candidate: with nobody looking there is no
-    editor to hand the claim to, and the first window that reconnects asks again
-    through its open/replay (agent/api/events.py _project_for_sse).
+    Everything announced here is a TRANSITION: the page already knows the state
+    it was told at connect (agent/api/events.py's status frame asks the same
+    question), so a tick that changes nothing publishes nothing. The tracker is
+    dropped when there is no project, so re-opening one re-announces.
 
-    A grant is announced as `project_read_only: False`: the claim is state only
-    this process knows, so the window's badge cannot follow it any other way.
+    Following the other session's run means reading its lines out of the file:
+    it appends in another process, and nothing here would otherwise publish them.
+    The reader is `LazyEventLog.catch_up`, the same catch-up a claimant runs
+    before reasoning over a log somebody else wrote — and it is run only while a
+    foreign run exists AND somebody is watching, so an idle session polls the
+    kernel and touches no file.
     """
+    last: tuple[str, bool] | None = None  # (project, running elsewhere) as last announced
+    following = False  # was a foreign run being followed on the last tick?
     while True:
         time.sleep(poll_s)
         project = state.project
-        if project is None or not project.read_only:
+        if project is None:
+            last = None
+            following = False
             continue
-        if broadcaster.count(str(project.path)) == 0:
-            continue
-        if not state.reclaim_write_claim():
-            continue
-        broadcaster.publish(
-            StateUpdateEvent(key="project_read_only", value=False),
-            project=str(project.path),
-        )
+        path = str(project.path)
+        if last is not None and last[0] != path:
+            following = False  # another project: nothing was being followed here
+        # a lease that lapsed with the process still alive: the turn it stood for
+        # is over, and the page must not keep painting it as running
+        if state.drop_expired_claim():
+            broadcaster.publish(
+                StateUpdateEvent(key="execution_status", value="idle"), project=path
+            )
+        held = state.foreign_claim(path)  # another session is RUNNING it, right now
+        if last is None or last[0] != path or last[1] != held:
+            last = (path, held)
+            broadcaster.publish(
+                StateUpdateEvent(key="running_elsewhere", value=held), project=path
+            )
+        # Read the foreign run's new lines. `held or following`: the tick that
+        # ends a foreign run is also a tick that has not read its tail yet.
+        follow, following = held or following, held
+        if not follow or broadcaster.count(path) == 0:
+            continue  # nobody is looking: the next open or connect catches up
+        for _off, ev in project.log.catch_up():
+            broadcaster.publish(ev, project=path)
 
 
 def _settings_path() -> Path:
@@ -365,13 +394,24 @@ def record_release(state: RunState) -> None:
     check is single-shot even if two signal deliveries race. has_open_turn
     reads the log (not the lease) so it stays correct across shutdown races,
     lease expiry, and the client's release POST arriving before or after.
+
+    And it is the CLAIM holder's record to write, no one else's: a session that
+    is merely looking at the project while another window runs it has no turn of
+    its own to end, and appending here would put a `released` line inside that
+    window's turn. A releasing session that is running writes it before it hands
+    the .clc back (server.py _claim_gone), so the claim is still held here.
     """
     global _release_recorded
     with _release_guard:
         if _release_recorded:
             return
         project = state.project
-        if project is None or not has_open_turn(project):
+        if project is None or not state.owns_claim(str(project.path)):
+            # a run in flight in ANOTHER window is not ours to end: its final is
+            # that window's to write, and this line would land in the middle of
+            # its turn -- after a context this session never read
+            return
+        if not has_open_turn(project):
             return
         _release_recorded = True
         try:
@@ -570,12 +610,13 @@ def main() -> int:
     if claim_is_local:
         claim_watch.watch(args.claim_pid, args.claim_start, _claim_gone)
 
-    # a window that fell back to read-only gets its claim back the moment the
-    # kernel says the .clc is free — by ASKING, never by releasing anything
+    # follow the run claim on this session's project: another window's run makes
+    # the pages here read-only and its transcript arrive as it is written, and
+    # this session's own lapsed lease is freed instead of waiting to be noticed
     threading.Thread(
-        target=claim_reask_loop,
+        target=claim_watch_loop,
         args=(state, broadcaster),
-        name="clutch-claim-reask",
+        name="clutch-claim-watch",
         daemon=True,
     ).start()
     # resolved LLM endpoint, for diagnosing which endpoint a session targets;

@@ -17,8 +17,10 @@ cheap: opening a big .clc over SSH transfers only the header plus the window.
 
 from __future__ import annotations
 
+import bisect
 import json
 import os
+import threading
 from typing import Callable
 
 from ..events import (
@@ -91,6 +93,19 @@ def _parse_with_offsets(raw: bytes, base_rel: int) -> list[tuple[int, Event]]:
     return out
 
 
+def _make_size(path, workspace: Workspace | None) -> Callable[[], int]:
+    """The .clc's CURRENT byte size on the backend the reads go to.
+
+    The reader is opened with a size, and that size is the file's whole truth at
+    that moment. A log that FOLLOWS a file another session is appending to has to
+    ask again (``LazyEventLog.catch_up``), and the answer must come from the same
+    machine the reads do — a remote workspace's size is one cheap metadata call on
+    the far host, never a guess from this one."""
+    if workspace is not None and not isinstance(workspace, LocalWorkspace):
+        return lambda: workspace.size(str(path))
+    return lambda: os.path.getsize(path)
+
+
 def _make_reader(path, workspace: Workspace | None) -> tuple[Callable[[int, int], bytes], int]:
     """Range reader for a .clc over local or remote (exec-bridge) storage;
     returns (read(lo, hi) -> bytes, total_bytes). Remote reads are byte-range
@@ -136,17 +151,23 @@ class LazyEventLog:
         cpr_start: int = 0,
         cpr_line_off: int = 0,
         write_at: Callable[[int, bytes], None] | None = None,
+        size: Callable[[], int] | None = None,
     ) -> None:
         self._path = path
         self._read = read
         self._base = base  # event region start (absolute): the first durable line
         self._writer = writer
         self._write_at = write_at  # in-place header write (None = read-only / in-memory)
+        self._size = size  # current byte size on disk (None = no file behind this log)
         self._cpr_line_off = cpr_line_off  # absolute offset of the header's cpr_start line
         self._file_bytes = total  # grows as events append
         self._events: list[Event] = []
         self._offsets: list[int] = []  # parallel: relative byte offsets (unique)
         self._cpr_start = 0  # window start (relative): the newest compaction line start
+        # One writer's memory + disk update is one step: catch_up() must never
+        # see a half-updated size (it would read the bytes it just accounted for
+        # as somebody else's, or refuse the file it is itself writing).
+        self._io_lock = threading.Lock()
         self._materialize_open(cpr_start)
 
     # ------------------------------------------------------------------ core
@@ -182,21 +203,137 @@ class LazyEventLog:
 
     def append(self, event: Event) -> Event:
         if event.type in DURABLE_TYPES:
-            off = self._file_bytes - self._base
-            self._events.append(event)
-            self._offsets.append(off)
-            # Stamp the record's own offset on it, so the LIVE SSE frame carries
-            # the same {offset, event} shape a replay does (agent/api/events.py).
-            # Without it a window that painted these events as they streamed
-            # cannot tell which of them a later replay has already shown it: the
-            # replay restarts at the window start, so the whole transcript would
-            # be painted a second time. A transient delta is never appended here,
-            # so it keeps its bare frame (and is never replayed).
-            event.log_offset = off  # type: ignore[attr-defined]
-            self._file_bytes += _line_bytes(event)
-            if self._path:
-                append_jsonl(self._path, event_to_json(event), self._writer)
+            with self._io_lock:
+                off = self._file_bytes - self._base
+                self._events.append(event)
+                self._offsets.append(off)
+                # Stamp the record's own offset on it, so the LIVE SSE frame carries
+                # the same {offset, event} shape a replay does (agent/api/events.py).
+                # Without it a window that painted these events as they streamed
+                # cannot tell which of them a later replay has already shown it: the
+                # replay restarts at the window start, so the whole transcript would
+                # be painted a second time. A transient delta is never appended here,
+                # so it keeps its bare frame (and is never replayed).
+                event.log_offset = off  # type: ignore[attr-defined]
+                self._file_bytes += _line_bytes(event)
+                if self._path:
+                    append_jsonl(self._path, event_to_json(event), self._writer)
         return event
+
+    # ------------------------------------------------------------- catch-up
+
+    def catch_up(self) -> list[tuple[int, Event]]:
+        """Take in everything another writer appended since this log was opened.
+
+        The resident log is a SNAPSHOT: at open it holds the window as the file
+        was, and a line this log did not append itself — another window's run, a
+        foreign compaction — is on disk but not here. That is invisible while the
+        log is only READ, and it stops being invisible twice:
+
+          * a session that takes the write claim must not carry on from a stale
+            context: its next step would reason about a conversation with a hole
+            in it, and its next append would land after lines it never saw;
+          * a window FOLLOWING another session's run paints rows as they land,
+            and the only place those rows exist is the file.
+
+        So the claim (RunState.claim_run) and the follower (server.py's claim
+        watch loop) both call this. Returns the pairs added, each stamped with
+        the same ``log_offset`` a live append stamps on its own, so the caller can
+        publish them exactly like its own appends and the renderer's watermark
+        skips what it has painted already.
+
+        A file that SHRANK is no longer this log's file (replaced, truncated by
+        an editor, another conversation written at the same path). Its offsets
+        cannot be continued from, so the log re-reads the file that is there now
+        (_rematerialize) — and the callers that hand offsets out notice the
+        shorter log themselves: api/events.py's `since`-past-the-end check
+        answers the renderer with `resync`, which is what "start the pane over"
+        means everywhere else.
+        """
+        with self._io_lock:
+            if self._size is None:
+                return []  # an in-memory log has no other writer
+            try:
+                size = self._size()
+            except OSError:
+                return []  # the file is gone: nothing to read, and a reload decides
+            if size < self._file_bytes:
+                self._rematerialize(size)
+                return []
+            new = self._read_new(size)
+            self._refresh_cpr_start(size)
+            # a foreign compaction slid the window in place: the records it slid
+            # past leave the resident log (they stay on disk, paged by
+            # /api/history, exactly as at open)
+            if self._cpr_start:
+                keep = bisect.bisect_left(self._offsets, self._cpr_start)
+                if keep:
+                    del self._events[:keep]
+                    del self._offsets[:keep]
+            return new
+
+    def _read_new(self, size: int) -> list[tuple[int, Event]]:
+        """Read and materialize the bytes appended since the last read — whole
+        lines only. A writer mid-append leaves a partial line, and advancing to
+        it would make the next catch_up parse a fragment as a record. Caller
+        holds _io_lock."""
+        if size <= self._file_bytes:
+            return []
+        start = self._file_bytes
+        raw = self._read(start, size)
+        cut = raw.rfind(b"\n")
+        if cut < 0:
+            return []  # nothing but a partial line so far
+        raw = raw[: cut + 1]
+        new = _parse_with_offsets(raw, start - self._base)
+        for off, ev in new:
+            ev.log_offset = off  # type: ignore[attr-defined]
+            self._events.append(ev)
+            self._offsets.append(off)
+        self._file_bytes = start + len(raw)
+        return new
+
+    def _refresh_cpr_start(self, size: int) -> None:
+        """Re-read the header's fixed-width cpr_start line.
+
+        Compaction slides the model window by rewriting that one line IN PLACE
+        (set_cpr_start), so the file's growth says nothing about it: a follower
+        that only watched appends would keep the boundary of its own open time
+        for good, and a claimant would reason over a window the other session had
+        already collapsed. Caller holds _io_lock."""
+        if not self._cpr_line_off:
+            return  # a legacy header has no line to slide (derived at open)
+        from ..project import _CPR_START_LINE_W, _parse_cpr_start, _read_line_at
+
+        line = _read_line_at(self._read, self._cpr_line_off, size, _CPR_START_LINE_W)
+        self._cpr_start = _parse_cpr_start(line)
+
+    def _rematerialize(self, size: int) -> None:
+        """Rebuild from the file that is at this path now (see catch_up): header,
+        event region start, window boundary, and every resident record. What a
+        reload would do, done in place so the callers keep their handle on one
+        object. Caller holds _io_lock."""
+        from ..project import (
+            _CPR_START_LINE_W,
+            _event_region_start,
+            _find_cpr_line,
+            _parse_cpr_start,
+            _read_line_at,
+        )
+
+        head = self._read(0, min(size, 1 << 16))
+        self._base = _event_region_start(head)
+        cpr_line_off = _find_cpr_line(head)
+        self._cpr_line_off = cpr_line_off or 0
+        self._file_bytes = size
+        self._events = []
+        self._offsets = []
+        stored = (
+            _parse_cpr_start(_read_line_at(self._read, cpr_line_off, size, _CPR_START_LINE_W))
+            if cpr_line_off is not None
+            else 0
+        )
+        self._materialize_open(stored)
 
     def events(self) -> list[Event]:
         """All materialized durable events, in file order (the window)."""

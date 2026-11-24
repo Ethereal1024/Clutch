@@ -1,10 +1,16 @@
 """Cross-process write locking for .clc project files.
 
 Every UI window runs its own agent-server process, and two windows must never
-append/rewrite the same .clc concurrently. A window's server holds an exclusive
-lock on each .clc it opens for write; a second server opening the same project
-gets a ProjectOpenConflict (HTTP 409 + code project_open_conflict) and the UI
-offers read-only instead.
+append/rewrite the same .clc concurrently. What the lock arbitrates is the RUN,
+not the open: a session takes it when it claims a turn (RunState.claim_run) and
+hands it back when the turn ends, so many windows may hold the same project OPEN
+and exactly one of them may be RUNNING it. That is the only claim the file needs
+— nothing writes a .clc outside a run (log append, window slide and the release
+record all happen inside one), so an idle project is read by every window and
+claimed by none. A window that tries to RUN a project another one is running is
+refused with `run_active` (HTTP 409) and renders that run's stream read-only
+until it ends; a create over a path another window is running gets a
+ProjectOpenConflict (HTTP 409 + code project_open_conflict).
 
 The lock is an OS-level file lock on <tmp>/clutch-<sha1(path)[:16]>.lock, keyed
 by the .clc's absolute path: an flock on POSIX, a byte-range lock (LockFileEx,
@@ -72,12 +78,12 @@ not conflict with itself: an flock and a byte-range lock are both exclusive even
 between two handles of one process, so acquired handles are cached by path and
 reused.
 
-A lock's lifetime is the ACTIVE project's lifetime: a window holds the write
-lock on at most its currently-open project, so replacing it (RunState.set_project
-/ set_backend, the choke point) hands the old handle back. Nothing else keeps
-that handle, so a lock outliving its project would be unreachable: never
-released, it would lock every other window out of that .clc until this server
-exits.
+A lock's lifetime is the ACTIVE PROJECT'S RUN: a window claims at most its
+currently-open project, and set_project / set_backend / release_run are the
+choke points that hand the handle back. Nothing else keeps that handle, so a
+lock outliving its run would be unreachable: never released, it would keep every
+other window from running that .clc until this server exits — which is exactly
+the "an idle project is read-only everywhere" bug this lifetime fixes.
 """
 
 from __future__ import annotations
@@ -135,12 +141,12 @@ def owner_summary(record: dict | None) -> dict | None:
 
 
 class ProjectOpenConflict(AgentError):
-    """Another process (window) holds the write lock on this .clc."""
+    """Another process (window) is RUNNING this .clc: it holds the write lock."""
 
     def __init__(self, path: str) -> None:
         super().__init__(
             code="project_open_conflict",
-            message="project is open in another window",
+            message="another window is running this project",
             detail=path,
         )
         # The holder's own statement about itself, read at the moment of the

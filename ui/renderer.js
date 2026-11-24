@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 773b86a8f159f344a32ea2e0000d28e8619832ed64e2c3655b2ebbab7f2b75f1
+// sources sha256: 86c39559b41608d3897783e36d6226d9408368b8f0d4b2beeacd5c870dfcb6b1
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -98,10 +98,6 @@
       // rebuild the ~/.clutch/settings.json mirror when it is missing (self-heal)
       ensure: (data) => call("clutchSettings", "ensure", [data])
     });
-    expose("clutchLocks", {
-      list: (slotId) => call("clutchLocks", "list", [slotId]),
-      reclaim: (project, slotId) => call("clutchLocks", "reclaim", [project, slotId])
-    });
     function runArgs(slotOrPayload, maybePayload) {
       if (typeof slotOrPayload === "string") return [slotOrPayload, maybePayload];
       return ["", slotOrPayload];
@@ -156,6 +152,7 @@
     run: $("#run-btn"),
     mode: $("#mode-btn"),
     trust: $("#trust-btn"),
+    claim: $("#claim-pill"),
     status: $("#status"),
     tree: $("#tree"),
     workspace: $("#sb-workdir")
@@ -2465,11 +2462,16 @@
       else setJumpVisible(true);
     }
   }
-  function announceProjectReadOnly(readOnly) {
+  function announce(name, detail) {
     if (typeof document === "undefined" || typeof document.dispatchEvent !== "function") return;
-    const detail = { readOnly: !!readOnly };
-    const ev = typeof CustomEvent === "function" ? new CustomEvent("clutch:project-read-only", { detail }) : { type: "clutch:project-read-only", detail };
+    const ev = typeof CustomEvent === "function" ? new CustomEvent(name, { detail }) : { type: name, detail };
     document.dispatchEvent(ev);
+  }
+  function announceProjectReadOnly(readOnly2) {
+    announce("clutch:project-read-only", { readOnly: !!readOnly2 });
+  }
+  function announceProjectClaim(claimed2) {
+    announce("clutch:project-claim", { claimed: !!claimed2 });
   }
   function renderEvent(ev) {
     const wrap = document.createElement("div");
@@ -2509,7 +2511,8 @@
       }
       case "state_update": {
         if (typeof ev.read_only === "boolean") announceProjectReadOnly(ev.read_only);
-        if (ev.key === "project_read_only") announceProjectReadOnly(!!ev.value);
+        if (typeof ev.running_elsewhere === "boolean") announceProjectClaim(ev.running_elsewhere);
+        if (ev.key === "running_elsewhere") announceProjectClaim(!!ev.value);
         if (ev.key === "execution_status" && ev.value) {
           if (ev.value === "idle" && state.sseRunAtRisk) {
             state.sseRunAtRisk = false;
@@ -2601,30 +2604,50 @@
     if (answer && answer.ok === false) {
       const err = new Error(answer.error || "the host refused the call");
       err.code = answer.code || "host_error";
+      if (answer.owner) err.owner = answer.owner;
       throw err;
     }
     return answer;
   }
+  var pendingTask = "";
+  function beginSend(task) {
+    pendingTask = task;
+    setStatus("sending");
+  }
+  function noteUserMessage(content) {
+    if (!pendingTask || String(content == null ? "" : content).trim() !== pendingTask) return;
+    const task = pendingTask;
+    pendingTask = "";
+    if (els.task.value.trim() === task) {
+      els.task.value = "";
+      els.task.style.height = TASK_BASE_H + "px";
+    }
+    recordSentTask(task);
+    setStatus("running");
+    const slotId = typeof activeSlotId === "function" ? activeSlotId() : "";
+    if (typeof setTabRunning === "function") setTabRunning(slotId, true);
+  }
+  function endSend() {
+    if (sending) setStatus("idle");
+  }
   async function run() {
     const task = els.task.value.trim();
-    if (busy) return;
+    if (busy || sending) return;
     if (!currentProject) return;
     const host = window.clutchRun;
     if (!host || typeof host.run !== "function") {
       notice("this build has no host run loop \u2014 it cannot run a task");
       return;
     }
-    if (task) {
-      els.task.value = "";
-      els.task.style.height = TASK_BASE_H + "px";
-      recordSentTask(task);
-    }
+    if (task) beginSend(task);
     state.followTail = true;
     autoScroll(true);
     const payload = { task: task || "", mode: agentMode, project: currentProject };
     const slotId = typeof activeSlotId === "function" ? activeSlotId() : "";
-    setStatus("running");
-    if (typeof setTabRunning === "function") setTabRunning(slotId, true);
+    if (!task) {
+      setStatus("running");
+      if (typeof setTabRunning === "function") setTabRunning(slotId, true);
+    }
     try {
       driving.add(slotId);
       try {
@@ -2634,6 +2657,7 @@
       }
     } catch (e) {
       const msg = e && e.message || e;
+      pendingTask = "";
       if (e && e.code === "run_active") {
         console.info("[run] already driving this turn:", msg);
         setStatus("running");
@@ -2647,6 +2671,8 @@
       }
       setStatus("idle");
       if (typeof setTabRunning === "function") setTabRunning(slotId, false);
+    } finally {
+      endSend();
     }
   }
   async function stop() {
@@ -2699,6 +2725,12 @@
       const msg = e && e.message || e;
       if (e && e.code === "run_active") {
         console.info("[resume] somebody is already driving this turn:", msg);
+        return;
+      }
+      if (e && e.code === "run_elsewhere") {
+        console.info("[resume] another window is running this turn:", msg);
+        setStatus("idle");
+        if (typeof setTabRunning === "function") setTabRunning(slotId, false);
         return;
       }
       if (!e || !e.code || e.code === "no_session") {
@@ -3226,17 +3258,42 @@
     lastScrollTop = cur;
     setJumpVisible(!state.followTail);
   }, { passive: true });
+  var sending = false;
+  var readOnly = false;
+  var claimed = false;
+  function setReadOnly(on) {
+    const next = !!on;
+    if (next === readOnly) return;
+    readOnly = next;
+    paintControls();
+  }
+  function setClaimed(on) {
+    const next = !!on;
+    if (next === claimed) return;
+    claimed = next;
+    paintControls();
+  }
   function setStatus(state2) {
-    els.status.className = "badge " + (state2 || "idle");
-    els.status.textContent = state2 || "idle";
-    busy = state2 === "running" || state2 === "waiting";
-    document.dispatchEvent(new CustomEvent("clutch:status-changed", { detail: state2 || "idle" }));
-    els.run.textContent = busy ? "\u25A0 Stop" : "\u25B6 Run";
-    els.run.title = busy ? "stop the running task" : "run the task \u2014 Cmd/Ctrl+Enter in the box";
+    const now = state2 || "idle";
+    sending = now === "sending";
+    els.status.className = "badge " + now;
+    els.status.textContent = now;
+    busy = now === "running" || now === "waiting";
+    document.dispatchEvent(new CustomEvent("clutch:status-changed", { detail: now }));
+    paintControls();
+  }
+  function paintControls() {
+    els.run.textContent = sending ? "Sending" : busy ? "\u25A0 Stop" : "\u25B6 Run";
+    els.run.title = sending ? "the message is on its way \u2014 it leaves the box when the session has it" : busy ? "stop the running task" : claimed ? "another window is running this project \u2014 the composer is yours again when that run ends" : readOnly ? "this project is open read-only here \u2014 a run needs a writable open" : "run the task \u2014 Cmd/Ctrl+Enter in the box";
     els.run.classList.toggle("stop-mode", busy);
-    els.run.disabled = busy ? false : !currentProject;
-    els.mode.disabled = busy;
-    els.mode.title = busy ? "A run is in progress; the mode applies to the next run." : "chat: read-only analysis \xB7 work: full access (write/edit/any command). Applies to the next run.";
+    els.run.classList.toggle("sending", sending);
+    els.run.disabled = sending ? true : busy ? false : !currentProject || readOnly || claimed;
+    els.task.readOnly = sending || readOnly || claimed;
+    if (sending) els.task.setAttribute("aria-busy", "true");
+    else els.task.removeAttribute("aria-busy");
+    els.mode.disabled = busy || sending || readOnly || claimed;
+    els.mode.title = busy || sending ? "A run is in progress; the mode applies to the next run." : readOnly || claimed ? "This stream is read-only; the mode applies to a later run." : "chat: read-only analysis \xB7 work: full access (write/edit/any command). Applies to the next run.";
+    if (els.claim) els.claim.classList.toggle("hidden", !claimed);
   }
   var toolCalls = {};
   var toolCallGroups = /* @__PURE__ */ new Map();
@@ -3852,19 +3909,27 @@
     }
   }
   $("#older-pill").addEventListener("click", loadOlder);
-  function showReadOnlyBadge(readOnly) {
-    const badge = document.getElementById("readonly-badge");
-    if (badge) badge.classList.toggle("hidden", !readOnly);
-  }
   document.addEventListener("clutch:project-read-only", (ev) => {
     const d = ev && ev.detail || {};
-    if (d.project && currentProject && d.project !== currentProject) return;
-    showReadOnlyBadge(!!d.readOnly);
+    setReadOnly(!!d.readOnly);
+  });
+  document.addEventListener("clutch:project-claim", (ev) => {
+    const d = ev && ev.detail || {};
+    setClaimed(!!d.claimed);
+  });
+  async function reloadActiveProject() {
+    const tab = activeTab();
+    if (!tab || !tab.path) return;
+    currentProject = "";
+    await activateTab(tab);
+  }
+  var claimPill = $("#claim-pill");
+  if (claimPill) claimPill.addEventListener("click", () => {
+    void reloadActiveProject();
   });
   function setProjectInfo(info) {
     currentProject = info.project || "";
     if (info.workdir) els.workspace.textContent = info.workdir;
-    showReadOnlyBadge(!!info.read_only);
     setStatus("idle");
     document.dispatchEvent(new CustomEvent("clutch:project-info", { detail: { project: currentProject, name: info.name } }));
   }
@@ -3879,7 +3944,8 @@
     }
     closeSSE();
     apply(paneWelcome());
-    showReadOnlyBadge(false);
+    setReadOnly(false);
+    setClaimed(false);
     setStatus("idle");
     document.dispatchEvent(new CustomEvent("clutch:project-info", { detail: { project: "", name: "" } }));
   }
@@ -3892,30 +3958,6 @@
       bits.push(`since ${new Date(owner.since * 1e3).toLocaleString()}`);
     }
     return bits.length ? `Held by ${bits.join(" ")}.` : "";
-  }
-  async function provenOrphan(project, slotId) {
-    const api = window.clutchLocks;
-    if (!project || !api || typeof api.list !== "function") return false;
-    try {
-      const res = await api.list(slotId);
-      const locks = res && res.locks || [];
-      const mine = locks.find((lk) => lk && lk.project === project);
-      return !!(mine && (mine.state === "orphan" || mine.claim_liveness === "dead"));
-    } catch {
-      return false;
-    }
-  }
-  async function reclaimLock(project, slotId) {
-    const api = window.clutchLocks;
-    if (!api || typeof api.reclaim !== "function") return false;
-    try {
-      const res = await api.reclaim(project, slotId);
-      if (res && res.revoked) return true;
-      notice("The host would not release it: " + (res && (res.why || res.error) || "no answer"));
-    } catch (e) {
-      notice("Could not reach the host: " + (e && e.message));
-    }
-    return false;
   }
   function dismissBlocked() {
     const state2 = currentPane();
@@ -3995,7 +4037,7 @@
     apply(paneLoad(id, label, where));
   }
   onPaneChange((pane2) => setOlderOwner(pane2.view === "tab"));
-  async function openInTab(tab, base, readOnly = false, seq = openSeq) {
+  async function openInTab(tab, base, readOnly2 = false, seq = openSeq) {
     const path = tab.path;
     try {
       if (!base) throw noBackend();
@@ -4004,7 +4046,7 @@
       const r = await fetch(base + "/api/project/open", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, ...readOnly ? { read_only: true } : {} }),
+        body: JSON.stringify({ path, ...readOnly2 ? { read_only: true } : {} }),
         signal: ctl.signal
       });
       if (isStale(seq)) return null;
@@ -4056,8 +4098,7 @@
             setProjectInfo({
               project: msg.meta.project,
               name: msg.meta.name,
-              workdir: msg.meta.workdir,
-              read_only: !!msg.meta.read_only
+              workdir: msg.meta.workdir
             });
             started = true;
           } else if (msg.count) {
@@ -4084,49 +4125,6 @@
       return null;
     } catch (e) {
       if (isStale(seq, e)) return null;
-      if (e && e.code === "project_open_conflict") {
-        const held = describeHolder(e.owner);
-        const name = tabLabel(tab);
-        if (isStale(seq)) return null;
-        if (await provenOrphan(e.project, tab.id)) {
-          if (isStale(seq)) return null;
-          const take = await askConfirm({
-            title: "Take this project back?",
-            text: "The window that held this project is gone, but its session still holds the lock.\n" + (held ? held + "\n" : "") + "Reclaim the project and open it?",
-            ok: "Reclaim",
-            cancel: "Leave it"
-          });
-          if (isStale(seq)) return null;
-          if (!take) {
-            return paneBlocked(
-              tab.id,
-              (held ? held + "\n" : "") + `${name} is still held by a session whose window is gone. Take it back to open it here.`
-            );
-          }
-          if (await reclaimLock(e.project, tab.id)) {
-            if (isStale(seq)) return null;
-            return await openInTab(tab, base, readOnly, seq);
-          }
-          return paneBlocked(
-            tab.id,
-            (held ? held + "\n" : "") + `${name} is still held, and the host would not release it.`
-          );
-        }
-        if (isStale(seq)) return null;
-        const wantReadOnly = await askConfirm({
-          title: "Already open elsewhere",
-          text: (held ? held + "\n" : "") + "This project is already open in another window.\nOpen it read-only? Read-only mode cannot run tasks.",
-          ok: "Open read-only"
-        });
-        if (isStale(seq)) return null;
-        if (wantReadOnly) {
-          return await openInTab(tab, base, true, seq);
-        }
-        return paneBlocked(
-          tab.id,
-          (held ? held + "\n" : "") + `${name} is open in another window, so it stays closed here.`
-        );
-      }
       if (e && /not a \.clc/i.test(String(e.message || ""))) {
         const far = await machineMismatch(tab);
         if (isStale(seq)) return null;
@@ -4137,7 +4135,7 @@
           if (moved) {
             adoptBase(moved);
             clearStream();
-            return await openInTab(tab, moved, readOnly, seq);
+            return await openInTab(tab, moved, readOnly2, seq);
           }
           clearStream();
           return paneBlocked(
@@ -4221,9 +4219,7 @@
     setProjectInfo({
       project,
       name: tab.name || project.split("/").pop() || project,
-      workdir: m.workdir || dirOf(project),
-      read_only: false
-      // the stream's status frame carries the real claim
+      workdir: m.workdir || dirOf(project)
     });
     const total = pages.reduce((n, p) => n + p.length, 0);
     let painted = 0;
@@ -4258,13 +4254,12 @@
     setProjectInfo({
       project: projectPath,
       name: tab.name || projectPath.split("/").pop() || projectPath,
-      workdir: m && m.workdir || dirOf(projectPath),
-      read_only: false
+      workdir: m && m.workdir || dirOf(projectPath)
     });
     if (m) setOlderPill(m.older);
     return true;
   }
-  async function activateTab(tab, readOnly = false) {
+  async function activateTab(tab, readOnly2 = false) {
     if (!tab) return;
     const same = tab.id === state.activeTabId;
     if (same && opening && opening.id === tab.id) {
@@ -4287,6 +4282,7 @@
     }
     const seq = supersedeOpen();
     closeSSE();
+    endSend();
     const changed = state.activeTabId !== tab.id;
     state.activeTabId = tab.id;
     if (changed) document.dispatchEvent(new CustomEvent("clutch:tab-state"));
@@ -4317,7 +4313,7 @@
       }
       if (await restoreTabView(tab, base, seq)) return isStale(seq) ? null : paneTab(tab.id);
       if (isStale(seq)) return null;
-      return await openInTab(tab, base, readOnly, seq);
+      return await openInTab(tab, base, readOnly2, seq);
     };
     const mine = { id: tab.id, promise: run2() };
     opening = mine;
@@ -4329,11 +4325,11 @@
     }
     if (next && !isStale(seq)) apply(next);
   }
-  async function openProject(path, readOnly = false) {
+  async function openProject(path, readOnly2 = false) {
     const existing = findTabByPath(path);
     if (existing && existing.id === state.activeTabId && currentProject === path) return;
     const tab = existing || ensureTab(path);
-    await activateTab(tab, readOnly);
+    await activateTab(tab, readOnly2);
   }
   async function createProject(dir, name) {
     const prev = activeTab();
@@ -4484,8 +4480,8 @@
     const openAt = openFoldAt(kids, span, turnEnd);
     const start = turnHead(kids, span, turnEnd);
     const opener = start >= 0 ? kids[start] : null;
-    const claimed = openAt >= 0 || !!(divider && divider.dataset.turnFolded === "1");
-    if (!claimed) {
+    const claimed2 = openAt >= 0 || !!(divider && divider.dataset.turnFolded === "1");
+    if (!claimed2) {
       if (!opener) return;
       if (opener.dataset.turnFolded === "1") return;
     }
@@ -4883,6 +4879,7 @@
       state.lastRecordText = "";
       awaiting.length = 0;
       forgetAnsweredPerm();
+      noteUserMessage(ev.content);
     } else if (ev && ev.type === "final") {
       state.runSettled = true;
     }

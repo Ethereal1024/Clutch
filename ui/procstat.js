@@ -1,9 +1,11 @@
 // GENERATED FILE — do not edit; edit src/host/procstat.ts and run `npm run build:host`.
-// source sha256: d594731285722d64b6574c515914d248cae5b140ae054fbeb423fa500d2fb904
+// source sha256: 6cdcf087da4126a88cd90f64798bc35db23cb8eae89d8edff7f05b108f065f27
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-// Kernel-verified process identity: "is this still the process I recorded?"
+// Kernel-verified process identity: the (pid, start tick, boot) a session claim
+// NAMES, so the machine that records it can answer "is this still the process I
+// recorded?" without trusting a heartbeat.
 //
 // The client's half of agent/core/procstat.py. A .clc's owner record names the
 // window that claimed it as (claim_host, claim_pid, claim_start), and the pid is
@@ -14,19 +16,11 @@ Object.defineProperty(exports, "__esModule", { value: true });
 // (a stranger's pid read as the window, a zombie read as a live one) were made
 // by the bare `kill(pid, 0)` checks this tree used to carry.
 //
-// The CLIENT is the side that needs this, and only for one question: the lock is
-// on some machine, the window that claimed it runs on THIS one, and only this
-// machine's kernel can say whether that window is still there. The answer is
-// relayed to the holding machine as a witness (ui/main.ts locks:reclaim) — the
-// far side can compare it with its record, and nothing else.
-//
-// Verdicts are three-valued on purpose:
-//   "live"    — the recorded process is still running
-//   "dead"    — it exited (or a stranger holds the number now)
-//   "unknown" — this host cannot see that pid's table (a pid from ANOTHER
-//               machine's table, a kernel with no /proc). Doubt is never read as
-//               either verdict: a project is only taken from its owner on a
-//               positive "dead".
+// This side only writes the identity, when it starts a session (this window's
+// process, ui/src/host/supervisor-client.ts). The verdict on it is the holding
+// machine's, and it is read there (agent/core/lock_reconcile.py, through
+// agent/core/procstat.py): a claim is only ever ended on a positive "dead", and
+// a host that cannot see the pid's table says so instead of guessing.
 const fs = require("fs");
 // /proc/<pid>/stat, field numbers (1-based): 1 pid, 2 comm, 3 state, ... 22
 // starttime. Everything before state is "<pid> (<comm>) ", and comm may contain
@@ -66,7 +60,7 @@ function starttime(pid) {
 }
 // {pid, start, boot} for a live-or-recently-dead pid, or null when the pid is
 // not a process this host can name. `start` is "" on a host without /proc: the
-// record then compares pids only, which is weaker and says so (see state()).
+// record then compares pids only, which is weaker and says so.
 function identity(pid) {
     if (!Number.isInteger(pid) || pid <= 0)
         return null;
@@ -75,43 +69,4 @@ function identity(pid) {
         return null;
     return { pid, start: tick || "", boot: bootId() };
 }
-// The kernel's answer for (pid, start) on boot `boot`. An empty `start` is a
-// caller with no tick (a record written on a host without /proc): the pid alone
-// is then the only evidence, and the verdict says nothing about how weak it is —
-// so a "live" with no tick is the frail fact it looks like.
-function state(pid, started = "", boot = "") {
-    if (!Number.isInteger(pid) || pid <= 0)
-        return "dead";
-    if (process.platform === "win32") {
-        // No /proc: ask the kernel by name. ESRCH is gone; EPERM is a process this
-        // user may not open, which still exists.
-        try {
-            process.kill(pid, 0);
-            return "live";
-        }
-        catch (e) {
-            return e && e.code === "EPERM" ? "live" : "dead";
-        }
-    }
-    const fields = statFields(pid);
-    if (fields === null) {
-        // No /proc entry here. On a host WITH /proc that is "gone"; without one
-        // (macOS) this module cannot tell, and says so.
-        return fs.existsSync("/proc/self") ? "dead" : "unknown";
-    }
-    if (boot) {
-        const mine = bootId();
-        // a tick recorded on another boot names a different instant: this pid's
-        // do-not-match is proof, not doubt
-        if (mine && boot !== mine)
-            return "dead";
-    }
-    if (fields[0] === "Z" || fields[0] === "X" || fields[0] === "x") {
-        return "dead"; // exited; only waiting to be reaped
-    }
-    if (started && fields.length > STARTTIME_INDEX && fields[STARTTIME_INDEX] !== started) {
-        return "dead"; // the number was recycled: another process holds it now
-    }
-    return "live";
-}
-module.exports = { bootId, starttime, identity, state };
+module.exports = { bootId, starttime, identity };

@@ -30,7 +30,8 @@
 //     gives it back — with the project it is running in and a ttl, in that order.
 // 15. An open turn KEEPS the slot (claim, no release) until the log holds no
 //     open turn again.
-// 16. 409 run_active stops the work before it writes anything.
+// 16. The session's 409 (another window holds the claim) stops the work before it
+//     writes anything, and reaches the page as `run_elsewhere`.
 // 17. A session without /api/run/state (404) is remembered: warned about once,
 //     asked once, and the turn runs anyway.
 // 18. A release the session disowns ("I was not holding it") is said once.
@@ -794,9 +795,12 @@ async function main() {
     }
   }
 
-  // 16. run_active stops the work before it writes. Two windows driving one turn
-  //     would write it twice, so the refusal is the one answer the host may not
-  //     ignore: it is raised, not warned about.
+  // 16. A run that is somebody else's stops the work before it writes. Two
+  //     windows driving one turn would write it twice, so the refusal is the one
+  //     answer the host may not ignore: it is raised, not warned about. The wire
+  //     says `run_active` (the session's own word for "the claim is taken"); the
+  //     host gives it `run_elsewhere` at its edge, because `run_active` there
+  //     means this window's own turn (ui/src/host/main.ts refuseIfDriving).
   {
     const restore = stubEnv("test-model", "chat", "");
     const fake = fakeSession({
@@ -816,8 +820,8 @@ async function main() {
       } catch (e) {
         err = e;
       }
-      check(Boolean(err), "start is refused while another driver holds the slot");
-      check(err && err.code === "run_active", `the refusal carries code run_active (got ${err && err.code})`);
+      check(Boolean(err), "start is refused while another window's run holds the slot");
+      check(err && err.code === "run_elsewhere", `the refusal carries code run_elsewhere (got ${err && err.code})`);
       check(
         err && /another window/i.test(err.message),
         `and says who is driving it: ${err && err.message}`

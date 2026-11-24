@@ -186,14 +186,14 @@ def create_route(base: str) -> None:
     check(fresh.is_file(), "the file is on disk")
     created = fresh.read_bytes()
 
-    # the same session creating the project it ALREADY has open: the lock comes
-    # back reused (one window, one lock), so the answer is still the existence
-    # one — and it must leave that lock HELD. A refusal that released it would
-    # hand a live project's write lock to the next window that asked.
+    # asking again for the file that was just created: still the existence
+    # answer, and still nothing written. A create never leaves a claim behind —
+    # the lock belongs to a RUN, so the project it made is idle and free for any
+    # window to pick up.
     st, got = _post(base, "/api/project/new", {"dir": str(tmp), "name": "fresh"})
-    check(st == 409 and got.get("code") == "project_exists", f"a path this session holds is still refused: {got}")
+    check(st == 409 and got.get("code") == "project_exists", f"the file it just made is still refused: {got}")
     check(fresh.read_bytes() == created, "and the open project was not truncated")
-    check(ProjectLock.inspect(str(fresh))["held"], "the refusal left the live project's write lock in place")
+    check(not ProjectLock.inspect(str(fresh))["held"], "the refusal left no claim on the file")
 
 
 def stat_remote_transport() -> None:

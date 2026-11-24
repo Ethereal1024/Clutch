@@ -74,6 +74,10 @@ def open_server(tmp: Path, name: str, read_only: bool = False):
         project = open_project_lazy(path, workspace=None, read_only=True)
         check(project.read_only, "the read-only fixture really is read-only")
     state.set_project(project)
+    if not read_only:
+        # the fixture drives a TURN (append + exec), and a turn is the only writer
+        # of a .clc: an idle session owns no claim and may not write one
+        check(state.claim_run(str(project.path)) == "", "the fixture session holds the run claim")
     return f"http://127.0.0.1:{cfg.port}", broadcaster, state, project, srv
 
 

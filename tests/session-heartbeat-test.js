@@ -201,29 +201,19 @@ const { startSupervisorHeartbeat } = require(path.join(ROOT, "ui", "supervisor-c
 
   // ---- 5) EVERY claim names the window that made it, local or tunnelled ----
   // The claim is (host, pid, start tick): host is the machine the window runs
-  // on, and that machine's kernel is the ONLY one that can say later whether the
-  // window is still there. Nothing else can free a claim — a record that names no
-  // window is "unclaimed", and one that names another machine is freed only on
-  // that machine's witness — so the claim travels with every session start, and
-  // this client is the one place that attaches it (ui/supervisor-client.js). The
-  // reported 5-minute "open read-only" after a crash is exactly the case a claim
-  // that named nothing leaves behind.
+  // on, and that identity is the ONLY thing that can say later whether the window
+  // is still there — a heartbeat cannot, because a frozen window sends none. So
+  // the claim travels with every session start, and this client is the one place
+  // that attaches it (ui/supervisor-client.js). The reported 5-minute "open
+  // read-only" after a crash is exactly the case a claim that named nothing
+  // leaves behind: "unclaimed" is a state nothing may end.
   const os = require("os");
-  const { spawn } = require("child_process");
   const procstat = require(path.join(ROOT, "ui", "procstat.js"));
-  const { supervisorSessionStart, supervisorLocks, supervisorLockReclaim } = require(
-    path.join(ROOT, "ui", "supervisor-client.js"),
-  );
+  const { supervisorSessionStart } = require(path.join(ROOT, "ui", "supervisor-client.js"));
   const sent = [];
   global.fetch = async (url, opts) => {
     const body = opts && opts.body ? JSON.parse(opts.body) : null;
     sent.push({ url, body });
-    if (String(url).endsWith("/api/locks")) {
-      return { ok: true, status: 200, json: async () => ({ locks: [{ project: "/tmp/a.clc", state: "orphan" }] }) };
-    }
-    if (String(url).endsWith("/api/locks/reclaim")) {
-      return { ok: true, status: 200, json: async () => ({ project: "/tmp/a.clc", revoked: true, why: "terminated" }) };
-    }
     return { ok: true, status: 200, json: async () => ({ session_id: "s9", port: 31009 }) };
   };
 
@@ -249,71 +239,6 @@ const { startSupervisorHeartbeat } = require(path.join(ROOT, "ui", "supervisor-c
   await supervisorSessionStart("http://127.0.0.1:8890", undefined, undefined, { claim_pid: 4242 });
   check(sent.at(-1).body.claim_pid === process.pid,
     "a caller cannot name somebody else's process as the claim: the client is the authority for what it is");
-
-  // ---- 5b) whose claim THIS machine may judge ------------------------------
-  // The host that holds a lock can only read its own process table, so a claim
-  // that names another machine comes back with no verdict from it. The client
-  // adds the one its own kernel can give, and only for a claim that names this
-  // host — that verdict is also the witness a far host accepts.
-  const { annotateClaimLiveness, claimWitness } = require(path.join(ROOT, "ui", "supervisor-client.js"));
-  const elsewhere = { project: "/tmp/b.clc", state: "remote_claim",
-    owner: { claim_host: "some-other-host", claim_pid: 4242, claim_start: "1" } };
-  check(!("claim_liveness" in annotateClaimLiveness(elsewhere)),
-    "a claim on another machine gets no verdict here: this kernel has never heard of that pid");
-  check(claimWitness([annotateClaimLiveness(elsewhere)], "/tmp/b.clc") === null,
-    "and it can never become this machine's witness");
-
-  const deadPid = await new Promise((resolve) => {
-    const c = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
-    c.on("exit", () => resolve(c.pid));
-  });
-  const ours = { project: "/tmp/c.clc", state: "remote_claim",
-    owner: { claim_host: os.hostname(), claim_pid: deadPid } };
-  const judged = annotateClaimLiveness(ours);
-  check(judged.claim_liveness === "dead",
-    "a claim on THIS machine is answered by this kernel — the window it names is gone");
-  const witness = claimWitness([judged], "/tmp/c.clc");
-  check(!!witness && witness.host === os.hostname() && witness.pid === deadPid,
-    "and a dead one becomes the witness the far side compares with its own record");
-  check(claimWitness([{ project: "/tmp/d.clc", state: "remote_claim",
-    owner: { claim_host: os.hostname(), claim_pid: process.pid } }], "/tmp/d.clc") === null,
-    "a LIVE window's claim yields no witness: this page cannot take a project from a window that is running");
-  // The record's `boot_id` is the boot of the session that WROTE the lock (the
-  // far host's), never the claimant's. Feeding it to the verdict made every claim
-  // made through a tunnel compare a tick read on THIS kernel against a stranger's
-  // boot and answer "dead" — a positive proof about a window that is running,
-  // which is the one wrong answer that lets a page steal a live project.
-  const liveMine = { project: "/tmp/e.clc", state: "remote_claim",
-    owner: { boot_id: "00000000-0000-0000-0000-000000000000", claim: "window",
-      claim_host: os.hostname(), claim_pid: process.pid, host: "some-far-host", pid: 4242 } };
-  const liveJudged = annotateClaimLiveness(liveMine);
-  check(liveJudged.claim_liveness === "live",
-    "a LIVE window here stays live though the record's boot id belongs to the far host that wrote it");
-  check(claimWitness([liveJudged], "/tmp/e.clc") === null,
-    "so no witness is built for it, and its project is never offered for takeover");
-  check(claimWitness([judged], "/tmp/other.clc") === null,
-    "nor does a witness about one project apply to another");
-
-  // ---- 6) the lock list/reclaim client: data in, verdict out ----
-  const listed = await supervisorLocks("http://127.0.0.1:8890");
-  check(listed.locks.length === 1 && listed.locks[0].state === "orphan",
-    "the host's lock list comes back as data (every state, not just the actionable one)");
-  const verdict = await supervisorLockReclaim("http://127.0.0.1:8890", "/tmp/a.clc");
-  check(verdict.revoked === true && verdict.why === "terminated",
-    "and a reclaim returns the HOST's verdict, not an assumption");
-  check(sent.at(-1).body.project === "/tmp/a.clc", "the reclaim names the project it is about");
-  check(!("witness" in sent.at(-1).body),
-    "a reclaim with no proof this machine can offer carries no witness, rather than an empty one");
-  const attested = await supervisorLockReclaim("http://127.0.0.1:8890", "/tmp/a.clc", witness);
-  check(attested.revoked === true && JSON.stringify(sent.at(-1).body.witness) === JSON.stringify(witness),
-    "and the claim this machine CAN prove goes out as its witness, field for field as read");
-
-  global.fetch = async () => {
-    throw new Error("Failed to fetch");
-  };
-  const unreachable = await supervisorLocks("http://127.0.0.1:8890");
-  check(!!unreachable.error && !unreachable.locks,
-    "a host that cannot be reached yields an error, never an empty lock list that looks like proof");
 
   Date.now = realNow;
   summary("session-heartbeat");

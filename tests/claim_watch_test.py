@@ -246,6 +246,11 @@ def main() -> int:
             st, body = http_post(f"{sess}/api/project/new", {"dir": tdir, "name": "crashed"})
             check(st == 200, "the claimed session opens a project")
             clc = json.loads(body)["project"]
+            # Opening takes nothing: the lock is a RUN claim, so an idle project
+            # is free for another window to pick up.
+            check(ProjectLock.inspect(clc)["held"] is False, "and an idle project holds nothing")
+            st, body = http_post(f"{sess}/api/run/state", {"busy": True, "project": clc})
+            check(st == 200, "the claimed session starts its turn")
             check(ProjectLock.inspect(clc)["held"] is True, "and holds the .clc's write lock")
             owner = ProjectLock.owner(clc) or {}
             check(owner.get("claim_pid") == claimant.pid,

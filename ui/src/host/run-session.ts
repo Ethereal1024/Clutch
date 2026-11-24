@@ -300,9 +300,13 @@ async function createSessionRun({
     if (r.ok) return parsed;
     const err = new Error(
       `POST /api/run/state answered ${r.status}: ${(parsed && parsed.error) || r.statusText}`
-    ) as Error & { status?: number; code?: string | null };
+    ) as Error & { status?: number; code?: string | null; owner?: any };
     err.status = r.status;
     err.code = (parsed && parsed.code) || null;
+    // a refusal about somebody ELSE carries their own statement about themselves
+    // (pid, session, since): the page names them, and knows which session's run
+    // to wait for
+    err.owner = (parsed && parsed.owner) || null;
     throw err;
   }
 
@@ -330,8 +334,12 @@ async function createSessionRun({
     if (typeof leaseTimer.unref === "function") leaseTimer.unref();
   }
 
-  // Claim the slot (or renew the claim we already hold). Throws only when the
-  // slot is somebody else's: that is the one answer the work must not ignore.
+  // Claim the run (or renew the claim we already hold). Throws only when the RUN
+  // is somebody else's — the one answer the work must not ignore. That refusal
+  // is `run_elsewhere`, never `run_active`: `run_active` already means "this
+  // window is driving this turn" (ui/src/host/main.ts refuseIfDriving), which
+  // the page treats as a fact and stays on, while this one is another window's
+  // run on the same .clc, which the page must show as read-only instead.
   async function hold() {
     if (leaseUnsupported) return;
     let answer;
@@ -339,12 +347,14 @@ async function createSessionRun({
       answer = await leasePost(true);
     } catch (e) {
       if (e && e.code === "run_active") {
-        const err = new Error(`${e.message} — another window is driving this turn`) as Error & {
+        const err = new Error("another window is running this project") as Error & {
           status?: number;
           code?: string;
+          owner?: any;
         };
         err.status = e.status;
-        err.code = "run_active";
+        err.code = "run_elsewhere";
+        err.owner = e.owner || null;
         throw err;
       }
       leaseTrouble(e);

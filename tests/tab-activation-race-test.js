@@ -70,7 +70,7 @@ const { fnBody } = slicer(project);
   // A failed open does not paint: it RETURNS the state the pane must show, and
   // the activation applies that once, at its end. This is why no failure path can
   // leave a load card standing over an open that is over.
-  check((open.match(/return paneBlocked\(/g) || []).length >= 4 &&
+  check(/catch \(e\) \{[\s\S]*return paneBlocked\(/.test(open) &&
         !/\bfinally\b/.test(open),
     "a failed open hands its state back instead of painting it where it stands");
 }

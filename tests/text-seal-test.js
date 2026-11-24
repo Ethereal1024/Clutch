@@ -89,6 +89,9 @@ global.setRetryNote = () => {};
 global.closePerm = () => {};
 global.forgetAnsweredPerm = () => {};
 global.pendingPerm = null;
+// the send outbox (js/render-events.ts noteUserMessage): what a delivered task
+// does to the composer, which is not this runner's subject
+global.noteUserMessage = () => {};
 global.appendCompletion = () => {};
 global.refreshTree = () => {};
 global.autoFoldTurn = () => {};

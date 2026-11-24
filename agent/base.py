@@ -16,6 +16,7 @@ dependency on the HTTP layer.
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
@@ -24,8 +25,8 @@ from typing import Any
 
 from .config import Config
 from .core.permission import PermissionGate
-from .core.project_lock import LockHandle, ProjectLock, ProjectOpenConflict
-from .project import Project, open_project_lazy
+from .core.project_lock import LockHandle, ProjectLock
+from .project import Project
 from .tools.registry import ToolRegistry, build_tools
 from .tools.workspace import LocalWorkspace, RemoteWorkspace, Workspace
 
@@ -152,6 +153,12 @@ class RunState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self._busy = False
+        # the write claim: the kernel lock on the .clc this session is RUNNING.
+        # None = idle = the file is open here but not claimed, so another window
+        # may take it (and this one may take it back). One claim at a time,
+        # because a session drives at most one turn.
+        self._claim_lock: LockHandle | None = None
+        self._claim_path: str | None = None
         # monotonic deadline of the current lease; 0.0 = no claim is held (a
         # claim ALWAYS carries one: api/run_state.claim_run sets it and the
         # release paths clear it, so there is no such thing as a deadline-less
@@ -202,60 +209,160 @@ class RunState:
         The ONE answer five other places read: `/api/health`'s in_flight
         (api/routing), the status frame a reconnecting window is handed
         (api/events), the project-switch and rollback gates (api/project,
-        api/workspace), the write-claim retry (below) and the release handler
-        (server.py install_release_handler). It is therefore answered WITHOUT
-        the lock: the release handler reads it from a signal path that holds no
-        lock, and it must not be able to wait behind a run that is exactly what
-        it is asking about.
+        api/workspace), and the release handler (server.py
+        install_release_handler). It is therefore answered WITHOUT the lock: the
+        release handler reads it from a signal path that holds no lock, and it
+        must not be able to wait behind a run that is exactly what it is asking
+        about.
 
         Expiry is lazy and needs no timer: every claim carries a monotonic
         deadline (claim_run), and the first reader past it sees False. There is
         no deadline-less hold: the backend loop that used to set the flag
         without one was removed in P4, and a lease whose holder cannot renew is
-        exactly what this shape is for.
+        exactly what this shape is for. The kernel lock the claim stands on is
+        dropped by the same expiry (server.py's claim watch loop calls
+        drop_expired_claim), because a dead host cannot hand back anything.
         """
         return self._busy and time.monotonic() < self.run_lease_until
+
+    def owns_claim(self, path: str | None = None) -> bool:
+        """Does THIS session hold the .clc's write claim right now?
+
+        The claim is the RUN's, not the open project's: this is the question
+        every writer asks before it touches the file (api/log.py, api/exec.py),
+        and the answer is the kernel's lock plus this session's own record of
+        taking it. With ``path``: is the claim on THAT file (abspath-compared,
+        so `/x/./a.clc` and `/x/a.clc` are one file)."""
+        with self.lock:
+            if self._claim_lock is None or self._claim_lock.released:
+                return False
+            return path is None or self._claim_path == os.path.abspath(path)
+
+    def foreign_claim(self, path: str | None = None) -> bool:
+        """Is ANOTHER session running a turn on this .clc?
+
+        Asked of the KERNEL (a trial lock, so a crashed holder left nothing to
+        trust) and answered against our own claim: a lock this session holds is
+        not foreign, and neither is the zero-length window inside claim_run
+        where the kernel lock is already taken — both facts move under
+        self.lock, so no reader can see half of one.
+
+        This is what "read-only" means now. It is not a property of the OPEN (an
+        idle project is open everywhere and claimed nowhere); it is a fact about
+        the file at one moment, it changes without anybody telling this session,
+        and whoever shows it to the user has to watch it (server.py
+        claim_watch_loop)."""
+        with self.lock:
+            target = path if path is not None else (str(self.project.path) if self.project else None)
+            if target is None:
+                return False
+            mine = (
+                self._claim_lock is not None
+                and not self._claim_lock.released
+                and self._claim_path == os.path.abspath(target)
+            )
+        if mine:
+            return False
+        return bool(ProjectLock.inspect(str(target))["held"])
 
     def claim_run(self, project: str, ttl_s: float = LEASE_DEFAULT_S) -> str:
         """Claim or renew the run slot for `project`; answer "" or a refusal code.
 
         This is the HOST's half of the flag (POST /api/run/state, api/run_state):
         the loop that drives a turn lives in the client, so the client is the
-        only one who can say the turn is still alive.
+        only one who can say the turn is still alive. And because the loop writes
+        the file, the claim is also the .clc's WRITE CLAIM — the OS lock is taken
+        here, so exactly one session can be appending at a time and the kernel,
+        not a promise, decides which one.
 
         Refusals, each naming a different problem:
           "no_project"       nothing is open to run in
           "project_mismatch" this session has another .clc open
-          "run_active"       the slot is another window's host: two drivers on
-                             one turn would write it twice
+          "read_only"        this session opened it in "never write" mode
+          "run_active"       another session holds the file: two drivers on one
+                             turn would write it twice
         """
+        key = os.path.abspath(project)
         with self.lock:
             active = self.project
             if active is None:
                 return "no_project"
-            if str(active.path) != project:
+            if os.path.abspath(str(active.path)) != key:
                 return "project_mismatch"
-            if self.busy and self.run_project != project:
+            if active.read_only:
+                return "read_only"
+            if self._claim_lock is not None and not self.busy:
+                # the lease lapsed: the turn it stood for is over, and the lock
+                # it left behind is ours to hand back (a dead host cannot)
+                self._drop_claim_locked()
+            if self._claim_path == key and self._claim_lock is not None:
+                self._busy = True  # a renewal: the same claim, a fresh deadline
+                self.run_lease_until = time.monotonic() + ttl_s
+                self.run_project = project
+                return ""
+            lock = ProjectLock.acquire(key)
+            if lock is None:
                 return "run_active"
+            self._claim_lock = lock
+            self._claim_path = key
             self._busy = True
             self.run_project = project
             self.run_lease_until = time.monotonic() + ttl_s
+            # The resident log is a snapshot of the file as this session opened
+            # it, and the session that just handed the claim over may have
+            # appended to it. Read those lines now, or this turn would reason
+            # about a conversation with a hole in it AND append after lines it
+            # never saw. Under the claim, so nobody can append behind the read.
+            active.log.catch_up()
         return ""
 
     def release_run(self, project: str) -> bool:
-        """Give the slot back if `project`'s host holds it; say whether it did.
+        """Give the claim back if `project`'s host holds it; say whether it did.
 
-        The project and its write lock stay (a follow-up turn continues the same
-        .clc); only the "in flight" claim goes. A release from a non-holder is not an error — Stop can be pressed
-        twice, or after the lease already expired by itself — it answers False.
+        The project stays open (a follow-up turn continues the same .clc) and
+        becomes unclaimed, which is what lets ANY window take it — this one
+        included — without a reload: an idle project is claimed by nobody. A
+        release from a non-holder is not an error — Stop can be pressed twice, or
+        after the lease already expired by itself — it answers False.
         """
+        key = os.path.abspath(project)
         with self.lock:
-            if not self.busy or self.run_project != project:
+            if self._claim_path != key or self._claim_lock is None:
                 return False
-            self._busy = False
-            self.run_lease_until = 0.0
-            self.run_project = None
+            self._drop_claim_locked()
             return True
+
+    def drop_expired_claim(self) -> bool:
+        """Hand the claim back when its lease lapsed and its host never did.
+
+        The lease is the host's promise that it is still driving; the kernel lock
+        is the FILE's guarantee that one session writes. A host that dies holding
+        both leaves the lock with nothing behind it — and the kernel cannot see a
+        lease — so this process is the only one that can free the file. Called by
+        the claim watch loop (server.py), which also says the run is over to the
+        windows this session is streaming to.
+
+        Returns True when it dropped a claim (the caller has something to
+        announce)."""
+        with self.lock:
+            if self._claim_lock is None or self.busy:
+                return False
+            return self._drop_claim_locked()
+
+    def _drop_claim_locked(self) -> bool:
+        """Give the write claim back. Caller holds self.lock.
+
+        Releasing the kernel lock inside self.lock is a close(2) and an flock —
+        no callback, no blocking on another lock — and it keeps "the file is
+        free" and "this session says it is idle" from being observable apart."""
+        lock = self._claim_lock
+        self._claim_lock = None
+        self._claim_path = None
+        self._busy = False
+        self.run_lease_until = 0.0
+        self.run_project = None
+        ProjectLock.release(lock)
+        return lock is not None
 
     def build_workspace(self, root: str) -> Workspace:
         """Workspace factory: RemoteWorkspace in ssh mode, LocalWorkspace otherwise."""
@@ -275,28 +382,30 @@ class RunState:
 
     def set_backend(self, mode: str, bridge_url: str | None = None, remote_root: str | None = None) -> None:
         """Switch the SSH-degradation backend (mode: "local" | "ssh"). A mode
-        switch invalidates the open project's workspace (paths differ per mode)."""
+        switch invalidates the open project's workspace (paths differ per mode),
+        and with the project goes the claim that was taken on it."""
         with self.lock:
+            self._drop_claim_locked()
             self.backend_mode = mode
             self.bridge_url = bridge_url
             self.remote_root = remote_root
             # a mode switch invalidates any previously-opened project's workspace
-            prev = self.project
             self.project = None
             self.workspace = None
-            self._retire_lock(prev)
 
     def set_project(self, project: Project, workspace: Workspace | None = None) -> Workspace:
-        """Make `project` the active one, retiring the project it REPLACES.
+        """Make `project` the active one.
 
-        The retire is here, at the single choke point where a project stops being
-        the active one, so no caller can forget it: a window holds the write lock
-        on at most its currently-open project, and a lock outliving its project
-        would be unreachable — no project keeps the handle, so nothing could ever
-        hand it back and every other window would be locked out of that .clc
-        until this server exits."""
+        A claim belongs to the .clc it was taken on, so replacing that project
+        hands it back here — the one choke point where a project stops being the
+        active one, so no caller can forget it. A claim outliving its project
+        would be unreachable: nothing keeps the handle, so nothing could ever
+        release it and every other window would be locked out of that .clc until
+        this server exits. (A switch during a run cannot happen: every opener
+        refuses while busy. This is the invariant, not the gate.)"""
         with self.lock:
-            prev = self.project
+            if self._claim_path is not None and self._claim_path != os.path.abspath(str(project.path)):
+                self._drop_claim_locked()
             self.project = project
             if workspace is None:
                 workspace = self.build_workspace(str(project.workdir))
@@ -305,67 +414,7 @@ class RunState:
             # id arriving after a project switch is not the same call, and its
             # memo would describe files this project never had
             self.exec_answered.clear()
-            self._retire_lock(prev, keep=project.lock)
             return self.workspace
-
-    def reclaim_write_claim(self) -> bool:
-        """Open the ACTIVE project FOR WRITE again, once its lock is free.
-
-        The other half of the same invariant, and now the only way a read-only
-        window gets its claim back: the release path that watched for silence is
-        gone (a session no longer hands its lock back for being quiet — the
-        host's reconciler ends an orphaned session instead, see
-        agent/core/lock_reconcile.py), so nothing but this may re-take one.
-        Read-only is only ever the FALLBACK for a conflict (ui/js/project.js
-        says so when it offers it), never a mode the user chose: the moment the
-        window that held the .clc is gone — it quit, its client died, its
-        tunnel was torn down, its session was reaped — the window still looking
-        at the file must be able to become its writer again, without re-opening
-        the project (that would repaint its whole transcript) and without first
-        sending a task.
-
-        Until this existed, read_only was a one-way latch: a window that fell
-        back once kept the badge (and the session kept refusing to append) long
-        after the kernel said the file was free. That is the reported "ghost
-        read-only", and it is why freeing the lock was not enough.
-
-        Never while busy (the run's claim has to stand) and never over another
-        holder (the kernel still refuses). Returns True when the claim is now
-        this window's.
-        """
-        with self.lock:
-            if self.busy:
-                return False
-            project, ws = self.project, self.workspace
-        if project is None or not project.read_only or project.lock is not None:
-            return False
-        try:
-            fresh = open_project_lazy(project.path, workspace=ws)
-        except (ProjectOpenConflict, OSError, ValueError):
-            return False
-        with self.lock:
-            if self.project is not project:
-                # a window (or a run) replaced the project while this one was
-                # being opened: the claim it just took belongs to nobody.
-                ProjectLock.release(fresh.lock)
-                fresh.lock = None
-                return False
-            self.project = fresh
-            self.workspace = ws
-        return True
-
-    def _retire_lock(self, prev: Project | None, keep: LockHandle | None = None) -> None:
-        """Hand back the write lock of a project that stops being the active one.
-
-        `keep` is the handle the INCOMING project already owns: re-opening the
-        SAME .clc for write reuses the held lock (see ProjectLock.acquire), and
-        releasing it would unlock the file this window just (re)claimed. A
-        read-only open passes no keep — it gives up the write claim on purpose —
-        and so does a project replaced by another path."""
-        if prev is None or prev.lock is None or prev.lock is keep:
-            return
-        ProjectLock.release(prev.lock)
-        prev.lock = None
 
 class BaseServer(ABC):
     """Shared assembly contract. Subclasses implement build_workspace only."""

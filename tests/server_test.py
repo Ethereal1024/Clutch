@@ -37,12 +37,16 @@ from tests.testsupport import check, http_get, http_post, ui_source
 
 
 @contextlib.contextmanager
-def _lock_held_elsewhere(clc_path: str, lock_path: str):
+def _lock_held_elsewhere(clc_path: str, lock_path: str, record: bool = False):
     """Another window (process) holding this .clc's write lock, while the block
     runs. POSIX: a flock on a fresh fd of the lock file. Windows: the product
     locks a byte range (LockFileEx), which no in-process trick can imitate, so a
-    real holder PROCESS is the only faithful stand-in."""
-    if fcntl is not None:
+    real holder PROCESS is the only faithful stand-in.
+
+    ``record=True`` always uses that holder process, on every platform: a bare
+    flock takes the lock but writes no OWNER RECORD, and a test of the 409's
+    ``owner`` report needs a holder that says who it is."""
+    if fcntl is not None and not record:
         with open(lock_path, "a+") as other:
             fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
             try:
@@ -633,13 +637,20 @@ def _sse_since_offset(base_url, lclc, clc, comp_off) -> None:
     check(st == 200, "switched back to the demo project after the since= checks")
 
 
-def _broadcaster_bounded(broadcaster) -> None:
+def _broadcaster_bounded() -> None:
     # A subscriber that stops draining must not become an unbounded buffer: every
     # durable frame is in the log the client can re-read, so the honest answer is
     # to end its stream (LAGGED), not to hold the run's whole output in memory for
     # a window that is not reading.
+    #
+    # Its OWN broadcaster, not the server's: the bound is a property of the
+    # class, and the frames below are stand-ins (a raw dict is a page event, not
+    # an Event) that a live SSE stream would rightly choke on. Publishing them
+    # into the serving one races the reader threads the earlier sections left
+    # behind and turns this unit check into six tracebacks from those threads.
     from agent.base import LAGGED, SUBSCRIBER_QUEUE_MAX
 
+    broadcaster = Broadcaster()
     q = broadcaster.subscribe()
     try:
         for i in range(SUBSCRIBER_QUEUE_MAX):
@@ -887,6 +898,10 @@ def _connecting_stream_status(base_url, clc, state, broadcaster) -> None:
     # above uses) and the block waits for its own subscribers to be gone
     # before handing the broadcaster back to the isolation section.
     def first_status(url: str) -> str | None:
+        frame = status_frame(url)
+        return None if frame is None else frame.get("value")
+
+    def status_frame(url: str) -> dict | None:
         with contextlib.closing(urllib.request.urlopen(url, timeout=15)) as r:
             for raw in r:
                 line = raw.decode().strip()
@@ -894,7 +909,7 @@ def _connecting_stream_status(base_url, clc, state, broadcaster) -> None:
                     continue
                 ev = json.loads(line[6:])
                 if ev.get("type") == "state_update" and ev.get("key") == "execution_status":
-                    return ev.get("value")
+                    return ev
         return None
 
     subscribers_before = broadcaster.count()
@@ -920,6 +935,25 @@ def _connecting_stream_status(base_url, clc, state, broadcaster) -> None:
               "another project's run is still not leaked into this window's status")
         check(first_status(f"{base_url}/api/events?replay=0") == "idle",
               "a finished run reports idle again")
+
+        # the frame answers the page's TWO "not writable" questions separately,
+        # because they end differently: opened here as a viewer (this window may
+        # never write) vs. another window RUNNING it right now (over with that
+        # run, and then this window may send again)
+        from agent.core.project_lock import _local_lock_path
+        with _lock_held_elsewhere(str(clc), _local_lock_path(str(clc)), record=True):
+            held = status_frame(f"{base_url}/api/events?replay=0&project={quote(str(clc))}")
+        check(
+            held is not None
+            and held.get("read_only") is False
+            and held.get("running_elsewhere") is True,
+            f"a foreign run is running_elsewhere, not a read-only open ({held})",
+        )
+        after = status_frame(f"{base_url}/api/events?replay=0&project={quote(str(clc))}")
+        check(
+            after is not None and after.get("running_elsewhere") is False,
+            f"and the end of that run is reported on connect too ({after})",
+        )
         # hand the broadcaster back clean: no probe subscriber outlives this
         # block (a stale subscriber inflates broadcaster.count(), which the
         # isolation section below uses as "both windows are connected")
@@ -1089,83 +1123,132 @@ def _multi_window_isolation(base_url, clc, proj_dir, state, broadcaster) -> Path
     return clc2
 
 
-def _write_lock_one_writer(base_url, clc, clc2, state) -> None:
-    # ---- 3f. per-window write lock: one writer per .clc ----
-    # the server under test released its own lock first...
+def _the_claim_belongs_to_the_run(base_url, clc, clc2, state) -> None:
+    # ---- 3f. the write claim is the RUN's, not the open window's ----
+    # The reported shape: one window merely LOOKING at a project made every other
+    # window read-only for as long as it stayed open, and a client that connected
+    # to an idle project could only ever watch it. Nothing writes a .clc outside a
+    # run (the append, the window slide and the release line all sit under the
+    # claim), so the claim has no business outliving the turn: it is taken when a
+    # run starts and handed back when it ends, and "one writer per .clc" holds
+    # exactly where it matters — while somebody is running.
     from agent.core.project_lock import ProjectLock, _local_lock_path
 
-    lock_path = _local_lock_path(str(clc))
-    handle = state.project.lock if state.project is not None else None
-    check(handle is not None, "open project holds a local lock")
-    ProjectLock.release(handle)
+    def lock_free(path) -> bool:
+        """Whether a second INDEPENDENT claim on this .clc still succeeds — the
+        kernel truth, not the session's bookkeeping. The probe takes and drops the
+        lock at once, so it leaves nothing held."""
+        h = ProjectLock._acquire_local(str(path))
+        if h is None:
+            return False
+        ProjectLock.release(h)
+        return True
 
-    # ...and ANOTHER window (process) now holds it
-    with _lock_held_elsewhere(str(clc), lock_path):
+    def append() -> tuple[int, str]:
+        return http_post(
+            f"{base_url}/api/log",
+            {"event": {"type": "user_message", "content": "claim probe"}},
+        )
+
+    def run_tool() -> tuple[int, str]:
+        return http_post(
+            f"{base_url}/api/exec",
+            {"name": "run_command", "arguments": json.dumps({"command": "echo claim"}), "tool_call_id": "c1"},
+        )
+
+    # opened here and IDLE: nothing is claimed, so another window may run it too
+    st, _ = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+    check(st == 200, "the demo opens")
+    check(state._claim_lock is None, "an idle session holds no write claim")
+    check(lock_free(clc), "an idle project is claimable by another window")
+    check(not state.project.read_only, "and an idle open is not read-only")
+
+    # ...but it may not write either: without the claim this session does not own
+    # the turn, and a line appended here would land after a context it never read
+    st, body = append()
+    check(st == 409 and json.loads(body).get("code") == "not_running",
+          "an idle session's append is refused (not_running)")
+    st, body = run_tool()
+    check(st == 409 and json.loads(body).get("code") == "not_running",
+          "an idle session's exec is refused (not_running)")
+
+    # ANOTHER window is running it now. Opening the file is a READ, so it no
+    # longer conflicts — the same .clc opens here for write (the claim is taken
+    # by whoever runs, not by whoever looks) ...
+    with _lock_held_elsewhere(str(clc), _local_lock_path(str(clc)), record=True):
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
-        check(st == 409, "second window open -> 409")
-        err = json.loads(body)
-        check(err.get("code") == "project_open_conflict", "409 carries project_open_conflict")
+        check(st == 200, "opening a project another window RUNS is not a conflict")
+        check(state.project is not None and not state.project.read_only,
+              "and the open is not silently downgraded to read-only")
 
-        # read-only open succeeds despite the lock, carries the flag in meta
+        # ...and a RUN here is refused, naming who has it: the caller's only
+        # useful next move is to go and stop it THERE, which needs a name
+        st, body = http_post(f"{base_url}/api/run/state", {"busy": True, "project": str(clc)})
+        check(st == 409, "a second run on the same .clc is refused")
+        err = json.loads(body)
+        check(err.get("code") == "run_active", "409 carries run_active")
+        owner = err.get("owner")
+        check(isinstance(owner, dict) and isinstance(owner.get("pid"), int),
+              "the refusal carries the holder's own statement about itself")
+
+        # read-only is an explicit MODE now, not a fallback: asked for it, the
+        # open says so in meta and both writers are refused for that reason
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc), "read_only": True})
-        check(st == 200, "read-only open succeeds while another window holds the lock")
+        check(st == 200, "a read-only open is honoured while another window runs the file")
         ro_meta = next(
             (m["meta"] for m in (json.loads(line) for line in body.splitlines() if line.strip()) if m.get("meta")),
             None,
         )
         check(ro_meta is not None and ro_meta.get("read_only") is True, "meta carries read_only")
         check(state.project is not None and state.project.read_only, "project is read-only")
-
-        # a tool call is the writer now: /api/exec on a read-only project is
-        # refused before any tool runs, so no command of a turn can change the
-        # files its .clc talks about while this process does not hold the lock
-        st, body = http_post(
-            f"{base_url}/api/exec",
-            {"name": "run_command", "arguments": json.dumps({"command": "touch x.txt"}), "tool_call_id": "ro1"},
-        )
+        st, body = append()
         check(st == 409 and json.loads(body).get("code") == "read_only",
-              "an exec on a read-only project is refused")
+              "an append on a read-only project is refused (read_only, not not_running)")
+        st, body = run_tool()
+        check(st == 409 and json.loads(body).get("code") == "read_only",
+              "an exec on a read-only project is refused before any tool runs")
 
-        # a different project opens fine (the lock is per-path)
+        # a different project opens (and runs) fine: the claim is per-path
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc2)})
-        check(st == 200, "different project opens while another holds demo's lock")
+        check(st == 200, "different project opens while another holds demo's claim")
 
-    # a read-only FALLBACK is not a life sentence: the window that held the lock
-    # is gone, so asking for the claim again must succeed instead of answering
-    # "close the other window first" for the rest of the session. Without the
-    # retry the window is stuck read-only even though the .clc is free — the
-    # user's "the project is locked AGAIN" long after the lock was handed back.
-    # Nothing but this may re-take a claim now (a session no longer hands one
-    # back for being quiet); the production callers are the window's own SSE
-    # reconnect (api/events._project_for_sse) and the host's reclaim poller.
-    st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc), "read_only": True})
-    check(st == 200, "a free .clc still opens read-only when the flag is given")
-    check(state.project is not None and state.project.read_only, "the fallback is read-only")
-    check(state.project.lock is None, "and it holds no write lock")
-    check(state.reclaim_write_claim() is True, "a read-only project reclaims its claim once the lock is free")
-    check(state.project is not None and not state.project.read_only, "the window is writable again")
-    check(state.project.lock is not None, "and it holds the write lock again")
+    # the other window's run ended: the .clc is free, and this window is neither
+    # read-only nor a writer — idle, exactly as an opener should be
+    st, _ = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+    check(st == 200, "the demo opens again once the other run ended")
+    check(not state.project.read_only and lock_free(clc),
+          "an idle reopen is writable-by-run AND unclaimed")
 
-    # the other window released -> the demo project opens normally again
-    st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
-    check(st == 200, "open works after the other window released")
-    check(state.project is not None and not state.project.read_only, "reopen is writable again")
+    # a run claims it: this file now has exactly one writer
+    check(state.claim_run(str(clc)) == "", "the run takes the claim")
+    check(state.owns_claim(str(clc)), "and this session is the claimant")
+    check(not lock_free(clc), "another window cannot claim a RUNNING project")
+    st, _ = append()
+    check(st == 200, "the claimant appends")
+    st, body = run_tool()
+    check(st == 200, "and the claimant's tool runs")
+
+    # the turn ends: the claim goes back with it, and the next opener — another
+    # window, or a later turn here — takes it without a reopen
+    check(state.release_run(str(clc)) is True, "the turn hands the claim back")
+    check(lock_free(clc), "the .clc is claimable again the moment the run ended")
+    st, body = append()
+    check(st == 409 and json.loads(body).get("code") == "not_running",
+          "and this idle session may not append any more")
 
 
-def _write_lock_follows_the_active_project(base_url, clc, clc2, state, sdir) -> None:
+def _the_claim_never_outlives_its_run(base_url, clc, clc2, state, sdir) -> None:
     from agent.core.project_lock import ProjectLock, _local_lock_path
 
-    # ---- 3f-bis. the write lock FOLLOWS the active project ----
-    # A window holds the write lock on at most its CURRENTLY-open project:
-    # the moment the active project is replaced — by another project opened
-    # for write or read-only, by a created one, by a run that switches — the
-    # lock of the project left behind goes back to the pool. A lock that
-    # outlives its project is unreachable (nothing keeps the handle, so
-    # nothing could ever release it) and locks every other window out of that
-    # .clc until this server exits.
-    def lock_free(path: Path) -> bool:
-        """Whether a second INDEPENDENT claim on this .clc still succeeds —
-        the kernel truth, not the server's bookkeeping. The probe claims and
+    # ---- 3f-bis. the claim never outlives its run ----
+    # A session holds at most ONE claim, and it is the claim of the turn it is
+    # driving. Two ways it could outlive that turn, both closed here: a project
+    # switch under a live run (refused, so the claim cannot be left behind on a
+    # file nobody drives) and a CREATE, which claims the path only long enough to
+    # write the header — the project it returns is idle, like any other open.
+    def lock_free(path) -> bool:
+        """Whether a second INDEPENDENT claim on this .clc still succeeds — the
+        kernel truth, not the server's bookkeeping. The probe claims and
         immediately releases, so it leaves nothing held."""
         h = ProjectLock._acquire_local(str(path))
         if h is None:
@@ -1173,59 +1256,55 @@ def _write_lock_follows_the_active_project(base_url, clc, clc2, state, sdir) -> 
         ProjectLock.release(h)
         return True
 
-    def open_project(path: Path, read_only: bool = False) -> int:
+    def open_project(path, read_only: bool = False) -> int:
         body = {"path": str(path)}
         if read_only:
             body["read_only"] = True
         st, _ = http_post(f"{base_url}/api/project/open", body)
         return st
 
-    st = open_project(clc)
-    check(st == 200 and state.project.lock is not None, "demo is open for write (lock held)")
-    check(not lock_free(clc), "another window cannot claim the open project")
+    check(open_project(clc) == 200 and state._claim_lock is None,
+          "an opened project is idle: it holds nothing")
+    check(lock_free(clc), "so a second window may run it")
 
-    # a read-only open gives the write claim up: the project left behind is
-    # free again (and the read-only one never claims anything)
-    st = open_project(clc2, read_only=True)
-    check(st == 200, "b opens read-only")
-    check(state.project.read_only and state.project.lock is None, "a read-only project holds no lock")
-    check(lock_free(clc), "the project left for a read-only one hands its write lock back")
+    check(state.claim_run(str(clc)) == "", "a run claims it")
+    check(not lock_free(clc), "the .clc has one writer while the run is in flight")
+    st, _ = http_post(f"{base_url}/api/project/open", {"path": str(clc2)})
+    check(st == 409, "a project switch under a live run is refused")
+    check(state.owns_claim(str(clc)), "so the claim cannot be left behind on the project it was taken for")
 
-    # a WRITE reopen of the same project keeps the lock (it is reused, never
-    # dropped and re-taken: another window's claim during that window would
-    # be a spurious conflict)
-    check(open_project(clc) == 200 and open_project(clc) == 200, "demo reopened for write twice")
-    check(not lock_free(clc), "reopening the same project for write keeps the lock")
+    check(state.release_run(str(clc)) is True, "the turn ends")
+    check(lock_free(clc), "and the file is free again, with nothing to reopen")
+    check(open_project(clc2) == 200, "an idle session switches projects")
+    check(str(state.project.path) == str(clc2.resolve()), "the switch took effect")
+    check(state._claim_lock is None, "a switch carries no claim with it")
+    check(lock_free(clc2), "the switched-to project is idle too")
 
-    # a created project is write-locked like an opened one (the window that
-    # created it is its only writer from the first byte)
+    # a run on the switched-to project owns it, and only until it ends
+    check(state.claim_run(str(clc2)) == "", "the other project is claimed by its own run")
+    check(not lock_free(clc2), "and it is the file's one writer meanwhile")
+    state.release_run(str(clc2))
+    check(lock_free(clc2), "the claim is handed back with the run")
+
+    # a created project is claimed for the CREATE only: taking the lock is what
+    # makes "the path is free and this header is its first byte" one question,
+    # and the project handed back is idle — an idle project is claimed by nobody
     lkdir = Path(sdir) / "lockwork"
     lkdir.mkdir()
     st, body = http_post(f"{base_url}/api/project/new", {"dir": str(lkdir), "name": "created"})
     check(st == 200, "project created")
     created = Path(json.loads(body)["project"])
-    check(state.project.lock is not None, "a created project holds a write lock")
-    check(not lock_free(created), "a second window cannot claim a created project")
+    check(state._claim_lock is None, "a created project comes back idle (its claim covered the create)")
+    check(lock_free(created), "so a second window may run the project this one just created")
     check(open_project(clc) == 200, "moved on to another project")
-    check(lock_free(created), "the created project hands its lock back when left")
 
-    # a create must never TAKE a path another window holds
+    # ...but a create must never TAKE a path another window is RUNNING
     victim = lkdir / "taken.clc"
     with _lock_held_elsewhere(str(victim), _local_lock_path(str(victim))):
         st, body = http_post(f"{base_url}/api/project/new", {"dir": str(lkdir), "name": "taken"})
-        check(st == 409, "create over another window's path is refused")
+        check(st == 409, "create over another window's running path is refused")
         check(json.loads(body).get("code") == "project_open_conflict", "the create conflict carries the code")
         check(not victim.exists(), "the refused create wrote nothing at all")
-
-    # a switch of the active project hands the old lock back too. The switch
-    # used to be made by sending a task with `project=`, a field only the
-    # deleted /api/run knew; the switch endpoint is the only way now, and the
-    # lock rule it has to keep is the same one.
-    check(open_project(clc) == 200, "demo open for write again")
-    check(open_project(clc2) == 200, "switched to the other project")
-    check(str(state.project.path) == str(clc2.resolve()), "the switch is the active project")
-    check(not lock_free(clc2), "the switched-to project holds the write lock")
-    check(lock_free(clc), "the switched-away project hands its write lock back")
 
     st = open_project(clc)
     check(st == 200, "demo reopened for the turn section")
@@ -1320,21 +1399,15 @@ def _dying_holder_frees_the_lock() -> None:
                 _kill_tree(holder)
 
 
-def _read_only_reclaim_is_not_a_latch() -> None:
-    # ---- 3g. read-only is a FALLBACK, not a life sentence ----
-    # The ghost read-only the user reported on 0.1.67: the conflicting window was
-    # long gone and the kernel said the .clc was free, yet this session still
-    # called itself read-only, and the badge — with every run refused behind it —
-    # outlived the lock by hours. reclaim_write_claim is the way back, and these
-    # are its three laws: it never runs over a live run, never over a live
-    # holder, and it succeeds the moment the kernel says the file is free.
-    #
-    # The session no longer owns the mirror-image path (release_write_claim): a
-    # claim is not handed back for being quiet any more — the host's reconciler
-    # ends an orphaned session from the window's own pid instead
-    # (agent/core/lock_reconcile.py). So the fallback is set up the way a
-    # conflict really produces it: the same .clc, opened read-only.
-    from agent.core.project_lock import ProjectLock, _local_lock_path
+def _the_claim_lifecycle() -> None:
+    # ---- 3g. the claim has one shape: a RUN takes it, and lets it go ----
+    # `reclaim_write_claim` and the read-only FALLBACK it existed to cure are both
+    # gone: read-only is how a session OPENED the file ("never write this"), never
+    # something it settles into after a conflict. What a conflict means now is
+    # "somebody is RUNNING this", and it ends by itself when that run ends — no
+    # retry loop, no latch, nothing to reclaim. These are the four states the
+    # claim can be in, driven on one session.
+    from agent.core.project_lock import ProjectLock
     from agent.project import create_project, open_project_lazy
     from agent.server import RunState
     from agent.tools.workspace import LocalWorkspace
@@ -1346,49 +1419,74 @@ def _read_only_reclaim_is_not_a_latch() -> None:
         state.set_project(create_project(root / "heal", "heal", workspace=ws), workspace=ws)
         key = str(state.project.path)
 
-        def lock_held() -> bool:
-            """Whether a SECOND independent claim is still refused — the
-            kernel's answer, not the session's bookkeeping."""
+        def lock_free() -> bool:
+            """Whether a SECOND independent claim on this .clc still succeeds —
+            the kernel's answer, not the session's bookkeeping."""
             h = ProjectLock._acquire_local(key)
             if h is None:
-                return True
+                return False
             ProjectLock.release(h)
-            return False
+            return True
 
-        def fall_back() -> None:
-            """What a 409 leaves behind: the project open here, READ-ONLY, with
-            no lock of its own (set_project retires the write handle)."""
-            state.set_project(open_project_lazy(Path(key), workspace=ws, read_only=True), workspace=ws)
+        # 1. IDLE — the open project, claimed by nobody. Anyone may run it.
+        check(not state.busy and not state.owns_claim(key), "an idle session owns no claim")
+        check(not state.foreign_claim(key), "and nobody else's claim is there either")
+        check(lock_free(), "the kernel agrees the .clc is free")
 
-        check(lock_held(), "the window starts as the project's writer")
-        check(state.reclaim_write_claim() is False,
-              "a writable project has nothing to reclaim (it is left alone)")
-        fall_back()
-        check(state.project.read_only and not lock_held(),
-              "the project is read-only and the .clc is free")
+        # 2. RUNNING — one claim, on this file, held by the kernel.
+        check(state.claim_run(key) == "", "a run takes the claim")
+        check(state.owns_claim(key) and state.owns_claim(), "this session is the claimant")
+        check(not state.owns_claim(key + ".other"), "the claim is on a PATH, not on everything")
+        check(not state.foreign_claim(key), "our own claim is never 'foreign'")
+        check(state.busy and not lock_free(), "the run holds the slot and the file")
+        check(state.claim_run(key) == "", "a heartbeat renews the claim it already has")
 
-        # a run in flight is a writer: the fallback must not flip under it
-        state.claim_run(key)
-        check(state.reclaim_write_claim() is False, "a busy session never swaps its project")
-        check(state.project.read_only and state.project.lock is None,
-              "the fallback stands while the run is in flight")
+        # 3. RELEASED — the turn ended, and the file is free at once.
+        check(state.release_run(key) is True, "the turn hands the claim back")
+        check(not state.busy and not state.owns_claim(key), "the session is idle again")
+        check(lock_free(), "and so is the .clc")
+        check(state.release_run(key) is False, "a second release is a fact, not an error")
+
+        # 4. A FOREIGN RUN — somebody else holds it: a claim here is refused, and
+        # the refusal is what the UI turns into the read-only view.
+        from agent.core.project_lock import _local_lock_path
+
+        with _lock_held_elsewhere(key, _local_lock_path(key)):
+            check(state.foreign_claim(key), "another session's run is visible as a foreign claim")
+            check(not state.owns_claim(key), "and it is not ours")
+            check(state.claim_run(key) == "run_active", "a second run on the file is refused")
+            check(state._claim_lock is None, "the refusal takes nothing")
+        check(not state.foreign_claim(key), "the foreign run ended: the claim is nobody's again")
+        check(state.claim_run(key) == "", "and the next run takes it without a reopen")
         state.release_run(key)
 
-        # someone else still holds it: the kernel's refusal is the answer
-        with _lock_held_elsewhere(key, _local_lock_path(key)):
-            check(state.reclaim_write_claim() is False,
-                  "reclaim refuses while another window holds the .clc")
-            check(state.project.read_only and state.project.lock is None,
-                  "and leaves the fallback exactly as it found it")
+        # read-only is a MODE, set at open and never a fallback: a session that
+        # opened the file that way refuses its own run instead of guessing
+        state.set_project(open_project_lazy(Path(key), workspace=ws, read_only=True), workspace=ws)
+        check(state.project.read_only, "the project is read-only because it was OPENED that way")
+        check(state.claim_run(key) == "read_only", "a read-only project never claims a run")
+        check(state._claim_lock is None and lock_free(), "and it leaves the .clc exactly as it found it")
+        state.set_project(open_project_lazy(Path(key), workspace=ws), workspace=ws)
+        check(not state.project.read_only, "reopened for write, with no claim taken by the open")
 
-        # holder gone: the very next ask succeeds — no run, no reopen, no task
-        check(state.reclaim_write_claim() is True, "the free .clc is this window's again")
-        check(not state.project.read_only and state.project.lock is not None,
-              "the project is writable and holds the write lock")
-        check(lock_held(), "and the kernel agrees the .clc is claimed")
-        check(state.reclaim_write_claim() is False, "reclaiming an already-writable project is a no-op")
-        fall_back()
-        check(not lock_held(), "and the probe leaves no claim behind")
+        # a lease nobody renewed is no claim at all: the watch loop hands it back,
+        # because the host that would have released it is gone and the kernel
+        # cannot see a lease
+        check(state.claim_run(key, ttl_s=0.05) == "", "a run takes a short lease")
+        deadline = time.time() + 5
+        while time.time() < deadline and state.busy:
+            time.sleep(0.01)
+        check(not state.busy, "the lease lapsed with its host gone")
+        check(state.owns_claim(key), "the claim itself is still here (the kernel lock it stands on)")
+        check(state.drop_expired_claim() is True, "the watch loop hands the lapsed claim back")
+        check(not state.owns_claim(key) and lock_free(), "so the file can be claimed again")
+        check(state.drop_expired_claim() is False, "with nothing left to drop")
+
+        # a backend switch invalidates the project — and the claim taken on it
+        state.set_project(open_project_lazy(Path(key), workspace=ws), workspace=ws)
+        check(state.claim_run(key) == "", "a run claims the project")
+        state.set_backend("local")
+        check(state._claim_lock is None and lock_free(), "a mode switch takes the claim with the project")
 
 
 def _lock_claim_identity() -> None:
@@ -1448,7 +1546,8 @@ def _lock_claim_identity() -> None:
             ProjectLock.release(h)
             return False
 
-        check(not state.project.read_only and state.project.lock is not None, "the active project is write-claimed")
+        check(state.claim_run(key) == "", "a run takes the claim")
+        check(not state.project.read_only and state.owns_claim(key), "the running project is write-claimed")
         check(claimed(), "and the kernel agrees the .clc is locked")
 
         # -- what the claim says: an identity the kernel can re-check, never
@@ -1488,46 +1587,92 @@ def _lock_claim_identity() -> None:
         )
         check(claimed(), "so the claim stands for as long as this process holds it")
 
-        # -- the ghost read-only, cured by ASKING and never by releasing: a window
-        # that fell back to read-only is still watching, so the moment the other
-        # holder is gone the session wins the claim back from the kernel and says
-        # so on the wire — the badge follows the host, not the last conflict the
-        # window saw. With NOBODY watching, the same free .clc is left alone: no
-        # editor, no claim to take.
-        from queue import Empty
+        # ...and it is the RUN that ends it — not silence, not a timeout — so the
+        # record is gone with the claim instead of naming a session that no longer
+        # holds anything
+        check(state.release_run(key) is True, "the turn hands the claim back")
+        check(not claimed(), "the .clc is free the moment the run ended")
+        check(ProjectLock.owner(key) is None, "and the record went with the claim")
 
-        from agent.project import open_project_lazy
 
+def _a_foreign_run_is_followed() -> None:
+    # ---- 3h-bis. a page watching a project that ANOTHER window starts running ----
+    # The other half of "the claim belongs to the run": the .clc this session
+    # merely looks at can become somebody's run at any moment, and this process
+    # can only learn that by asking. The watch loop asks the kernel, and says
+    # three things on the wire, all of them TRANSITIONS: the project is somebody
+    # else's run now (`running_elsewhere`, which is the page's pill and its
+    # disabled composer), the lines that run appends (read out of the file with
+    # `catch_up`, since the writer is another process), and — when the run ends —
+    # that the composer is the user's again, with no reload and no retry.
+    from queue import Empty
+
+    import agent.server as server_mod
+    from agent.core.persist import append_jsonl
+    from agent.core.project_lock import _local_lock_path
+    from agent.events import UserMessageEvent, event_to_json
+    from agent.project import create_project
+    from agent.tools.workspace import LocalWorkspace
+
+    with tempfile.TemporaryDirectory() as wdir:
+        root = Path(wdir)
+        ws = LocalWorkspace(str(root))
+        state = RunState()
         bc = Broadcaster()
-        state.set_project(open_project_lazy(Path(key), workspace=ws, read_only=True), workspace=ws)
-        check(state.project.read_only and not claimed(), "a fallback leaves the .clc free")
+        state.set_project(create_project(root / "watched", "watched", workspace=ws), workspace=ws)
+        key = str(state.project.path)
         threading.Thread(
-            target=server_mod.claim_reask_loop, args=(state, bc, 0.05), daemon=True
+            target=server_mod.claim_watch_loop, args=(state, bc, 0.05), daemon=True
         ).start()
-        time.sleep(0.4)  # many ticks with no audience
-        check(
-            state.project.read_only and not claimed(),
-            "nobody watching: the free claim is left for the window that comes back",
-        )
-        q = bc.subscribe(key)  # a subscriber that publishes nothing is an audience
+        q = bc.subscribe(key)
         try:
-            announced: list[object] = []
-            deadline = time.time() + 10
-            while time.time() < deadline and (state.project.read_only or not announced):
-                try:
-                    announced.append(q.get_nowait())
-                except Empty:
-                    time.sleep(0.02)
-            check(not state.project.read_only, "a watching window takes a free claim back")
-            check(claimed(), "and the kernel agrees the .clc is claimed again")
+
+            def drain(key_: str, value: object, timeout: float = 10.0):
+                """The next announcement of this key/value, or None."""
+                deadline = time.time() + timeout
+                while time.time() < deadline:
+                    try:
+                        ev = q.get_nowait()
+                    except Empty:
+                        time.sleep(0.02)
+                        continue
+                    if getattr(ev, "key", None) == key_ and getattr(ev, "value", None) == value:
+                        return ev
+                return None
+
             check(
-                any(
-                    getattr(ev, "key", None) == "project_read_only"
-                    and getattr(ev, "value", None) is False
-                    for ev in announced
-                ),
-                "the reclaimed claim is announced so the window drops its badge",
+                drain("running_elsewhere", False) is not None,
+                "an idle project is announced nobody's run (the state a page connects to)",
             )
+
+            # another window STARTS running it: nothing is opened here, no
+            # conflict is reported anywhere, the page is simply told
+            with _lock_held_elsewhere(key, _local_lock_path(key), record=True):
+                check(
+                    drain("running_elsewhere", True) is not None,
+                    "a foreign run turns the page read-only, without a reload",
+                )
+                # that run's line, written the way the other window writes it
+                line = event_to_json(UserMessageEvent(content="from the other window"))
+                append_jsonl(key, line)
+                seen = None
+                deadline = time.time() + 10
+                while time.time() < deadline and seen is None:
+                    try:
+                        ev = q.get_nowait()
+                    except Empty:
+                        time.sleep(0.02)
+                        continue
+                    if getattr(ev, "content", None) == "from the other window":
+                        seen = ev
+                check(seen is not None, "the foreign run's line is followed into this window's stream")
+
+            check(
+                drain("running_elsewhere", False) is not None,
+                "the end of that run gives the composer back, unprompted",
+            )
+            check(state.claim_run(key) == "", "and the next run here claims the file with no reload")
+            state.release_run(key)
         finally:
             bc.unsubscribe(q)
 
@@ -1963,19 +2108,20 @@ def _run_server_test() -> int:
         lclc, comp_off = _lazy_open_and_history(base_url, sdir)
         _clc_sse_replay(base_url, clc, comp_off)
         _sse_since_offset(base_url, lclc, clc, comp_off)
-        _broadcaster_bounded(broadcaster)
+        _broadcaster_bounded()
         _sse_keepalive(base_url)
         _ghost_subscriber(base_url, broadcaster)
         _ghost_writer(base_url, broadcaster)
         _connecting_stream_status(base_url, clc, state, broadcaster)
         _live_frame_shape(base_url, clc, state, broadcaster)
         clc2 = _multi_window_isolation(base_url, clc, proj_dir, state, broadcaster)
-        _write_lock_one_writer(base_url, clc, clc2, state)
-        _write_lock_follows_the_active_project(base_url, clc, clc2, state, sdir)
+        _the_claim_belongs_to_the_run(base_url, clc, clc2, state)
+        _the_claim_never_outlives_its_run(base_url, clc, clc2, state, sdir)
         _remote_workspace_locks_locally()
         _dying_holder_frees_the_lock()
-        _read_only_reclaim_is_not_a_latch()
+        _the_claim_lifecycle()
         _lock_claim_identity()
+        _a_foreign_run_is_followed()
         _session_release_is_recorded()
         _scripted_turn(base_url, clc)
         _lease_shape(base_url, clc)

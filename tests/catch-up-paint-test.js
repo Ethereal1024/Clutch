@@ -118,6 +118,9 @@ global.autoFoldTurn = () => {};
 global.closePerm = () => {};
 global.forgetAnsweredPerm = () => {};
 global.pendingPerm = () => null;
+// the send outbox (js/render-events.ts noteUserMessage) is the composer's
+// concern: this runner has no composer and no send in flight
+global.noteUserMessage = () => {};
 global.clearStream = () => {
   // project.ts clearStream, reduced to the parts this context can see: the pane,
   // the queue and the bracket go together (its source is pinned in §6)

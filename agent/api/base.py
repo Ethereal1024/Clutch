@@ -17,6 +17,7 @@ from ..base import Broadcaster, RunState
 from ..config import Config
 
 if TYPE_CHECKING:  # annotations only: importing agent.server at runtime would be circular
+    from ..project import Project
     from ..server import ClutchServer, HttpAgentServer
 
 
@@ -102,6 +103,26 @@ class HandlerBase(BaseHTTPRequestHandler):
             # malformed JSON body or Content-Length header: user error -> 400
             return None
         return data if isinstance(data, dict) else None
+
+    def _write_refusal(self, project: Project) -> dict[str, Any] | None:
+        """Why this session may not WRITE to `project` right now, or None.
+
+        Two different questions, two different codes. `read_only` is how this
+        session OPENED the file (a viewer of another project's .clc, a test);
+        it never changes. `not_running` is about the moment: the file is open
+        here — idle, unclaimed — but this session does not hold the RUN claim,
+        so the turn (and therefore the writing) belongs to the session that
+        does. An idle project is open everywhere and owned nowhere; that is the
+        whole point of the claim being a run claim (agent/base.py claim_run).
+        """
+        if project.read_only:
+            return {"error": "project is read-only", "code": "read_only"}
+        if not self._state.owns_claim(str(project.path)):
+            return {
+                "error": "this session is not running the project; its lines belong to the run",
+                "code": "not_running",
+            }
+        return None
 
     def _json(self, obj: dict[str, Any], status: int = 200) -> None:
         data = json.dumps(obj).encode("utf-8")

@@ -156,6 +156,10 @@ global.announceRunLost = () => {};
 // scope — neither side effect is its subject, and each has its own runner.
 global.autoFoldTurn = () => {};
 global.refreshRollbackAnchors = () => {};
+// the send outbox (js/render-events.ts noteUserMessage) answers the composer's
+// held message when a task row lands; this runner is about permission scope and
+// sends nothing, so the hand-off is present but inert.
+global.noteUserMessage = () => {};
 
 // ---- the real renderer, in ONE evaluation ----
 //

@@ -13,7 +13,7 @@ import { autoFoldTurn } from "./auto-fold";
 import { highlightCode, typesetMath } from "./markdown";
 import { closePerm, forgetAnsweredPerm, pendingPerm } from "./permissions";
 import { clearStream, pageSink, setOlderPill } from "./project";
-import { appendCompletion, renderEvent, renderMarkdown } from "./render-events";
+import { appendCompletion, noteUserMessage, renderEvent, renderMarkdown } from "./render-events";
 import { SSE_RUN_LOST } from "./sse-stream";
 import { state } from "./state";
 import {
@@ -320,6 +320,10 @@ export function addEvent(ev) {
     awaiting.length = 0;
     // ...and every ask id the run before it handed out is dead
     forgetAnsweredPerm();
+    // The composer's outbox (render-events.ts): the row this window's own send
+    // became is in the pane now, so the message leaves the box — here, and never
+    // on the click, which is what made a send over a tunnel look like it vanished.
+    noteUserMessage(ev.content);
   } else if (ev && ev.type === "final") {
     state.runSettled = true;
   }

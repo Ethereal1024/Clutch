@@ -18,7 +18,6 @@ from pathlib import Path
 
 from ..base import LAGGED
 from ..core.lazy import LazyEventLog
-from ..core.project_lock import ProjectLock, ProjectOpenConflict
 from ..events import Event, PermissionRequestEvent, StateUpdateEvent, event_to_json
 from ..project import Project, open_project_lazy
 
@@ -107,9 +106,8 @@ class EventsMixin:
             self._state.set_backend("ssh", bridge, root)
         else:
             self._state.set_backend("local")
-        # a mode switch invalidates the window's project context (set_backend
-        # clears it): drop any locks it still holds so they never linger
-        ProjectLock.release_all()
+        # set_backend drops the run claim with the project it belonged to (a
+        # mode switch invalidates both), so there is no lock left to release here
         self._json({"status": "ok"})
 
     def _project_for_sse(self, project_q: str | None) -> Project | None:
@@ -132,17 +130,6 @@ class EventsMixin:
             if project_q:
                 global_proj = self._state.project
                 if global_proj is not None and str(global_proj.path) == project_q:
-                    if global_proj.read_only:
-                        # This stream IS the window coming back to its project,
-                        # and the claim it fell back on may have been free for
-                        # minutes (the conflicting session quit, its client
-                        # died, the host reaped it). Ask for it again before
-                        # settling for read-only: returning the read-only
-                        # project as-is is what kept a ghost badge alive across
-                        # every reconnect. A real holder still answers with the
-                        # kernel's refusal (the project stays read-only).
-                        self._state.reclaim_write_claim()
-                        return self._state.project
                     return global_proj
                 full = self._project_path(project_q)
                 if full.suffix == ".clc" and (self._state.backend_mode == "ssh" or full.is_file()):
@@ -150,7 +137,7 @@ class EventsMixin:
                     if global_proj is None:
                         return self._adopt_for_sse(full, ws)
                     # SSE only replays/watchs: open read-only so a subscriber
-                    # never takes the write lock (or fights the real writer). The
+                    # never writes to a file this session is not running. The
                     # session already has a project, and a subscriber on another
                     # window's file must not replace it (tests/server_test.py
                     # _multi_window_isolation).
@@ -165,20 +152,13 @@ class EventsMixin:
         project-scoped endpoint (the tree, the checkpoints, the .clc service)
         answers with the window's project instead of "nothing open".
 
-        The write open is preferred, because that IS the state the window was in
-        before its session was replaced: the UI's own open takes the write lock
-        and the lock's whole purpose is that a window with a project open is that
-        project's one writer. A .clc another window already holds is adopted
-        read-only instead -- the same fallback the UI offers -- since read-only
-        still brings the workspace the tree and the transcript need. The fallback
-        is not a life sentence: this session's watchdog re-asks for the claim
-        every tick while the window is watching (agent/server.py), and so does
-        every reconnect (RunState.reclaim_write_claim), so the moment the other
-        holder is gone this window is its writer again."""
-        try:
-            project = open_project_lazy(full, workspace=ws)
-        except ProjectOpenConflict:
-            project = open_project_lazy(full, workspace=ws, read_only=True)
+        A plain open: an idle project is claimed by nobody, so adopting one
+        competes with nothing. Whether ANOTHER window happens to be running it
+        is a fact about the moment, said by the status frame below
+        (RunState.foreign_claim) and by the claim watch loop, not by the shape
+        of the open — which is why the open no longer has a read-only fallback
+        that had to be re-asked for on every reconnect."""
+        project = open_project_lazy(full, workspace=ws)
         self._state.set_project(project, workspace=ws)
         return project
 
@@ -221,26 +201,33 @@ class EventsMixin:
         # audience for that project's prompts (and no other's)
         q = self._broadcaster.subscribe(project_q)
         try:
-            # Resolve the project BEFORE the status frame. The frame is the
-            # host's RESET for a (re)connecting window, and the write claim is
-            # part of that state: without it a window that fell back to
-            # read-only once reconnected forever still believing it was locked
-            # out, long after the kernel said the .clc was free. Resolution is
-            # also the moment that fallback is RE-ASKED for the claim
-            # (_project_for_sse), so a reconnect can hand the window its
-            # transcript back already writable.
+            # Resolve the project BEFORE the status frame: the frame is the
+            # host's RESET for a (re)connecting window, and "may this session
+            # write here" is part of that state. The answer is asked fresh every
+            # connect (RunState.foreign_claim is a question for the kernel), so a
+            # window that reconnects after the other session's run ended is told
+            # it may write again instead of keeping what it last believed.
             project = None
             if project_q or replay or since is not None:
                 project = self._project_for_sse(project_q)
-            # the claim the frame may speak for: the session's ACTIVE project.
-            # A stream can be watching ANOTHER window's .clc (that open is
-            # read-only for replay only), and its claim says nothing about the
-            # window's own project — None leaves the badge alone.
+            # the claim the frame may speak for: the session's ACTIVE project. A
+            # stream can be watching ANOTHER window's .clc (that open is read-only
+            # for a replay only), and what this session may write there is not what
+            # the frame is about — None leaves the page's pill alone.
             active = self._state.project
-            claim = None
+            read_only = None
+            running_elsewhere = None
             if (active is not None and project is not None
                     and str(active.path) == str(project.path)):
-                claim = active.read_only
+                # "not writable here" has two causes, and they are answered
+                # separately because they end differently: this session opened
+                # the file as a viewer (fixed for the life of the open), or
+                # another session is RUNNING it right now (over by itself, and
+                # then this window may send again). The second one is asked of
+                # the kernel at connect time (RunState.foreign_claim) and watched
+                # afterwards (server.py claim_watch_loop).
+                read_only = bool(active.read_only)
+                running_elsewhere = self._state.foreign_claim(str(active.path))
             # the status frame is a RESET for a window that has nothing in
             # flight (a project switch, an interrupted run) — and it is also
             # what a RECONNECTING window gets (EventSource retry, a phone
@@ -256,12 +243,20 @@ class EventsMixin:
             try:
                 self._write_sse(StateUpdateEvent(
                     key="execution_status", value="running" if in_flight else "idle",
-                    read_only=claim))
+                    read_only=read_only, running_elsewhere=running_elsewhere))
                 # replay durable events only (deltas are transient); replay=False
                 # skips it when the UI just rendered the open NDJSON stream
                 if replay or since is not None:
                     if project is not None:
                         log = project.log
+                        if not self._state.owns_claim(str(project.path)):
+                            # a stream can connect in the MIDDLE of another
+                            # session's run: the lines that run already wrote are
+                            # on disk and not in this log, and the watermark this
+                            # window keeps is measured against the file. Read them
+                            # in before handing out offsets (the follow loop
+                            # keeps reading while the run goes on).
+                            log.catch_up()
                         if since is not None and since > log.cpr_start() + log.window_bytes():
                             # the offset is past the end of this log: the pane can
                             # not be continued from it, and saying nothing would

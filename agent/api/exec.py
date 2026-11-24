@@ -118,11 +118,13 @@ class ExecMixin:
         project = self._state.project
         if project is None:
             return self._json({"error": "no project is open"}, status=409)
-        if project.read_only:
-            # the same answer api/log.py gives a writer: this process does not
-            # hold the .clc's write lock, so it must not change the files the
-            # .clc talks about either
-            return self._json({"error": "project is read-only", "code": "read_only"}, status=409)
+        refusal = self._write_refusal(project)
+        if refusal is not None:
+            # a tool call changes the files the .clc talks about, so it needs
+            # the same claim the .clc's own lines need: a session that is not
+            # running the project would be executing behind the back of the one
+            # that is, and its results would arrive in a log it cannot append to
+            return self._json(refusal, status=409)
 
         workspace = self._state.workspace
         if workspace is None or workspace.root != project.workdir:

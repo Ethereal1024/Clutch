@@ -19,7 +19,7 @@ import { state } from "./state";
 import { addEvent } from "./stream-events";
 import { eventsEl, stream } from "./els";
 import {
-  autoScroll, busy, gliding, setJumpVisible, setStatus, toolCalls,
+  autoScroll, busy, gliding, sending, setJumpVisible, setStatus, toolCalls,
 } from "./stream-view";
 import { recordSentTask } from "./task-input";
 import { activeSlotId, noteTabEvent, setTabRunning } from "./slots";
@@ -53,16 +53,27 @@ export function appendCompletion(status, summary) {
 }
 
 // The host's write-claim changes are announced on the document, never called:
-// project.ts (which owns #readonly-badge) loads after this file. A test
-// harness may model the DOM without dispatchEvent/CustomEvent; then there is
-// no badge to update and the announcement is skipped.
-export function announceProjectReadOnly(readOnly) {
+// project.ts (which owns the claim pill and the composer) loads after this file.
+// A test harness may model the DOM without dispatchEvent/CustomEvent; then there
+// is nothing to update and the announcement is skipped.
+//
+// Two announcements, because "not writable here" has two causes that end
+// differently: `readOnly` is the file OPENED as a viewer (fixed until reopened),
+// `claimed` is another window RUNNING it right now (over with that run).
+function announce(name, detail) {
   if (typeof document === "undefined" || typeof document.dispatchEvent !== "function") return;
-  const detail = { readOnly: !!readOnly };
   const ev = typeof CustomEvent === "function"
-    ? new CustomEvent("clutch:project-read-only", { detail })
-    : { type: "clutch:project-read-only", detail };
+    ? new CustomEvent(name, { detail })
+    : { type: name, detail };
   document.dispatchEvent(ev as Event);
+}
+
+export function announceProjectReadOnly(readOnly) {
+  announce("clutch:project-read-only", { readOnly: !!readOnly });
+}
+
+export function announceProjectClaim(claimed) {
+  announce("clutch:project-claim", { claimed: !!claimed });
 }
 
 export function renderEvent(ev) {
@@ -114,12 +125,13 @@ export function renderEvent(ev) {
     }
     case "state_update": {
       // The write claim is HOST state, like the run state: every connect's
-      // status frame carries it, and a live change (the watchdog took the
-      // claim back once the other window was gone) arrives as its own frame.
-      // Announced, not called — project.ts owns the badge and loads after
-      // this file (tests/ui-load-order-test.js).
+      // status frame carries both answers (opened as a viewer / another window
+      // runs it now), and a live change arrives as its own `running_elsewhere`
+      // frame. Announced, not called — project.ts owns the pill and the
+      // composer and loads after this file (tests/ui-load-order-test.js).
       if (typeof ev.read_only === "boolean") announceProjectReadOnly(ev.read_only);
-      if (ev.key === "project_read_only") announceProjectReadOnly(!!ev.value);
+      if (typeof ev.running_elsewhere === "boolean") announceProjectClaim(ev.running_elsewhere);
+      if (ev.key === "running_elsewhere") announceProjectClaim(!!ev.value);
       if (ev.key === "execution_status" && ev.value) {
         // The first frame of every connect is the host's own status. If this
         // window was busy when its session was replaced (see sseRunAtRisk), that
@@ -255,14 +267,76 @@ export async function hostCall(promise) {
   if (answer && answer.ok === false) {
     const err = new Error(answer.error || "the host refused the call");
     err.code = answer.code || "host_error";
+    // a refusal that names somebody (another window's run) keeps their word
+    if (answer.owner) err.owner = answer.owner;
     throw err;
   }
   return answer;
 }
 
+// ---- the outbox: the task in the box until the log has it --------------------
+//
+// A message leaves the composer when the transcript HAS it, never on the click.
+// The click used to empty the box before anything was sent, and over a tunnel —
+// where the round trip that appends the record and the round trip that paints it
+// ARE the visible delay — that left the message in neither place for a moment:
+// the reported "按下发送，消息从消息框消失，可显示区还没出现，就像发丢了". Now the
+// box holds it (locked, with the run button turned into a spinner: the wait is
+// the session's, not a lost click) and empties in the same paint that draws its
+// own row. That row is the log's `user_message` record — the append the host
+// makes BEFORE the run answers (ui/run.js start) — so one fact is both the
+// send's acknowledgement and the row's arrival, and there is no window in which
+// the message is nowhere.
+//
+// The wait itself is the "sending" status (stream-view.ts), so a page that moves
+// on — a tab switch, the host's own running frames — ends it without this file
+// enumerating the ways a send can stop being a send. `pendingTask` is the memo
+// that outlives the wait: if the row lands later (a stream that reconnected
+// first, a tab that let go of the send), the box still empties when it does.
+let pendingTask = "";
+
+// The box is now holding a message that is not in the log yet.
+export function beginSend(task) {
+  pendingTask = task;
+  setStatus("sending");
+}
+
+// The log has this task's own row, and the pane has drawn it: the message is the
+// transcript's now, so it may leave the box. `content` is the record's text (the
+// loop appends task.trim(), and run() sent the task trimmed).
+export function noteUserMessage(content) {
+  if (!pendingTask || String(content == null ? "" : content).trim() !== pendingTask) return;
+  const task = pendingTask;
+  pendingTask = "";
+  // Clear the box only while it still holds what was sent. Escape and undo are
+  // the box's own keys and they write it even read-only (task-input.ts), so the
+  // box may hold something else by now — and taking back a message the reader
+  // has since replaced would be this file deleting text nobody asked it to.
+  if (els.task.value.trim() === task) {
+    els.task.value = "";
+    els.task.style.height = TASK_BASE_H + "px"; // the auto-grow gives the box back
+  }
+  // ...and it joins the box's sent-message history: ArrowUp walks it back
+  // (task-input.ts), which is how the reader re-reads or re-asks what they sent
+  recordSentTask(task);
+  // The row IS the turn opening: what the session is working on from here is the
+  // log's task, which is the claim the click used to make on its own behalf.
+  setStatus("running");
+  const slotId = typeof activeSlotId === "function" ? activeSlotId() : "";
+  if (typeof setTabRunning === "function") setTabRunning(slotId, true);
+}
+
+// The wait is over for a reason that is not the row — a tab switch takes away the
+// one stream that could have confirmed it. The TEXT STAYS (losing it is the one
+// thing this state exists to prevent), and the memo keeps watching: a message
+// that did land still leaves the box when its tab is back and the log is replayed.
+export function endSend() {
+  if (sending) setStatus("idle");
+}
+
 export async function run() {
   const task = els.task.value.trim();
-  if (busy) return;
+  if (busy || sending) return;
   if (!currentProject) return;
   const host = window.clutchRun;
   if (!host || typeof host.run !== "function") {
@@ -271,16 +345,11 @@ export async function run() {
     notice("this build has no host run loop — it cannot run a task");
     return;
   }
-  // If there's a task, record it and prepare the UI. If resuming an interrupted
-  // turn, there's no new task — the log holds what opened it. Either way, the
-  // unified host.run() interface handles it: new task if idle, continue if open.
-  if (task) {
-    els.task.value = ""; // the task is now "in the stream"; keep the input clear
-    els.task.style.height = TASK_BASE_H + "px"; // animate the input back to its default size
-    // ...and it joins the box's sent-message history: ArrowUp walks it back
-    // (task-input.ts), which is how the user re-reads or re-asks what they sent
-    recordSentTask(task);
-  }
+  // If there's a task, it stays in the box until the log has it (the outbox,
+  // above) and the wait is painted beside it. If resuming an interrupted turn,
+  // there's no new task — the log holds what opened it. Either way, the unified
+  // host.run() interface handles it: new task if idle, continue if open.
+  if (task) beginSend(task);
   // sending a message returns to the live tail unconditionally
   state.followTail = true;
   autoScroll(true);
@@ -290,8 +359,13 @@ export async function run() {
   // The slot helpers are read defensively: unit tests pull one function body
   // out of this module and run it with only the globals they stub.
   const slotId = typeof activeSlotId === "function" ? activeSlotId() : "";
-  setStatus("running"); // the click is the user's claim; the host's frames confirm it
-  if (typeof setTabRunning === "function") setTabRunning(slotId, true);
+  if (!task) {
+    // Nothing is being sent, so there is nothing to wait for: the click is the
+    // user's claim on the turn the log already holds, and the host's own frames
+    // confirm it (a continuation writes no `user_message` for the outbox to see).
+    setStatus("running");
+    if (typeof setTabRunning === "function") setTabRunning(slotId, true);
+  }
   try {
     // The unified run() interface: automatically distinguishes new turn (idle)
     // from continuation (open). The caller does not have to know which.
@@ -303,6 +377,9 @@ export async function run() {
     }
   } catch (e) {
     const msg = (e && e.message) || e;
+    // The call refused: no row for this task is coming, and the message stays in
+    // the box — which is the whole point of it being there.
+    pendingTask = "";
     if (e && e.code === "run_active") {
       // A drive of this turn is already in flight in this window (a resume that
       // beat the click, or a second click on a button the host had not yet
@@ -326,6 +403,12 @@ export async function run() {
     }
     setStatus("idle");
     if (typeof setTabRunning === "function") setTabRunning(slotId, false);
+  } finally {
+    // The call answered. A row that has not arrived by now is not coming into
+    // this pane (a turn that was CONTINUED writes none at all): the wait ends
+    // here, with the message still in the box, where the reader can see it, edit
+    // it, or ask again — rather than a box that emptied itself into nothing.
+    endSend();
   }
 }
 
@@ -437,6 +520,18 @@ export async function resumeTurn() {
       // to it. The turn is open and being written; the session's own
       // execution_status frames are what end it, here and in the tab strip.
       console.info("[resume] somebody is already driving this turn:", msg);
+      return;
+    }
+    if (e && e.code === "run_elsewhere") {
+      // The open turn is ANOTHER window's run. The page has a better account of
+      // that than this refusal does — the claim pill and the session's own
+      // `running_elsewhere` frames (render-events.ts announceProjectClaim) — so it
+      // is not a failure to report, and it is not a wheel this window holds: the
+      // optimistic "running" above was a guess at a turn this window may not
+      // drive, and the badge goes back to where the session says it is.
+      console.info("[resume] another window is running this turn:", msg);
+      setStatus("idle");
+      if (typeof setTabRunning === "function") setTabRunning(slotId, false);
       return;
     }
     if (!e || !e.code || e.code === "no_session") {

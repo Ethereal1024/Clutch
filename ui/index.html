@@ -98,7 +98,6 @@
     <div class="tb-drag">Clutch</div>
 
     <!-- hidden badges referenced by els.ts -->
-    <span id="readonly-badge" class="readonly-badge hidden" title="opened read-only: another window holds the write lock">read-only</span>
     <div id="status" class="badge idle">idle</div>
 
     <!-- phone: single panel trigger (mobile.css shows it; style.css hides it) -->
@@ -493,6 +492,20 @@
         <textarea id="task-input" rows="3"
           placeholder="What should I do? e.g. fix the failing test, explain this module"></textarea>
         <div class="run-actions">
+          <!-- Another window is RUNNING this project. Not an error and not a
+               modal: the stream below is that run's, painted live and read-only,
+               and this pill is the one thing the reader can do about it —
+               reload, which re-opens the tab and catches the stream up. It
+               disappears by itself when that run ends (the session's own
+               `running_elsewhere` frame), and the composer is the reader's
+               again. -->
+          <button id="claim-pill" class="claim-pill hidden" type="button" title="another window is running this project — this stream is read-only until that run ends; click to reload it">
+            <svg class="claim-icon" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M10.4 5.1a4.4 4.4 0 1 1-1.5-2.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+              <path d="M10.5 0.9v2.7H7.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span>another window is running</span>
+          </button>
           <button id="run-btn" class="primary" title="run the task — Cmd/Ctrl+Enter in the box">▶ Run</button>
           <button id="mode-btn" title="chat: read-only analysis · work: full access (write/edit/any command). Applies to the next run.">work</button>
           <button id="trust-btn" title="trust mode OFF — every prompt waits. Click to auto-allow after 10s.">🛡 Trust</button>

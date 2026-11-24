@@ -170,6 +170,11 @@ def open_server(tmp: Path, name: str, read_only: bool = False):
     project = open_project_lazy(path, workspace=None, read_only=read_only)
     check(project.read_only is read_only, f"the fixture opens read-only={read_only}")
     state.set_project(project)
+    if not read_only:
+        # a RUNNING session, which is the only kind that may write: the host takes
+        # the run claim before it appends, and an idle session's line would land in
+        # a file another session is driving
+        check(state.claim_run(str(project.path)) == "", "the fixture session holds the run claim")
     return base, srv, path, offs, bus
 
 

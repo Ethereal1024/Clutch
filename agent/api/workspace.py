@@ -87,6 +87,9 @@ class WorkspaceMixin:
         job. Refused while a run is live (409): the run is writing those files
         right now, and rolling back beneath it would have the journal record the
         restored content as another mutation, blurring where the task started.
+        A run live in ANOTHER window is that same refusal: the claim says whose
+        files these are, and the rollback has to happen after that turn, not
+        under it.
         """
         body = self._read_body()
         if body is None:
@@ -100,10 +103,19 @@ class WorkspaceMixin:
         if self._state.busy:
             return self._json({"error": "a run is active; stop it before rolling back"}, status=409)
         project = self._state.project
-        if project is not None and project.read_only:
-            return self._json(
-                {"error": "project opened read-only; close the other window first"}, status=409
-            )
+        if project is not None:
+            if project.read_only:
+                return self._json(
+                    {"error": "project was opened read-only; it cannot be rolled back here"},
+                    status=409,
+                )
+            if self._state.foreign_claim(str(project.path)):
+                # not this session's claim, but someone's: the files being
+                # rolled back are the ones that run is writing
+                return self._json(
+                    {"error": "another window is running this project; stop it there first"},
+                    status=409,
+                )
         report = ws.rollback_from(offset)
         if report is None:
             return self._json({"error": "no recorded changes for that task"}, status=404)

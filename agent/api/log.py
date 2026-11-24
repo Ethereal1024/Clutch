@@ -85,6 +85,14 @@ class LogMixin:
         if project is None:
             return self._json({"error": "no project is open"}, status=409)
         log = project.log
+        if not self._state.owns_claim(str(project.path)):
+            # the resident log is the file as this session LEFT it. Without the
+            # claim, somebody else may have written to it since (a turn this
+            # window is not driving, a compaction that slid the window), and
+            # this read is exactly where that has to become visible. With the
+            # claim it cannot have happened, so the check is a local answer and
+            # costs no stat/remote round-trip per model step.
+            log.catch_up()
         last = log.last_compaction()
         self._json(
             {
@@ -100,11 +108,14 @@ class LogMixin:
         project = self._state.project
         if project is None:
             return self._json({"error": "no project is open"}, status=409)
-        if project.read_only:
-            # a read-only project's writer drops lines silently (project.open's
+        refusal = self._write_refusal(project)
+        if refusal is not None:
+            # the writer of a read-only open drops lines silently (project.open's
             # no-op writer); an append endpoint must not: it is the host asking,
-            # and "it worked" would be a lie it builds the next step on
-            return self._json({"error": "project is read-only", "code": "read_only"}, status=409)
+            # and "it worked" would be a lie it builds the next step on. And a
+            # line from a session with no run claim would land in a file another
+            # session is driving, after a context it never read (catch_up).
+            return self._json(refusal, status=409)
         body = self._read_body()
         if body is None:
             return self._json({"error": "bad json body"}, status=400)
@@ -153,8 +164,11 @@ class LogMixin:
         project = self._state.project
         if project is None:
             return self._json({"error": "no project is open"}, status=409)
-        if project.read_only:
-            return self._json({"error": "project is read-only", "code": "read_only"}, status=409)
+        refusal = self._write_refusal(project)
+        if refusal is not None:
+            # the window start is the model's context, slid by the session that
+            # is reasoning over it, and it is a header write in the same file
+            return self._json(refusal, status=409)
         body = self._read_body()
         if body is None:
             return self._json({"error": "bad json body"}, status=400)

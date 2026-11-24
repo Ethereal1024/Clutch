@@ -141,7 +141,7 @@ function createApi(state = {}) {
     if (state.busy) return json({ error: "a run is active; stop it before rolling back" }, 409);
     const project = state.project;
     if (project && project.readOnly) {
-      return json({ error: "project opened read-only; close the other window first" }, 409);
+      return json({ error: "project was opened read-only; it cannot be rolled back here" }, 409);
     }
     const report = await workspace.rollbackFrom(offset);
     if (report === null) return json({ error: "no recorded changes for that task" }, 404);

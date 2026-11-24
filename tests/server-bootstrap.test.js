@@ -125,27 +125,36 @@ async function main() {
   assert(await healthy(p1), "window 1's session still healthy");
   assert(await supervisorUp(), "supervisor still up (single instance)");
 
-  // ---- cross-process lock: same .clc from two session children ----
+  // ---- cross-process RUN claim: one running client per .clc ----
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "clutch-sup-"));
   const p2 = res2.url;
   const st1 = await post(`${p1}/api/project/new`, { dir: workDir, name: "demo" });
   assert(st1.status === 200, "window 1 creates a project");
   const clc = JSON.parse(st1.body).project;
   const stOpen1 = await post(`${p1}/api/project/open`, { path: clc });
-  assert(stOpen1.status === 200, "window 1 opens it (holds flock)");
+  assert(stOpen1.status === 200, "window 1 opens it (an idle open claims nothing)");
   const stOpen2 = await post(`${p2}/api/project/open`, { path: clc });
-  assert(stOpen2.status === 409, `window 2 gets kernel 409 on the same .clc (got ${stOpen2.status})`);
-  assert(stOpen2.body.includes("project_open_conflict"), "409 carries the conflict code");
+  assert(stOpen2.status === 200, `an idle .clc opens in both windows (got ${stOpen2.status})`);
 
-  // ---- window 1 closes: {leaving:true} -> session killed, lock freed WITHOUT
-  // any TTL. This is the quit gate's POST: the app says it is going for good,
-  // so the supervisor stops the child through its SIGTERM ladder.
+  // the exclusivity belongs to the TURN: window 1 starting a run takes the
+  // kernel lock on the .clc, and window 2's ask is the 409 that says so
+  const run1 = await post(`${p1}/api/run/state`, { busy: true, project: clc });
+  assert(run1.status === 200, "window 1 starts a run (the .clc's write claim)");
+  const run2 = await post(`${p2}/api/run/state`, { busy: true, project: clc });
+  assert(
+    run2.status === 409 && run2.body.includes("run_active"),
+    `window 2 cannot run the same .clc (got ${run2.status}: ${run2.body})`
+  );
+
+  // ---- window 1 closes: {leaving:true} -> session killed, and the claim goes
+  // with it WITHOUT any TTL. This is the quit gate's POST: the app says it is
+  // going for good, so the supervisor stops the child through its SIGTERM ladder.
   await s1.stop({ leaving: true });
   await sleep(700);
   assert(!(await healthy(p1)), "window 1's session died with its window");
   assert(await healthy(p2), "window 2's session survives window 1's close");
-  const stReopen = await post(`${p2}/api/project/open`, { path: clc });
-  assert(stReopen.status === 200, "lock freed on process exit, no TTL needed");
+  const stClaim = await post(`${p2}/api/run/state`, { busy: true, project: clc });
+  assert(stClaim.status === 200, `claim freed on process exit, no TTL needed (got ${stClaim.status})`);
 
   // ---- a release WITHOUT `leaving` is not "the app is gone": with a run in
   // flight the child must survive it (a hop loss, a slot re-claim, one tab

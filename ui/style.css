@@ -348,8 +348,7 @@ body { display: flex; flex-direction: column; height: 100%; }
 }
 
 /* ---- hidden status/badge refs — keep in DOM for els.ts ---- */
-#titlebar #status,
-#titlebar .readonly-badge { display: none; }
+#titlebar #status { display: none; }
 
 /* ---- phone-only trigger (shown by mobile.css) ---- */
 .tb-phone-only { display: none; }
@@ -533,6 +532,11 @@ body { display: flex; flex-direction: column; height: 100%; }
   letter-spacing: 0.08em;
 }
 .badge.idle { color: var(--muted); }
+/* the send's own wait (render-events.ts beginSend): the task is still in the box
+   and the log has not confirmed it. Quiet grey like idle — a turn that is not
+   running must never wear running's accent — with the pulse as the one thing that
+   says "on its way" rather than "nothing happening". */
+.badge.sending { color: var(--muted); animation: pulse 1.2s infinite; }
 .badge.running { color: var(--ink); background: var(--accent); border-color: var(--accent); animation: pulse 1.2s infinite; }
 .badge.waiting { color: var(--ink); background: var(--accent); border-color: var(--accent); animation: pulse 1.2s infinite; }
 .badge.finished { color: var(--text); border-color: var(--accent); }
@@ -613,6 +617,28 @@ button.primary { background: var(--text); border-color: var(--text); color: var(
 button.primary:hover:not(:disabled) { background: #d8d8db; border-color: #d8d8db; color: var(--ink); }
 button.primary.stop-mode { color: var(--accent); border-color: var(--accent); }
 button.primary.stop-mode:hover:not(:disabled) { background: #fbe6e6; border-color: var(--accent); color: var(--accent); }
+/* Run's own wait (stream-view.ts paintControls): the message is in the box and on
+   its way, and this is the control that says the delay belongs to the session. The
+   ring is the one `.older-spinner` draws — 10px, one muted track with an --accent
+   top, one 700ms turn, the shortest loop that still reads as motion. The track is
+   --ink at a quarter rather than --border, because it sits on the primary's
+   near-white --text face where the sheet's own border colour would not be seen at
+   all. It is a ::before so a state that lasts one round trip brings no markup into
+   the page. The button cannot be pressed twice while it waits, but a wait is not a
+   dead control: `:disabled` keeps the primary's full strength instead of
+   `button:disabled`'s 0.4, which would dim the very thing that is reporting. */
+#run-btn.sending:disabled { opacity: 1; cursor: progress; }
+#run-btn.sending::before {
+  content: "";
+  display: inline-block;
+  width: 10px; height: 10px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  border: 2px solid rgba(15, 15, 16, 0.22); /* --ink, a quarter, on the primary's --text */
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: older-spin 0.7s linear infinite;
+}
 /* ghost: a subdued, borderless-looking action (dismissals like Cancel) that
    reads as secondary next to the solid management buttons */
 button.ghost { background: transparent; color: var(--muted); }
@@ -664,6 +690,40 @@ button.ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--te
    (same convention as work mode: the more permissive state is the loud one) */
 #trust-btn.trust-on { border-color: var(--accent); color: var(--accent); }
 #trust-btn.trust-on:hover { border-color: var(--accent); color: var(--accent); }
+
+/* The claim pill: the whole announcement that ANOTHER window is running this
+   project. It starts the row (`margin-right: auto` in a flex-end cluster) because
+   it explains the controls that follow it — Run, mode and trust are all disabled
+   for as long as that run lasts — and its own click is the reload: the pane keeps
+   its picture and the stream reconnects at its watermark, which is how the foreign
+   run's records arrive. It leaves by itself when that run ends (the session's own
+   `running_elsewhere` frame), and the composer is the reader's again.
+   It shares the row's height so the cluster reads as one line, but it is a MARK,
+   not a fourth button: no min-width, muted, pill radius. The label is the state,
+   so it ellipsizes rather than wrapping the row — the title carries the whole
+   sentence. */
+.claim-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  margin-right: auto;
+  height: 29px;      /* `.run-actions button`'s pinned height, one row */
+  max-width: 100%;
+  padding: 0 var(--s3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg2);
+  color: var(--muted);
+  font-family: var(--font-display);
+  font-size: var(--fs-xs);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color var(--quick), color var(--quick);
+}
+.claim-pill:hover { border-color: var(--accent); color: var(--accent); }
+.claim-icon { flex: none; }
+.claim-pill span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 select {
   appearance: none;
@@ -806,6 +866,12 @@ main { display: flex; flex: 1; min-height: 0; }
    keeps the UA's own ring out of the way; the modal's fields and the picker's host
    row are the same look, two rules below. */
 #task-input:focus { outline: none; border-color: var(--accent); }
+/* ...and while a message it holds is on its way (stream-view.ts setStatus): the
+   box is read-only for that one round trip (typing over the message being sent
+   says the opposite), and a progress cursor is what tells a click that this is a
+   wait rather than a broken field. The text keeps full strength on purpose: it is
+   the reader's message, not a disabled one. */
+#task-input[aria-busy="true"] { cursor: progress; }
 .muted { color: var(--muted); font-size: 13px; }
 
 /* ---- the pane's LOAD state ---------------------------------------------------
@@ -938,9 +1004,10 @@ main { display: flex; flex: 1; min-height: 0; }
 /* hover: the accent edge, and the row's own voice. `color: var(--fg)` used to sit
    here — a name defined NOWHERE in this sheet or in mobile.css, so the declaration
    was invalid at computed-value time and the colour was simply INHERITED, which
-   happened to equal --text under #stream. Same defect class as the .readonly-badge
-   note further down; spelled out, the hover survives the pill being placed anywhere
-   else (and the token check in tests/ui_css_check.py is what found it). */
+   happened to equal --text under #stream. Same defect class as the `var(--font-ui)`
+   this sheet shipped once in the read-only badge: spelled out, the hover survives
+   the pill being placed anywhere else (and the token check in
+   tests/ui_css_check.py is what found it). */
 .older-pill:hover { border-color: var(--accent); color: var(--text); }
 .older-pill.hidden { display: none; }
 /* The wait itself. A ring rather than the strip `.open-progress` draws across the
@@ -2614,27 +2681,6 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
 /* project label */
 .project-label { font-size: 13px; font-family: var(--font-display); font-weight: 600; color: var(--muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1; }
 
-/* read-only badge: shown when the project was opened read-only because another
-   window holds the write lock (runs are rejected by the server) */
-.readonly-badge {
-  margin-left: 8px;
-  font-size: 10px;
-  /* was var(--font-ui) — a variable that is defined NOWHERE: an unknown
-     var() makes the declaration invalid, so this silently inherited from body
-     instead of using an intended stack. */
-  font-family: var(--font-display);
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--accent);
-  border: 1px solid var(--accent);
-  border-radius: 3px;
-  padding: 2px 6px;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: default;
-}
-
 /* welcome screen (kept as-is per user) */
 .welcome {
   position: fixed; inset: 0; z-index: 90;
@@ -2792,6 +2838,7 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
 .sb-status { font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
 .sb-status.running { color: var(--accent); }
 .sb-status.idle    { color: var(--muted); }
+.sb-status.sending { color: var(--muted); }
 .sb-status.error   { color: var(--accent); }
 .sb-workdir { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sb-project { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

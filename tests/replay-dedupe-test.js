@@ -122,6 +122,9 @@ global.runSettled = false;
 // runner cares about offsets, not prompts — what the mark does for a new run is
 // tests/perm-run-scope-test.js
 global.forgetAnsweredPerm = () => {};
+// the send outbox (js/render-events.ts noteUserMessage) answers the composer,
+// not the pane: this runner replays offsets with no send in flight
+global.noteUserMessage = () => {};
 // the journal anchors a cleared pane drops (js/task-rollback.js, which loads
 // after this module): they belong to the project that just left, so clearStream
 // forgets them with the transcript. What a stale set would cost is that

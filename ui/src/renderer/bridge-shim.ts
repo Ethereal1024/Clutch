@@ -135,17 +135,6 @@
     ensure: (data) => call("clutchSettings", "ensure", [data]),
   });
 
-  // the project locks the session HOST can see, and the one action a user is
-  // allowed: reclaim a project whose claiming window is PROVEN gone. The host
-  // that holds the lock answers, exactly as on the desktop: this page never
-  // guesses and never frees a live window's project (agent/core/lock_reconcile.py).
-  // A claim made by THIS device is unverifiable from the far side of a tunnel,
-  // so the host reports it rather than acting, and its answer is returned whole.
-  expose("clutchLocks", {
-    list: (slotId) => call("clutchLocks", "list", [slotId]),
-    reclaim: (project, slotId) => call("clutchLocks", "reclaim", [project, slotId]),
-  });
-
   // The two-argument verbs also accept the pre-tabs spelling, start(payload):
   // a first argument that is not a slot string IS the payload.
   function runArgs(slotOrPayload, maybePayload) {

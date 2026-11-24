@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/main.ts and run `npm run build:host`.
-// source sha256: 2412c610f559716861a723d0b7a96f4aaa680610b2c2e4147d35f3dd9dccce73
+// source sha256: 3bc4d9e40b00d828f40504353790f01e9328e491a2147182feb1e10f50dd8bf2
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -544,59 +544,6 @@ else {
             }
             return { ok: true };
         });
-        // ---- locks:* — the machine that HOLDS a project lock answers -----------
-        //
-        // A .clc lock is held by a process on the machine the project lives on, so
-        // only that machine's supervisor can see the kernel's answer and only it may
-        // act (agent/core/lock_reconcile.py). The page asks through here, which
-        // picks the supervisor from THIS window's own claim: the far side of a
-        // tunnel when the window works there, this machine otherwise. Nothing here
-        // ever unlinks a lock file, and reclaim refuses every state but a PROVEN
-        // orphan — the host's verdict is returned verbatim so the page can say what
-        // actually happened. A claim that names ANOTHER machine (a remote project
-        // claimed from a window here) is one of those refusals, and it is the case
-        // that left a reopened window staring at "open read-only" for five minutes:
-        // the far kernel cannot check our pids, so it keeps the claim until the
-        // claimant's own machine speaks. That is what these two do together — one
-        // reads each lock's verdict on THIS kernel, the other relays it as a witness.
-        //
-        // `slotId` is load-bearing, not a convenience: it is the only thing that says
-        // WHICH machine to ask, because a slot's claim is what holds the machine. An
-        // empty one resolves to the window's default session and, with no such claim,
-        // to this machine's supervisor — so a project on a far host came back as "no
-        // lock of that name", and the page offered "open read-only?" for a project
-        // nothing had open (the fix-train report). Both handlers below are therefore
-        // always called with the tab's own slot (ui/src/renderer/project.ts).
-        ipcMain.handle("locks:list", async (e, slotId) => {
-            const base = hostCore.supervisorBaseFor(e.sender.id, typeof slotId === "string" ? slotId : "");
-            if (!base)
-                return { error: "this window has no session host" };
-            const listed = await sessions.supervisorLocks(base);
-            if (!listed || !Array.isArray(listed.locks))
-                return listed;
-            // The host says who holds each lock; whether the WINDOW that claimed it
-            // still exists is a question only the machine it runs on can answer, and
-            // that is this one exactly when the record names this host. So each lock
-            // carries this kernel's verdict as `claim_liveness` (absent when the claim
-            // lives elsewhere: doubt is not painted as life).
-            return { locks: listed.locks.map(sessions.annotateClaimLiveness) };
-        });
-        ipcMain.handle("locks:reclaim", async (e, project, slotId) => {
-            const base = hostCore.supervisorBaseFor(e.sender.id, typeof slotId === "string" ? slotId : "");
-            if (!base)
-                return { revoked: false, why: "this window has no session host" };
-            const key = String(project || "");
-            // The page asks; whether anything is PROVABLE is decided here. A claim on
-            // another machine cannot be checked by the host that holds the lock (its
-            // kernel has never heard of that pid), so the host records the claim and
-            // waits for the claimant's own machine to speak — this one, when the
-            // record names it. Read the host's list again, take THIS kernel's verdict,
-            // and relay a witness only when the claiming window is positively gone: a
-            // page cannot talk this host into freeing a live window's project.
-            const listed = await sessions.supervisorLocks(base);
-            const witness = sessions.claimWitness(listed && listed.locks, key);
-            return sessions.supervisorLockReclaim(base, key, witness);
-        });
         // ---- run:* — the host-side run loop (P1-4) --------------------------------
         //
         // One createSessionRun instance per window. The renderer calls run:start to
@@ -635,7 +582,7 @@ else {
             }
             catch (err) {
                 tunnelLog(`[run] base lookup failed for slot ${key}: ${err && err.message}`);
-                return { error: String((err && err.message) || err), code: (err && err.code) || null };
+                return { error: String((err && err.message) || err), code: (err && err.code) || null, owner: (err && err.owner) || null };
             }
             if (!currentBase) {
                 // the one failure the page must treat as a lost session (it lands in
@@ -672,7 +619,7 @@ else {
             }
             catch (err) {
                 tunnelLog(`[run] createSessionRun failed for slot ${key}: ${err && err.message}`);
-                return { error: String((err && err.message) || err), code: (err && err.code) || null };
+                return { error: String((err && err.message) || err), code: (err && err.code) || null, owner: (err && err.owner) || null };
             }
         }
         // ONE wheel per turn. A start/step/drive for a slot whose instance is
@@ -690,7 +637,10 @@ else {
         //     a turn was in flight.
         //
         // `run_active` is the code the page treats as "somebody is driving this":
-        // a fact, not a failure (render-events.ts resumeTurn).
+        // a fact, not a failure (render-events.ts resumeTurn). It means THIS window
+        // already has a wheel on the turn — never "another window runs the
+        // project", which is the session's own refusal and arrives as
+        // `run_elsewhere` (ui/src/host/run-session.ts hold()).
         const refuseIfDriving = (inst) => inst && inst.driving
             ? { ok: false, error: "this window is already driving this turn", code: "run_active" }
             : null;
@@ -704,8 +654,9 @@ else {
             const { slotId, payload } = slotArgs(first, second);
             const task = String((payload && payload.task) || "");
             const got = await ensureRunInstance(e.sender, slotId, payload);
-            if (got.error)
-                return { ok: false, error: got.error, code: got.code || null };
+            if (got.error) {
+                return { ok: false, error: got.error, code: got.code || null, owner: got.owner || null };
+            }
             const taken = refuseIfDriving(got.inst);
             if (taken)
                 return taken;
@@ -715,7 +666,7 @@ else {
                 return { ok: true };
             }
             catch (err) {
-                return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
+                return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null, owner: (err && err.owner) || null };
             }
             finally {
                 got.inst.driving = false;
@@ -746,7 +697,7 @@ else {
                 return { ok: true, result };
             }
             catch (err) {
-                return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
+                return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null, owner: (err && err.owner) || null };
             }
             finally {
                 inst.driving = false;
@@ -765,7 +716,7 @@ else {
                 return { ok: true, result };
             }
             catch (err) {
-                return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
+                return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null, owner: (err && err.owner) || null };
             }
             finally {
                 inst.driving = false;
@@ -782,8 +733,9 @@ else {
             const { slotId, payload } = slotArgs(first, second);
             const task = String((payload && payload.task) || "");
             const got = await ensureRunInstance(e.sender, slotId, payload);
-            if (got.error)
-                return { ok: false, error: got.error, code: got.code || null };
+            if (got.error) {
+                return { ok: false, error: got.error, code: got.code || null, owner: got.owner || null };
+            }
             const taken = refuseIfDriving(got.inst);
             if (taken)
                 return taken;
@@ -793,7 +745,7 @@ else {
                 return { ok: true, result };
             }
             catch (err) {
-                return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
+                return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null, owner: (err && err.owner) || null };
             }
             finally {
                 got.inst.driving = false;
@@ -809,8 +761,9 @@ else {
         ipcMain.handle("run:state", async (e, first, second) => {
             const { slotId, payload } = slotArgs(first, second);
             const got = await ensureRunInstance(e.sender, slotId, payload);
-            if (got.error)
-                return { ok: false, error: got.error, code: got.code || null };
+            if (got.error) {
+                return { ok: false, error: got.error, code: got.code || null, owner: got.owner || null };
+            }
             try {
                 const result = await got.inst.run.state();
                 // `driven` is the other half of the answer, and the half the page
@@ -821,7 +774,7 @@ else {
                 return { ok: true, result, driven: !!got.inst.driving };
             }
             catch (err) {
-                return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
+                return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null, owner: (err && err.owner) || null };
             }
         });
         // tell every renderer the moment a tunnel dies, so it can drop a stale API

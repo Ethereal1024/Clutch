@@ -1,22 +1,18 @@
 // Pure HTTP client for the machine supervisor (agent/supervisor.py): probe,
-// session start/stop, heartbeat, shutdown, and the lock list/reclaim a window
-// asks its own host about. No process management and no
+// session start/stop, heartbeat and shutdown. No process management and no
 // Electron — every call takes an explicit base URL, so the SAME client drives
 // the local supervisor (http://127.0.0.1:SUPERVISOR_PORT) and a remote one
 // reached through the SSH tunnel. Consumed by server-bootstrap.js (desktop
-// spawn path), host-core.js (the session-claim state machine) and ui/main.js
-// (the lock panel).
+// spawn path) and host-core.js (the session-claim state machine).
 const os = require("os");
-// the client's half of agent/core/procstat.py: the kernel's word on whether the
-// window that claimed a project is still there
+// the client's half of agent/core/procstat.py: the (pid, start tick) a session
+// claim names, so the machine that records it can later tell a live window from
+// a gone one without trusting a heartbeat (agent/core/lock_reconcile.py)
 const procstat = require("./procstat");
 
 const HEALTH_REQUEST_TIMEOUT_MS = 2000;
 // session/start boots a onefile child: cover the supervisor's start timeout
 const SESSION_START_TIMEOUT_MS = 35_000;
-// a reclaim waits out the host's own grace (REVOKE_GRACE_S = 8s) plus the
-// SIGKILL fallback and the free-check that follows it
-const LOCK_RECLAIM_TIMEOUT_MS = 25_000;
 const HEARTBEAT_INTERVAL_MS = 8000; // << the supervisor's stale window (300s)
 // A beat that fails is not a dead session. The supervisor reaps a session only
 // once STALE_S (300s: a phone that went away with a run in flight must find its
@@ -100,11 +96,11 @@ async function supervisorSessionStart(base, baseUrl, model, knobs: any = {}) {
   // The window that is CLAIMING, in the only terms the machine it runs on can be
   // asked about later: (host, pid, start tick). EVERY claim names them, locally
   // and through a tunnel alike — the machine that RECORDS a claim may be another
-  // one, but the pid lives on the client's machine, and that is the kernel that
-  // will later prove the window gone (ui/main.ts relays that answer as the
-  // witness a far side accepts, agent/core/lock_reconcile.py witnessed). A claim
-  // that named nothing would be recorded "unclaimed", which nothing may ever
-  // free — the 300 s dead end this contract exists to end.
+  // one, but the pid lives on the client's machine, and that is the kernel the
+  // owner record's reconciler reads to separate a gone window from a frozen one
+  // (agent/core/lock_reconcile.py). A claim that named nothing would be recorded
+  // "unclaimed", which nothing may ever free — the 300 s dead end this contract
+  // exists to end.
   //
   // It is THIS process (the Electron main / Android host process), not the
   // renderer behind the window: a reload, a crash recovery or a navigation
@@ -310,101 +306,6 @@ async function supervisorShutdown(base, { timeoutMs = 2000 } = {}) {
   }
 }
 
-// The locks a supervisor can see, each classified by the KERNEL on ITS machine:
-// is the lock file still held, is the recorded holder alive, is the window that
-// claimed it alive ("live"/"orphan"/"ghost"/"unclaimed"/"unverifiable"/...).
-// Only a host can answer this — the client's own process table says nothing
-// about a remote session — so the window asks the supervisor that owns its
-// session. Read-only; an odd lock is data, not a failure.
-async function supervisorLocks(base) {
-  try {
-    const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), HEALTH_REQUEST_TIMEOUT_MS);
-    try {
-      const r = await fetch(`${base}/api/locks`, { signal: ctl.signal });
-      if (!r.ok) return { error: `lock list failed (${r.status})` };
-      const d = await (r.json() as any);
-      return { locks: Array.isArray(d.locks) ? d.locks : [] };
-    } finally {
-      clearTimeout(t);
-    }
-  } catch (e) {
-    return { error: `lock list error: ${e && e.message}` };
-  }
-}
-
-// The one machine that can answer "is the window that claimed this project still
-// there?" is the machine the claim names, and that is this one exactly when the
-// record's claim_host is this host. `claim_liveness` is that answer, and it is
-// ABSENT whenever the record names another machine (doubt is never painted as
-// life), names no window at all (a build before claims), or cannot be read at
-// all: the page decides on a positive verdict and nothing else.
-//
-// The record's `boot_id` is the HOLDER's boot (the session child that wrote the
-// lock), never the claimant's — a claim made from another machine carries a tick
-// read on THAT machine's kernel, so handing the holder's boot to procstat.state
-// made every cross-machine claim compare a tick against a stranger's boot and
-// come back "dead": a positive verdict about a LIVE window, which is the one
-// answer that must never be wrong here (it is what lets the page take a project
-// away from a live window). The tick is compared on its own, and the boot is
-// left out because nothing in the record speaks about the claimant's kernel.
-function annotateClaimLiveness(lock) {
-  if (!lock || typeof lock !== "object") return lock;
-  const owner = lock.owner;
-  if (!owner || typeof owner !== "object") return lock;
-  if (!os.hostname() || owner.claim_host !== os.hostname()) return lock;
-  if (!Number.isInteger(owner.claim_pid) || owner.claim_pid <= 0) return lock;
-  const started = typeof owner.claim_start === "string" ? owner.claim_start : "";
-  return { ...lock, claim_liveness: procstat.state(owner.claim_pid, started) };
-}
-
-// The witness a holding machine accepts: THIS machine's kernel answered "the
-// window named (host, pid, start) is gone", to be compared field by field with
-// the record it belongs to (agent/core/lock_reconcile.py witnessed()). Built
-// here, from the host's own list, so the reclaim path never has to trust a
-// page's opinion about what died — and null unless the record names this host
-// AND its window is positively gone.
-function claimWitness(locks, project) {
-  const list = Array.isArray(locks) ? locks : [];
-  const held = list.find((lk) => lk && lk.project === project);
-  if (!held || annotateClaimLiveness(held).claim_liveness !== "dead") return null;
-  const owner = held.owner;
-  return {
-    host: owner.claim_host,
-    pid: owner.claim_pid,
-    ...(owner.claim_start ? { start: owner.claim_start } : {}),
-  };
-}
-
-// The user's hand on a project the host can PROVE is orphaned. The host refuses
-// a live window and says why; the verdict is returned so the page reports what
-// actually happened instead of assuming it worked. `witness` is this client's
-// kernel speaking about a claim that lives on this machine (claimWitness); it is
-// sent only then, and the host ignores one that does not name its recorded claim.
-async function supervisorLockReclaim(base, project, witness = null) {
-  try {
-    const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), LOCK_RECLAIM_TIMEOUT_MS);
-    try {
-      const body: Record<string, any> = { project };
-      if (witness) body.witness = witness;
-      const r = await fetch(`${base}/api/locks/reclaim`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal: ctl.signal,
-      });
-      const d = await (r.json() as any).catch(() => ({}));
-      if (!r.ok) return { revoked: false, why: d.error || `reclaim failed (${r.status})` };
-      return d;
-    } finally {
-      clearTimeout(t);
-    }
-  } catch (e) {
-    return { revoked: false, why: `reclaim error: ${e && e.message}` };
-  }
-}
-
 module.exports = {
   supervisorProbe,
   supervisorIdentity,
@@ -413,8 +314,4 @@ module.exports = {
   supervisorSessionHeartbeat,
   startSupervisorHeartbeat,
   supervisorShutdown,
-  supervisorLocks,
-  annotateClaimLiveness,
-  claimWitness,
-  supervisorLockReclaim,
 };

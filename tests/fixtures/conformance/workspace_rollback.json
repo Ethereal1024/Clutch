@@ -118,7 +118,7 @@
     },
     {
       "body": {
-        "error": "project opened read-only; close the other window first"
+        "error": "project was opened read-only; it cannot be rolled back here"
       },
       "id": "rollback.read-only",
       "method": "POST",

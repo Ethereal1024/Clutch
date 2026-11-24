@@ -45,7 +45,7 @@ from agent.core.permission import (
     PermissionRequired,
 )
 from agent.events import PermissionRequestEvent
-from agent.project import ProjectLock, create_project
+from agent.project import create_project
 from agent.server import RunState, build
 from agent.tools.workspace import LocalWorkspace
 from tests.testsupport import check
@@ -307,7 +307,12 @@ def _sse_streams_redeliver_pending_asks() -> None:
             t2 = _require_in_thread(gate, LocalWorkspace(str(tmp)), out2)
             second = _wait_for_pending(gate)
             check(len(second) == 1 and second[0][0] != first[0], "a second ask waits")
-            got2 = win.wait_for(lambda e: e.get("type") == "permission_request", start=got[0] + 1)
+            # a re-announcement of the answered ask may still be in flight on the
+            # stream; the live delivery we care about is the one that is not it
+            got2 = win.wait_for(
+                lambda e: e.get("type") == "permission_request" and e.get("request_id") != first[0],
+                start=got[0] + 1,
+            )
             check(got2 is not None, "a live ask still reaches an already-open stream")
             check(got2[1].get("request_id") == second[0][0], "the live ask is the new one")
             check(gate.resolve(second[0][0], True), "allowing the second ask")
@@ -330,10 +335,6 @@ def _sse_streams_redeliver_pending_asks() -> None:
             for s in (win, after, other):
                 if s is not None:
                     s.close()
-            ProjectLock.release(pa.lock)
-            pa.lock = None
-            ProjectLock.release(pb.lock)
-            pb.lock = None
 
 
 def main() -> int:

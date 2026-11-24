@@ -189,24 +189,92 @@ stream.addEventListener("scroll", (e) => {
   setJumpVisible(!state.followTail);
 }, { passive: true });
 
+// The composer's own wait (render-events.ts beginSend): the task is in the box
+// and on its way, and the log has not confirmed it yet. It is a STATUS and not a
+// flag beside one, because that is exactly what it is — a state the page is in —
+// and every other way a send can stop being a send already comes through here:
+// the host's own running frames, a failure (render-events.ts run), a tab switch
+// (project.ts activateTab, which ends the wait and KEEPS the message).
+export let sending = false;
+
+// The TWO reasons this view may not write to the project it is watching, kept
+// apart because they end differently. `readOnly`: the file was OPENED as a
+// viewer here (fixed until it is reopened). `claimed`: another window is
+// RUNNING this project right now — a live fact, announced by the session
+// (render-events.ts `running_elsewhere`), over the moment that run ends, after
+// which this window may send again with no reload and no retry. Neither is a
+// lock on the FILE: an idle project is nobody's, which is why a run can start
+// anywhere the moment the last one ends.
+export let readOnly = false;
+export let claimed = false;
+
+export function setReadOnly(on) {
+  const next = !!on;
+  if (next === readOnly) return;
+  readOnly = next;
+  paintControls();
+}
+
+export function setClaimed(on) {
+  const next = !!on;
+  if (next === claimed) return;
+  claimed = next;
+  paintControls();
+}
+
 export function setStatus(state) {
-  els.status.className = "badge " + (state || "idle");
-  els.status.textContent = state || "idle";
-  busy = state === "running" || state === "waiting";
+  const now = state || "idle";
+  sending = now === "sending";
+  els.status.className = "badge " + now;
+  els.status.textContent = now;
+  busy = now === "running" || now === "waiting";
   // notify status-bar.ts without creating a circular import
-  document.dispatchEvent(new CustomEvent("clutch:status-changed", { detail: state || "idle" }));
-  // the run button doubles as Stop while a run is in progress
-  els.run.textContent = busy ? "■ Stop" : "▶ Run";
-  els.run.title = busy
-    ? "stop the running task"
-    : "run the task — Cmd/Ctrl+Enter in the box";
+  document.dispatchEvent(new CustomEvent("clutch:status-changed", { detail: now }));
+  paintControls();
+}
+
+// The box and the three controls beside it, painted from one state: the run
+// button is Run, the wait of a send, or Stop; the box is locked exactly while it
+// holds a message the log has not taken yet.
+function paintControls() {
+  // the run button doubles as the send's own wait, and as Stop while a run is in
+  // progress (the spinner is `#run-btn.sending::before`, style.css)
+  els.run.textContent = sending ? "Sending" : busy ? "■ Stop" : "▶ Run";
+  // why the button cannot be pressed is part of the button: an unexplained dead
+  // Run is the shape of bug this page has no room for
+  els.run.title = sending
+    ? "the message is on its way — it leaves the box when the session has it"
+    : busy
+      ? "stop the running task"
+      : claimed
+        ? "another window is running this project — the composer is yours again when that run ends"
+        : readOnly
+          ? "this project is open read-only here — a run needs a writable open"
+          : "run the task — Cmd/Ctrl+Enter in the box";
   els.run.classList.toggle("stop-mode", busy);
-  els.run.disabled = busy ? false : !currentProject;
+  els.run.classList.toggle("sending", sending);
+  // a wait is not a dead control: it cannot be pressed twice, but it keeps the
+  // primary look (style.css restores the full strength `button:disabled` takes)
+  els.run.disabled = sending ? true : busy ? false : (!currentProject || readOnly || claimed);
+  // the message in the box IS the one being sent, and a box you can type over it
+  // says the opposite. Read-only, not disabled, so the message stays selectable
+  // and copyable while the round trip is in the reader's way. Neither a viewer
+  // open nor another window's run is a place to type into, either: a composer
+  // that accepts a message it can never send is the one lie this page must not
+  // tell.
+  els.task.readOnly = sending || readOnly || claimed;
+  if (sending) els.task.setAttribute("aria-busy", "true");
+  else els.task.removeAttribute("aria-busy");
   // the mode applies to the next run only: lock the toggle while busy
-  els.mode.disabled = busy;
-  els.mode.title = busy
+  els.mode.disabled = busy || sending || readOnly || claimed;
+  els.mode.title = busy || sending
     ? "A run is in progress; the mode applies to the next run."
-    : "chat: read-only analysis · work: full access (write/edit/any command). Applies to the next run.";
+    : readOnly || claimed
+      ? "This stream is read-only; the mode applies to a later run."
+      : "chat: read-only analysis · work: full access (write/edit/any command). Applies to the next run.";
+  // the pill is the whole announcement of a foreign run: it sits beside the
+  // controls it disables, and its own click is the reload
+  if (els.claim) els.claim.classList.toggle("hidden", !claimed);
 }
 
 // tracks the most recent agent text block (created by streaming text_delta)

@@ -119,11 +119,20 @@ def main() -> int:
         check(clc.exists(), ".clc file exists")
 
         st, _ = http_post(f"{s1}/api/project/open", {"path": str(clc)})
-        check(st == 200, "child 1 opens project (holds flock)")
+        check(st == 200, "child 1 opens project (an idle open takes no lock)")
 
-        st, body = http_post(f"{s2}/api/project/open", {"path": str(clc)})
-        check(st == 409, "child 2 gets 409 on same project (kernel lock)")
-        check("project_open_conflict" in body, "409 carries conflict code")
+        st, _ = http_post(f"{s2}/api/project/open", {"path": str(clc)})
+        check(st == 200, "child 2 opens the same idle .clc: only a RUN is exclusive")
+
+        # the claim is the run: child 1 starting a turn locks the file against
+        # every other window, and child 2's ask is the 409 that says so
+        st, _ = http_post(f"{s1}/api/run/state", {"busy": True, "project": str(clc)})
+        check(st == 200, "child 1 starts a run (the kernel write claim)")
+        st, body = http_post(f"{s2}/api/run/state", {"busy": True, "project": str(clc)})
+        check(st == 409, "child 2 cannot start a run on the same project")
+        owner = json.loads(body)
+        check(owner.get("code") == "run_active", "409 says run_active")
+        check(int((owner.get("owner") or {}).get("pid") or 0) > 0, "and names the process that runs it")
 
         # different projects never conflict
         st, body = http_post(f"{s2}/api/project/new", {"dir": str(proj_dir), "name": "other"})
@@ -131,11 +140,16 @@ def main() -> int:
         st, _ = http_post(f"{s2}/api/project/open", {"path": str(clc2)})
         check(st == 200, "child 2 opens a different project freely")
 
-        # child 1 exit releases the lock via the kernel -> child 2 can reopen
-        st, _ = http_post(f"{base}/api/session/stop", {"session_id": sid1})
-        check(st == 200, "session 1 stopped")
+        # child 1 ending its turn hands the claim back at once -> child 2 runs
+        st, _ = http_post(f"{s1}/api/run/state", {"busy": False, "project": str(clc)})
+        check(st == 200, "child 1 ends its turn")
         st, _ = http_post(f"{s2}/api/project/open", {"path": str(clc)})
-        check(st == 200, "lock freed on process exit (no TTL needed)")
+        check(st == 200, "child 2 switches back to the .clc nobody runs now")
+        st, _ = http_post(f"{s2}/api/run/state", {"busy": True, "project": str(clc)})
+        check(st == 200, "child 2 runs the .clc it was shut out of (no TTL, no reclaim)")
+
+        st, _ = http_post(f"{base}/api/session/stop", {"session_id": sid1})
+        check(st == 200, "session 1 stopped with nothing in flight")
 
         # heartbeat unknown session -> 404
         st, _ = http_post(f"{base}/api/session/heartbeat", {"session_id": "nope"})
@@ -856,6 +870,10 @@ def main() -> int:
             st, body = http_post(f"{child18}/api/project/new", {"dir": wdir18, "name": "claimed"})
             check(st == 200, "the session creates a project")
             clc18 = json.loads(body)["project"]
+            # the claim is the RUN: opening (and creating) leaves the file free,
+            # so the record the reaper reads is written when the turn starts
+            st, _ = http_post(f"{child18}/api/run/state", {"busy": True, "project": clc18})
+            check(st == 200, "the session starts a run on it")
             record = pl.ProjectLock.owner(clc18)
             check(record is not None, "the .clc carries the holder's record")
             check(record.get("claim_pid") == claimant.pid, "the record names the claiming window")
@@ -904,8 +922,8 @@ def main() -> int:
                 "the same identity now reads dead to the kernel",
             )
             check(
-                sup18._stale(rec18, time.time() + 10_000) is True,
-                "and the same silence becomes stale — the window is truly gone",
+                sup18._stale(rec18, time.time() + 10_000) is False,
+                "a run in flight is still the child's own evidence: doubt never ends work",
             )
 
             st, body = http_post(f"{base18}/api/locks/reclaim", {"project": clc18})
@@ -952,6 +970,8 @@ def main() -> int:
                 st, body = http_post(f"{remote_child}/api/project/new", {"dir": rdir, "name": "tunnelled"})
                 check(st == 200, "the session opens a project")
                 rclc = json.loads(body)["project"]
+                st, _ = http_post(f"{remote_child}/api/run/state", {"busy": True, "project": rclc})
+                check(st == 200, "the tunnelled session starts a run (it claims the .clc)")
                 rrecord = pl.ProjectLock.owner(rclc) or {}
                 check(
                     rrecord.get("claim_host") == "elsewhere",

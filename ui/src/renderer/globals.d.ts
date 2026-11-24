@@ -53,7 +53,6 @@ interface Window {
   clutchTunnel?: any;
   clutchComponents?: any;
   clutchRun?: any;
-  clutchLocks?: any;
   clutchUpdate?: any;
   clutchShell?: any;
   clutch?: any;
