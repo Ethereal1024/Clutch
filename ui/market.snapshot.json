@@ -4,15 +4,15 @@
     {
       "id": "Ethereal1024/clutch-workspace",
       "name": "clutch-workspace",
-      "manifest": "https://github.com/Ethereal1024/clutch-workspace/releases/download/v0.1.1/clutch-component.json",
-      "version": "0.1.1",
+      "manifest": "https://github.com/Ethereal1024/clutch-workspace/releases/download/v0.2.0/clutch-component.json",
+      "version": "0.2.0",
       "summary": "read, grep, write and edit files in the project the session works in",
       "tags": [
         "workspace"
       ],
       "homepage": "https://github.com/Ethereal1024/clutch-workspace",
       "license": "MIT",
-      "manifest_sha256": "08d4e8e1a44be86001fcf7f31f04d5ba5e76dfea2dedfdc4703ba06e53721b66"
+      "manifest_sha256": "e1af71d04e834c15369cc9a09156b422da62f4daae3c86ad57dcf03b24443690"
     },
     {
       "id": "Ethereal1024/clutch-websearch",
@@ -31,15 +31,15 @@
     {
       "id": "Ethereal1024/clutch-skills",
       "name": "clutch-skills",
-      "manifest": "https://github.com/Ethereal1024/clutch-skills/releases/download/v0.1.2/clutch-component.json",
-      "version": "0.1.2",
+      "manifest": "https://github.com/Ethereal1024/clutch-skills/releases/download/v0.2.0/clutch-component.json",
+      "version": "0.2.0",
       "summary": "the skill library: the instructions a workflow is run by",
       "tags": [
         "skills"
       ],
       "homepage": "https://github.com/Ethereal1024/clutch-skills",
       "license": "MIT",
-      "manifest_sha256": "cafed0bb41ea7731181313baad775560cf45477ec828269bd1fddc0086321fa4"
+      "manifest_sha256": "41f66601f504a39c134c2bdc7c3e5df9225e320592e21a643481216f88c4cf30"
     }
   ]
 }

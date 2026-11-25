@@ -4,8 +4,8 @@
     {
       "id": "Ethereal1024/clutch-workspace",
       "name": "clutch-workspace",
-      "manifest": "https://github.com/Ethereal1024/clutch-workspace/releases/download/v0.1.1/clutch-component.json",
-      "version": "0.1.1",
+      "manifest": "https://github.com/Ethereal1024/clutch-workspace/releases/download/v0.2.0/clutch-component.json",
+      "version": "0.2.0",
       "summary": "read, grep, write and edit files in the project the session works in",
       "tags": ["workspace"],
       "homepage": "https://github.com/Ethereal1024/clutch-workspace",
@@ -24,8 +24,8 @@
     {
       "id": "Ethereal1024/clutch-skills",
       "name": "clutch-skills",
-      "manifest": "https://github.com/Ethereal1024/clutch-skills/releases/download/v0.1.2/clutch-component.json",
-      "version": "0.1.2",
+      "manifest": "https://github.com/Ethereal1024/clutch-skills/releases/download/v0.2.0/clutch-component.json",
+      "version": "0.2.0",
       "summary": "the skill library: the instructions a workflow is run by",
       "tags": ["skills"],
       "homepage": "https://github.com/Ethereal1024/clutch-skills",
