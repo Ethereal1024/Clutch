@@ -4,9 +4,10 @@
 // reconnect dialog — and must not re-dial a host it was never on — in any other
 // window of the same app.
 //
-// The cause was a scope mismatch, not a detection bug. The tunnel (the hop) is ONE
-// resource for the whole process: ui/host-core.js holds one claim per window in
-// `windowBackends`, ui/main.js owns the single hop. A SESSION, on the other hand,
+// The cause was a scope mismatch, not a detection bug. A hop is ONE resource for
+// the whole process — and, since per-endpoint hops, one of SEVERAL: ui/host-core.js
+// holds one claim per window in `windowBackends`, ui/main.js holds the hops
+// (`ladders`, one per endpoint). A SESSION, on the other hand,
 // belongs to the window that claimed it (`wc.id`).
 //
 // The old notification threw that distinction away: every window was sent a bare

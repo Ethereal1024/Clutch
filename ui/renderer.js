@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: c4589aa1fee56f52d433382f99166c279a34ae762d030547888e229a1f784548
+// sources sha256: f3f8e694ea6613a580b0e818c6f33b96e08ad48b4f2880be8f275286f68a57a3
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts

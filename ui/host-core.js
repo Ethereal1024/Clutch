@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/host-core.ts and run `npm run build:host`.
-// source sha256: fef462f3a7387d963fa4182055e651764f6497aedee54681f92554d1ab618707
+// source sha256: 9419eed8ac45c7b2a831e929faf2265b21318ee9ab274a911dbca8f7d3c26bb2
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -492,11 +492,16 @@ function createHostCore(deps) {
     }
     // Every window's claim at once, WITHOUT asking any supervisor to exit (the
     // machine may still serve other windows — their sessions keep running on it).
-    // Machine-wide acts only: app shutdown, and the picker's own Disconnect, which
-    // IS the user leaving the machine. A window leaving an outage releases its OWN
-    // claim instead (releaseWindowBackend, through the `session:release` handler):
-    // dropping every window's session because one of them pressed Cancel is how a
-    // disconnect in one window used to take the other windows' work down with it.
+    // The QUIT GATE's act, and nothing else. The picker's own Disconnect used to
+    // come through here ("every window was on the tunnel the user just dropped"),
+    // and that premise died with per-endpoint hops: a session on THIS machine never
+    // went through a hop, and a tab on another machine holds a different one — so
+    // that disconnect releases only the claims on the hop it stops
+    // (releaseTunnelBackends + releaseSlot, ui/main.ts tunnel:disconnect). A window
+    // leaving an outage releases its OWN claim instead (releaseWindowBackends,
+    // through the `session:release` handler): dropping every window's session
+    // because one of them pressed Cancel is how a disconnect in one window used to
+    // take the other windows' work down with it.
     async function releaseAllBackends(opts = {}) {
         for (const [key, wb] of [...windowBackends]) {
             windowBackends.delete(key);
@@ -520,14 +525,18 @@ function createHostCore(deps) {
     // over the old one's work.
     //
     // Returns the SLOTS whose forward it dropped — {winId, slotId} records, not a
-    // count. The tunnel is one process-wide resource and the sessions are not: a
-    // shell's tunnel-end notification has to name the slots the hop actually
-    // owned, or every other tab is told it lost a session that is still running
-    // fine (see the `lost` flag the shells compute from this list).
+    // count. A hop is a process-wide resource — and, since per-endpoint hops, one
+    // of SEVERAL — while the sessions are not: a shell's tunnel-end notification
+    // has to name the slots the hop actually owned, or every other tab is told it
+    // lost a session that is still running fine (see the `lost` flag the shells
+    // compute from this list). This is also what makes the picker's own Disconnect
+    // safe to scope by URL (ui/main.ts tunnel:disconnect).
     //
     // `tunnelUrl` (optional): when given, only releases backends whose forward
     // was opened through that tunnel. Slots on a different tunnel are untouched.
-    // Omit to release ALL tunnel backends (app shutdown, single-tunnel teardown).
+    // Omit to release ALL tunnel backends: the shell could not say which hop died
+    // (a tunnel end with no URL), so no forward may be left pointing at a port
+    // nobody serves any more.
     async function releaseTunnelBackends(tunnelUrl) {
         const affected = [];
         for (const [key, wb] of [...windowBackends]) {

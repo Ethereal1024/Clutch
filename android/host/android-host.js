@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit android/host/src/android-host.ts and run `node android/build-host.js`.
-// source sha256: aca09756379cd9142fa23b399aaa69b4c6535a6a6edb45a7527423733ac8b4bb
+// source sha256: 0b554804114e3e0f55d8a059acd51d427e73f79dadd0aaac814a75aff14a72d4
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -468,7 +468,18 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
                 // timeout (ui/plugin-link.js)
                 pluginLink.stop();
                 flushAllRuns();
-                await hostCore.releaseAllBackends();
+                // ONE hop, named by itself — the desktop's rule (ui/main.ts
+                // tunnel:disconnect). This shell holds a single hop today, so "every
+                // claim" and "the claims on this hop" happen to be the same set; the
+                // machine-wide premise is what per-endpoint hops retired, and a claim on
+                // a hop this stop does not own must never go with it. With no hop up
+                // there is no name to scope by, so every tunnel-borne claim goes.
+                const st = tunnel.tunnelStatus();
+                const affected = st && st.url ? await hostCore.releaseTunnelBackends(st.url) : await hostCore.releaseTunnelBackends();
+                // …and the sessions those forwards carried, told while their hop is still
+                // up: releaseTunnelBackends drops the local half only
+                for (const s of affected)
+                    await hostCore.releaseSlot(s.winId, s.slotId);
                 await tunnel.stopTunnel();
                 return { ok: true };
             },

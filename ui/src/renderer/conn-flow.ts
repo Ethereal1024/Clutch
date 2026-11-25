@@ -649,9 +649,13 @@ export async function connConnect(v) {
   }
   if (v === "local") {
     if (localStorage.getItem("clutch_ssh_connected")) {
-      // the standing intent goes FIRST: the disconnect below ends the tunnel and
-      // the host announces that as "tunnel:ended", which the renderer reads as a
-      // LOST session unless the intent is already gone (backend-lifecycle.ts)
+      // the standing intent goes FIRST: it names the host this window is leaving,
+      // and it is the key the tunnel-end handler reads to tell a deliberate leave
+      // from a loss (backend-lifecycle.ts). The disconnect below is caller-managed
+      // and announces nothing by itself (tunnel-lifecycle's stopTunnel(notify =
+      // false)) — the window re-claims THIS machine's session in the same turn —
+      // but a hop that dies while the move is in flight must not arrive as
+      // "lost the remote connection".
       localStorage.removeItem("clutch_ssh_connected");
       localStorage.removeItem("clutch_degrade"); // exiting degrade mode too
       await window.clutchTunnel.disconnect();

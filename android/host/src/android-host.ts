@@ -485,7 +485,18 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 }: any = {
         // timeout (ui/plugin-link.js)
         pluginLink.stop();
         flushAllRuns();
-        await hostCore.releaseAllBackends();
+        // ONE hop, named by itself — the desktop's rule (ui/main.ts
+        // tunnel:disconnect). This shell holds a single hop today, so "every
+        // claim" and "the claims on this hop" happen to be the same set; the
+        // machine-wide premise is what per-endpoint hops retired, and a claim on
+        // a hop this stop does not own must never go with it. With no hop up
+        // there is no name to scope by, so every tunnel-borne claim goes.
+        const st = tunnel.tunnelStatus();
+        const affected =
+          st && st.url ? await hostCore.releaseTunnelBackends(st.url) : await hostCore.releaseTunnelBackends();
+        // …and the sessions those forwards carried, told while their hop is still
+        // up: releaseTunnelBackends drops the local half only
+        for (const s of affected) await hostCore.releaseSlot(s.winId, s.slotId);
         await tunnel.stopTunnel();
         return { ok: true };
       },
