@@ -16,6 +16,7 @@ import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -37,7 +38,7 @@ from tests.testsupport import check, http_get, http_post, ui_source
 
 
 @contextlib.contextmanager
-def _lock_held_elsewhere(clc_path: str, lock_path: str, record: bool = False):
+def _lock_held_elsewhere(clc_path: str, lock_path: str, record: bool = False, claim: dict | None = None):
     """Another window (process) holding this .clc's write lock, while the block
     runs. POSIX: a flock on a fresh fd of the lock file. Windows: the product
     locks a byte range (LockFileEx), which no in-process trick can imitate, so a
@@ -45,7 +46,13 @@ def _lock_held_elsewhere(clc_path: str, lock_path: str, record: bool = False):
 
     ``record=True`` always uses that holder process, on every platform: a bare
     flock takes the lock but writes no OWNER RECORD, and a test of the 409's
-    ``owner`` report needs a holder that says who it is."""
+    ``owner`` report needs a holder that says who it is.
+
+    ``claim={...}`` makes the holder write a CLAIM record naming the window that
+    claimed it — the same keys the real session records (claim, claim_host,
+    claim_pid, claim_start, agent/server.py set_lock_context). It is what a page
+    settles a stranded claim with, so a test of ``claim_owner`` has to be able to
+    say which window the lock belongs to."""
     if fcntl is not None and not record:
         with open(lock_path, "a+") as other:
             fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -55,7 +62,14 @@ def _lock_held_elsewhere(clc_path: str, lock_path: str, record: bool = False):
                 fcntl.flock(other, fcntl.LOCK_UN)
         return
     child = subprocess.Popen(
-        [sys.executable, "-c", _HOLDER_CHILD, str(Path(__file__).resolve().parents[1]), clc_path],
+        [
+            sys.executable,
+            "-c",
+            _HOLDER_CHILD,
+            str(Path(__file__).resolve().parents[1]),
+            clc_path,
+            json.dumps(claim or {}),
+        ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,
@@ -79,13 +93,15 @@ def _lock_held_elsewhere(clc_path: str, lock_path: str, record: bool = False):
 # it until the parent closes our stdin (exit releases it — the OS drops the
 # kernel lock either way)
 _HOLDER_CHILD = (
-    "import sys; sys.path.insert(0, sys.argv[1]);"
-    "from agent.core.project_lock import ProjectLock;"
-    "h = ProjectLock.acquire(sys.argv[2]);"
+    "import json, sys; sys.path.insert(0, sys.argv[1]);"
+    "from agent.core import project_lock as pl;"
+    "pl.set_context(**(json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}));"
+    "h = pl.ProjectLock.acquire(sys.argv[2]);"
     "print('held' if h is not None else 'refused', flush=True);"
     "sys.stdin.readline() if h is None else sys.stdin.read();"
-    "ProjectLock.release(h)"
+    "pl.ProjectLock.release(h)"
 )
+
 
 
 def _symlinks_supported(dir_path: Path) -> bool:
@@ -942,13 +958,41 @@ def _connecting_stream_status(base_url, clc, state, broadcaster) -> None:
         # never write) vs. another window RUNNING it right now (over with that
         # run, and then this window may send again)
         from agent.core.project_lock import _local_lock_path
-        with _lock_held_elsewhere(str(clc), _local_lock_path(str(clc)), record=True):
+
+        # a window that has already exited: the pid is a real one, and gone by the
+        # time anybody reads the frame
+        gone = subprocess.Popen([sys.executable, "-c", ""])
+        gone.wait()
+        with _lock_held_elsewhere(
+            str(clc),
+            _local_lock_path(str(clc)),
+            record=True,
+            claim={
+                "claim": "window",
+                "claim_host": socket.gethostname(),
+                "claim_pid": gone.pid,
+                "claim_start": "0",
+            },
+        ):
             held = status_frame(f"{base_url}/api/events?replay=0&project={quote(str(clc))}")
         check(
             held is not None
             and held.get("read_only") is False
             and held.get("running_elsewhere") is True,
             f"a foreign run is running_elsewhere, not a read-only open ({held})",
+        )
+        # …and the frame names the WINDOW behind that claim. It is the only thing
+        # a page can settle: the machine in claim_host is the one that can prove
+        # that process gone and free the file (host-core settleClaim →
+        # POST /api/locks/reclaim), and a claim with no owner leaves the pill
+        # standing over a window that no longer exists.
+        owner = (held or {}).get("claim_owner") or {}
+        check(
+            owner.get("claim_host") == socket.gethostname()
+            and owner.get("claim_pid") == gone.pid
+            and owner.get("claim_start") == "0"
+            and owner.get("claim") == "window",
+            f"the claim's owner record travels with it, identity and all ({owner})",
         )
         after = status_frame(f"{base_url}/api/events?replay=0&project={quote(str(clc))}")
         check(
@@ -1648,11 +1692,60 @@ def _a_foreign_run_is_followed() -> None:
 
             # another window STARTS running it: nothing is opened here, no
             # conflict is reported anywhere, the page is simply told
-            with _lock_held_elsewhere(key, _local_lock_path(key), record=True):
+            dead = subprocess.Popen([sys.executable, "-c", ""])
+            dead.wait()
+            with _lock_held_elsewhere(
+                key,
+                _local_lock_path(key),
+                record=True,
+                claim={
+                    "claim": "window",
+                    "claim_host": socket.gethostname(),
+                    "claim_pid": dead.pid,
+                    "claim_start": "0",
+                },
+            ):
+                began = drain("running_elsewhere", True)
                 check(
-                    drain("running_elsewhere", True) is not None,
+                    began is not None,
                     "a foreign run turns the page read-only, without a reload",
                 )
+                # ...and the announcement names the WINDOW that holds it: the
+                # page hands that record to the machine it names, and only a
+                # proven-dead owner there is ever reclaimed. A transition with no
+                # owner is the pill nobody can settle — the reported "another
+                # window is running" that outlives the window.
+                owner = (getattr(began, "claim_owner", None) or {})
+                check(
+                    owner.get("claim_host") == socket.gethostname()
+                    and owner.get("claim_pid") == dead.pid
+                    and owner.get("claim_start") == "0",
+                    f"the transition carries the claim's owner record ({owner})",
+                )
+
+                # A tick that raises is retried, not fatal. The read of a foreign
+                # run's tail (catch_up) is the one thing here that can fail on a
+                # healthy session — a far workspace whose bridge just went away —
+                # and a watcher that dies on it leaves the page read-only forever
+                # with nothing anywhere left to end it.
+                log = state.project.log
+                real_catch_up = log.catch_up
+                raised = {"n": 0}
+
+                def flaky_catch_up():
+                    if raised["n"] < 3:
+                        raised["n"] += 1
+                        raise RuntimeError("the bridge went away mid-read")
+                    return real_catch_up()
+
+                log.catch_up = flaky_catch_up
+                # the failures happen FIRST, then the line: this is about the
+                # retry, and racing the write against the three bad ticks would
+                # make the test assert the timing rather than the watcher
+                deadline = time.time() + 10
+                while time.time() < deadline and raised["n"] < 3:
+                    time.sleep(0.02)
+                check(raised["n"] >= 3, "the foreign run's tail was read by ticks that raised")
                 # that run's line, written the way the other window writes it
                 line = event_to_json(UserMessageEvent(content="from the other window"))
                 append_jsonl(key, line)
@@ -1667,6 +1760,7 @@ def _a_foreign_run_is_followed() -> None:
                     if getattr(ev, "content", None) == "from the other window":
                         seen = ev
                 check(seen is not None, "the foreign run's line is followed into this window's stream")
+                log.catch_up = real_catch_up
 
             check(
                 drain("running_elsewhere", False) is not None,

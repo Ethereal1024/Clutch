@@ -126,6 +126,10 @@
     // call, exactly as any other route it does not serve.
     setSlotTarget: (slotId, target) => call("clutchApi", "setSlotTarget", [slotId, target]),
     getSlotTarget: (slotId) => call("clutchApi", "getSlotTarget", [slotId]),
+    // settle a claim whose window may be gone: same verb, same three arguments,
+    // as the desktop preload (the bridge host decides with its own procstat)
+    settleClaim: (slotId, project, owner) =>
+      call("clutchApi", "settleClaim", [slotId, project, owner]),
     onBaseChanged: (cb) => subscribe("backend:base-changed", cb),
   });
 

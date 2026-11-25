@@ -251,6 +251,44 @@ function startSupervisorHeartbeat(base, sid, onFail) {
   };
 }
 
+// Free a lock whose claiming window this MACHINE has proven gone.
+//
+// The one act a client can perform on a claim it did not take. A lock is freed by
+// the host that holds it (agent/core/project_lock.py — the kernel lock is the
+// host's), so this POSTs to that host's supervisor, and what makes it legal is
+// the `witness`: the CLAIMANT MACHINE's own answer about the window named in the
+// lock's record ({host, pid, start}). The far side compares it with the record
+// field by field (agent/core/lock_reconcile.py witnessed) and refuses anything
+// that does not name that very process, so a witness about a live window — or
+// about a pid recycled onto a stranger — frees nothing. The verdict comes back
+// whole ({project, before, revoked, why}) because a button that reports "done"
+// without having done it is the bug this path exists to end.
+async function supervisorReclaimLock(base, project, witness) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), HEALTH_REQUEST_TIMEOUT_MS);
+  try {
+    const r = await fetch(`${base}/api/locks/reclaim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project, witness }),
+      signal: ctl.signal,
+    });
+    if (!r.ok) return { error: `reclaim failed (${r.status})` };
+    let body = null;
+    try {
+      body = await (r.json() as any);
+    } catch {
+      return { error: "reclaim answered nothing readable" };
+    }
+    if (!body || typeof body !== "object") return { error: "reclaim answered nothing readable" };
+    return body;
+  } catch (e) {
+    return { error: `reclaim error: ${(e && e.message) || e}` };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 // Ask a supervisor to exit once its sessions are gone. AWAITED where it matters
 // (the quit gate): the supervisor kills what is still running before arming its
 // idle exit, so this POST is the last chance for a session the client could not
@@ -276,5 +314,6 @@ module.exports = {
   supervisorSessionStop,
   supervisorSessionHeartbeat,
   startSupervisorHeartbeat,
+  supervisorReclaimLock,
   supervisorShutdown,
 };

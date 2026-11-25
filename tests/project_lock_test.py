@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -82,6 +83,24 @@ def test_owner_record_is_written_annotated_and_erased(tmp: str) -> None:
     check(pl.ProjectLock.inspect(key)["held"], "the kernel agrees the lock is held")
     pl.ProjectLock.annotate(h, port=19400, claim="window")
     check(pl.ProjectLock.owner(key)["port"] == 19400, "annotate adds a fact the holder learned later")
+    # …and the part a CLIENT can use is the whole of what a witness needs: the
+    # machine and process the claim names, and the start tick that pins it. Without
+    # claim_start a reclaim could only compare a pid, and a recycled number would
+    # read as the same window (agent/core/lock_reconcile.py witnessed).
+    pl.ProjectLock.annotate(
+        h, claim_host=socket.gethostname(), claim_pid=os.getpid(), claim_start=me["starttime"]
+    )
+    summary = pl.owner_summary(pl.ProjectLock.owner(key))
+    check(
+        set(summary) <= set(pl.OWNER_FIELDS),
+        f"an owner summary is a subset of OWNER_FIELDS ({sorted(summary)})",
+    )
+    check(
+        summary.get("claim_host") == socket.gethostname()
+        and summary.get("claim_pid") == os.getpid()
+        and summary.get("claim_start") == me["starttime"],
+        f"and it carries the claim's full identity ({summary})",
+    )
     pl.ProjectLock.release(h)
     check(pl.ProjectLock.owner(key) is None, "the record leaves with the lock")
     check(not pl.ProjectLock.inspect(key)["held"], "and the kernel agrees it is free")

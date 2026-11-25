@@ -29,6 +29,11 @@ contextBridge.exposeInMainWorld("clutchApi", {
   // A change affects the NEXT claim, not the current session.
   setSlotTarget: (slotId, target) => ipcRenderer.invoke("slot:set-target", slotId, target),
   getSlotTarget: (slotId) => ipcRenderer.invoke("slot:get-target", slotId),
+  // Is the window a claim names still there? The owner record comes from the
+  // status frame; `claim:settle` answers { verdict, why } and only reclaims on a
+  // proven-dead witness from the machine named in the record.
+  settleClaim: (slotId, project, owner) =>
+    ipcRenderer.invoke("claim:settle", slotId, project, owner),
 });
 
 contextBridge.exposeInMainWorld("clutchSettings", {

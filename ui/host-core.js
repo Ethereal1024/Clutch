@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/host-core.ts and run `npm run build:host`.
-// source sha256: cfa13f7182675486bb87b77308ce03d475ced8a6432fd462bd2ec38f4239ac0e
+// source sha256: fef462f3a7387d963fa4182055e651764f6497aedee54681f92554d1ab618707
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -20,6 +20,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 //                            injectable so tests can run the machine hermetically)
 const defaultSessions = require("./supervisor-client");
 const { LOCAL_ID } = require("./executors");
+const os = require("os");
+const procstat = require("./procstat");
 // the one channel the machine itself pushes to the renderer; a healthy
 // session overrides the boot placeholder via `backend:base-changed`
 const BASE_CHANGED = "backend:base-changed";
@@ -599,6 +601,80 @@ function createHostCore(deps) {
         }
         return executors.base(LOCAL_ID);
     }
+    // ---- a claim nobody can use ----------------------------------------------
+    //
+    // "Another window is running this project" is a claim, and a claim is only as
+    // good as the window behind it. A window that is GONE — the app killed, a crash,
+    // a machine closed mid-turn — leaves a record naming a process that no longer
+    // exists, and nothing on the host that holds the lock can tell: the session that
+    // took it may run on a far machine (a remote claim), whose reaper refuses a claim
+    // it cannot see rather than guess (agent/core/lock_reconcile.py remote_claim).
+    // The machine named by the record is the only one that can answer, and this
+    // process is on it exactly when the record's claim_host is this hostname.
+    //
+    // So the answer is asked HERE, of this kernel — identity is (pid, start tick),
+    // never a bare pid (procstat.state, the same three verdicts as
+    // agent/core/procstat.py) — and a positive "dead" is carried to the host that
+    // holds the file as the witness of its reclaim (POST /api/locks/reclaim). The
+    // far side then decides: it revokes the holder only when the witness names the
+    // very claim its record holds, and it never touches a claim this machine cannot
+    // account for.
+    //
+    // Every answer that is NOT a reclaim is a real one and is reported as such:
+    //   "elsewhere" — the claim is another machine's window: only that machine may
+    //                 speak for it, and this one must not (it cannot see that
+    //                 process table, and guessing is how a live window loses work)
+    //   "live"      — the window is still there: this app's own second instance,
+    //                 another tab's session. The pill is telling the truth, and no
+    //                 button takes a running window's project away
+    //   "unknown"   — this host cannot read that process's table (Windows, a kernel
+    //                 without /proc): a doubt, and doubt never frees anything
+    //   "doubt"     — the question could not be asked at all (no supervisor for the
+    //                 slot's machine, a reclaim that errored)
+    async function settleClaim(winId, slotId = "", project, owner) {
+        const path = typeof project === "string" ? project : "";
+        if (!path)
+            return { verdict: "doubt", why: "no project named" };
+        const rec = owner && typeof owner === "object" ? owner : null;
+        const host = rec && typeof rec.claim_host === "string" ? rec.claim_host : "";
+        const pid = rec && Number.isInteger(rec.claim_pid) ? rec.claim_pid : 0;
+        if (!host || pid <= 0) {
+            return { verdict: "doubt", why: "the claim names no window" };
+        }
+        if (host !== os.hostname()) {
+            return { verdict: "elsewhere", why: `claimed by a window on ${host}` };
+        }
+        const started = rec && typeof rec.claim_start === "string" ? rec.claim_start : "";
+        const holder = procstat.state(pid, started);
+        if (holder === "live") {
+            return { verdict: "live", why: `process ${pid} on ${host} is still running` };
+        }
+        if (holder !== "dead") {
+            return { verdict: "unknown", why: `this machine cannot tell whether process ${pid} is gone` };
+        }
+        if (typeof sessions.supervisorReclaimLock !== "function") {
+            return { verdict: "doubt", why: "this host has no way to ask for a reclaim" };
+        }
+        // the host that HOLDS the file: the machine this slot's session runs on (a
+        // lock is freed there, never here), reached through the base its claim was
+        // opened on
+        const base = supervisorBaseFor(winId, slotId);
+        if (!base)
+            return { verdict: "doubt", why: "no supervisor to ask about this project's lock" };
+        const answer = await sessions.supervisorReclaimLock(base, path, { host, pid, start: started });
+        if (!answer || answer.error) {
+            return { verdict: "doubt", why: String((answer && answer.error) || "the reclaim answered nothing") };
+        }
+        const before = answer.before && typeof answer.before === "object" ? answer.before : {};
+        if (answer.revoked)
+            return { verdict: "reclaimed", why: String(answer.why || ""), base };
+        if (before.held === false) {
+            // somebody else freed it between the frame and this call: nothing is held,
+            // which is the outcome the caller asked for
+            return { verdict: "free", why: String(answer.why || "the lock was already free"), base };
+        }
+        return { verdict: "kept", why: String(answer.why || "the holder is not a proven orphan"), base };
+    }
     // The supervisors this client has to tell when it leaves. Read BEFORE the
     // claims are dropped: a claim's `tunnelUrl` is the only record of the base it
     // was opened through, and releaseAllBackends deletes that record.
@@ -674,6 +750,7 @@ function createHostCore(deps) {
         // how many live claims this host holds (diagnostics and tests)
         backendCount: () => windowBackends.size,
         supervisorBaseFor,
+        settleClaim,
         setSlotTarget,
         getSlotTarget,
     };

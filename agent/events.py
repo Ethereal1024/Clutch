@@ -135,6 +135,20 @@ class StateUpdateEvent(Event):
     # read_only. Reported on the status frame of a connect and, as a
     # key="running_elsewhere" frame, on every change while the stream is open.
     running_elsewhere: bool | None = None
+    # WHO claims it, in the holder's own words (project_lock.owner_summary), set
+    # whenever running_elsewhere is true: the holding process, the machine that
+    # process runs on, and the start tick that names it.
+    #
+    # It travels to the page because this host is not always the machine that can
+    # answer for the claim. A session a far host started for a client behind a
+    # tunnel records the CLIENT's window (claim_host/claim_pid/claim_start) and
+    # can never see that process — so a claim whose window is gone stays held, and
+    # the project stays read-only for every window in the world, until the one
+    # machine that can prove it gone says so (lock_reconcile.reclaim/witnessed).
+    # That machine is the client, and the page is where its kernel's answer is
+    # available (ui/src/host/host-core.ts settleClaim). None = the holder left no
+    # record (an older build): doubt, and nobody may reclaim on it.
+    claim_owner: dict[str, Any] | None = None
 
 
 @dataclass

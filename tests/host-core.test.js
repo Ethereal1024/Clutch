@@ -23,12 +23,20 @@ const FAR_ID = "me@far.example:22"; // tunnel-core's tunnelId spelling: user@hos
 const FAR_BASE = "http://127.0.0.1:8891";
 
 function fakeSessions() {
-  const calls = { started: [], stopped: [], shutdown: [], forwards: [], heartbeats: [] };
+  const calls = { started: [], stopped: [], shutdown: [], forwards: [], heartbeats: [], reclaims: [] };
   let seq = 0;
   const beats = [];
   const self = {
     calls,
     beats,
+    // what the far supervisor answers to "may this stranded claim be revoked?"
+    // (POST /api/locks/reclaim): { revoked, why, before } — scenarios replace it
+    reclaimAnswer: null,
+    supervisorReclaimLock: async (base, project, witness) => {
+      calls.reclaims.push({ base, project, witness });
+      if (self.reclaimAnswer) return self.reclaimAnswer(base, project, witness);
+      return { revoked: true, why: "revoked", before: { held: true } };
+    },
     // what the supervisor answers to "is this session still there?" — the
     // re-claim's first question, in the client's own three states: true (it
     // vouches for the session), false (it says it no longer holds it) and null
@@ -785,6 +793,81 @@ async function main() {
     assert.strictEqual(ex.get(LOCAL_ID).target(), null, "and this machine has no machine record to be");
     assert.strictEqual(far.ready && (await far.ready()), true,
       "the far supervisor starts itself: nothing here may wake it");
+  }
+
+  // 28. a claim whose window may be gone: settled HERE or not at all. The
+  //     record names a process on the machine that claimed it, and only that
+  //     machine's kernel can prove it exited — a doubt is never a death, and
+  //     only a proven death is carried to the host that HOLDS the lock.
+  {
+    const os = require("os");
+    const procstat = require("../ui/procstat");
+    const { spawnSync } = require("child_process");
+    const ts = { active: true, url: FAR_BASE };
+    const w = fakeWin(28);
+    const { core, sessions } = makeCore({ tunnel: ts });
+    await core.ensureSlotBackend(w, "tab-a");
+    const project = "/work/p.clc";
+    assert.strictEqual(core.supervisorBaseFor(w.id, "tab-a"), FAR_BASE,
+      "the base a claim was opened through is the host to ask about that project's lock");
+    const owner = { claim_host: os.hostname(), claim_pid: 4242, claim_start: "111" };
+
+    // another machine's window: this one cannot see that process table, and a
+    // guess here is how a live window loses its work
+    const elsewhere = await core.settleClaim(w.id, "tab-a", project, {
+      ...owner,
+      claim_host: "some-other-machine",
+    });
+    assert.strictEqual(elsewhere.verdict, "elsewhere");
+    assert.strictEqual(sessions.calls.reclaims.length, 0, "and it asks nobody: only that machine may speak");
+
+    // a record naming no window answers nothing at all
+    assert.strictEqual((await core.settleClaim(w.id, "tab-a", project, {})).verdict, "doubt");
+    assert.strictEqual((await core.settleClaim(w.id, "tab-a", "", owner)).verdict, "doubt");
+    assert.strictEqual(sessions.calls.reclaims.length, 0);
+
+    // a window that is STILL THERE is the pill telling the truth: no button takes
+    // a running window's project away
+    const live = await core.settleClaim(w.id, "tab-a", project, {
+      claim_host: os.hostname(),
+      claim_pid: process.pid,
+      claim_start: procstat.starttime(process.pid),
+    });
+    assert.strictEqual(live.verdict, "live");
+    assert.strictEqual(sessions.calls.reclaims.length, 0, "a live owner is not asked about");
+
+    // …and a pid that is gone IS: the witness names the claim exactly, identity
+    // and all, so the far side can refuse it if it is not the same claim
+    const gone = spawnSync(process.execPath, ["-e", ""], { stdio: "ignore" });
+    const deadPid = gone.pid;
+    sessions.reclaimAnswer = null;
+    const reclaimed = await core.settleClaim(w.id, "tab-a", project, {
+      claim_host: os.hostname(),
+      claim_pid: deadPid,
+      claim_start: "0",
+    });
+    assert.strictEqual(reclaimed.verdict, "reclaimed");
+    assert.strictEqual(sessions.calls.reclaims.length, 1);
+    assert.strictEqual(sessions.calls.reclaims[0].base, FAR_BASE, "asked at the host that holds the file");
+    assert.strictEqual(sessions.calls.reclaims[0].project, project);
+    assert.deepStrictEqual(
+      sessions.calls.reclaims[0].witness,
+      { host: os.hostname(), pid: deadPid, start: "0" },
+      "the witness is the record the claim itself holds",
+    );
+
+    // the far side may refuse: "kept" is an answer, not a failure
+    sessions.reclaimAnswer = () => ({ revoked: false, why: "not a proven orphan", before: { held: true } });
+    assert.strictEqual((await core.settleClaim(w.id, "tab-a", project, owner)).verdict, "kept");
+    // …somebody else may have freed it between the frame and this call
+    sessions.reclaimAnswer = () => ({ revoked: false, why: "already free", before: { held: false } });
+    assert.strictEqual((await core.settleClaim(w.id, "tab-a", project, owner)).verdict, "free");
+    // …and the question itself may not land
+    sessions.reclaimAnswer = () => ({ error: "no route to the far supervisor" });
+    assert.strictEqual((await core.settleClaim(w.id, "tab-a", project, owner)).verdict, "doubt");
+    // no supervisor to ask: nothing is invented
+    sessions.supervisorReclaimLock = undefined;
+    assert.strictEqual((await core.settleClaim(w.id, "tab-a", project, owner)).verdict, "doubt");
   }
 
   console.log("host-core: all checks passed");

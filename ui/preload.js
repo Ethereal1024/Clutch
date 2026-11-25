@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/preload.ts and run `npm run build:host`.
-// source sha256: d1769fac65a39b3a0b39a44b7a2639998bf562cb3fc1d9ab7aa1b4dec20d9b63
+// source sha256: 00c46b4e5ed13ed9f7782ccb9aaf72c98cab7ecb0c8ddd272260b8f2f16b4bc4
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -33,6 +33,10 @@ contextBridge.exposeInMainWorld("clutchApi", {
     // A change affects the NEXT claim, not the current session.
     setSlotTarget: (slotId, target) => ipcRenderer.invoke("slot:set-target", slotId, target),
     getSlotTarget: (slotId) => ipcRenderer.invoke("slot:get-target", slotId),
+    // Is the window a claim names still there? The owner record comes from the
+    // status frame; `claim:settle` answers { verdict, why } and only reclaims on a
+    // proven-dead witness from the machine named in the record.
+    settleClaim: (slotId, project, owner) => ipcRenderer.invoke("claim:settle", slotId, project, owner),
 });
 contextBridge.exposeInMainWorld("clutchSettings", {
     save: (data) => ipcRenderer.invoke("settings:save", data),

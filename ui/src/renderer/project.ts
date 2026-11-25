@@ -338,25 +338,103 @@ document.addEventListener("clutch:project-read-only", (ev) => {
   setReadOnly(!!d.readOnly);
 });
 
+// ---- a claim whose window may be gone ---------------------------------------
+//
+// "Another window is running this project" is only as true as the window the
+// claim names, and the host cannot tell on its own: the record it holds names a
+// process on the machine that claimed it, and nothing on the machine that HOLDS
+// the lock can see that process. The status frame therefore carries the record
+// itself (running_elsewhere + claim_owner, agent/server.py claim_watch_loop), and
+// the host answers for it with this machine's own kernel (host-core settleClaim):
+// only a PROVEN dead owner on the machine it names is reclaimed, at the host that
+// holds the lock; every doubt ("elsewhere", "unknown", "live") changes nothing.
+//
+// This is asked unasked — the pill's own state has no other way out. A session
+// that died mid-turn leaves its claim behind, and no process anywhere would ever
+// release it: every window would keep reading "another window is running" from a
+// window that no longer exists. Asked once per claim (project + host + pid +
+// start), never in a loop: a reclaim answers with a new claim only if somebody
+// really took it again, and that is a different claim.
+let pendingClaim: any = null; // the owner record of the claim the pane is showing
+const settledClaims = new Set<string>();
+let settlingClaim = false; // one question at a time: the answer changes the pane
+
+function claimIdentity(project: string, owner: any): string {
+  const host = owner && typeof owner.claim_host === "string" ? owner.claim_host : "";
+  const pid = owner && Number.isInteger(owner.claim_pid) ? owner.claim_pid : 0;
+  const start = owner && typeof owner.claim_start === "string" ? owner.claim_start : "";
+  if (!project || !host || !pid) return ""; // a record naming no window is not one
+  return [project, host, pid, start].join("|");
+}
+
+async function settleAnnouncedClaim(owner: any): Promise<void> {
+  const tab = activeTab();
+  if (!tab || !tab.path) return;
+  const project = tab.projectKey || tab.path;
+  const key = claimIdentity(project, owner);
+  if (!key || settledClaims.has(key) || settlingClaim) return;
+  const api = (window as any).clutchApi;
+  if (!api || typeof api.settleClaim !== "function") return;
+  settledClaims.add(key);
+  // the set only remembers claims this page asked about; a page that lives for
+  // months keeps a handful of keys, and a cleared one is asked again, not trusted
+  if (settledClaims.size > 64) {
+    const oldest = settledClaims.values().next().value;
+    if (oldest) settledClaims.delete(oldest);
+  }
+  settlingClaim = true;
+  let answer: any = null;
+  try {
+    answer = await api.settleClaim(tab.id, project, owner);
+  } catch (e) {
+    // a host that could not be reached answered nothing, so the claim is NOT
+    // remembered as settled: the next frame asks again. Forgetting a failed
+    // question is what keeps this pill from parking on the page for good.
+    settledClaims.delete(key);
+    return;
+  } finally {
+    settlingClaim = false;
+  }
+  // Reclaimed (or the lock was already free): the claim is OVER, and the pane is
+  // still standing on the log as the dead window left it. Re-read it now, from
+  // disk — this is the half the reader cannot do without a click, and the reason
+  // the tab used to keep a transcript frozen at an unexpected end.
+  if (answer && (answer.verdict === "reclaimed" || answer.verdict === "free")) {
+    if (state.activeTabId === tab.id && currentProject) await reloadActiveProject(tab);
+  }
+}
+
 document.addEventListener("clutch:project-claim", (ev) => {
   const d = ((ev as any) && (ev as any).detail) || {};
   setClaimed(!!d.claimed);
+  pendingClaim = d.claimed && d.owner && typeof d.owner === "object" ? d.owner : null;
+  if (pendingClaim) void settleAnnouncedClaim(pendingClaim);
 });
 
-// The pill's click: re-open the project this window is already showing. The
-// pane keeps the picture it has (paintCachedView), and the stream reconnects at
-// its own watermark — the same door a reload takes, and the same answer: the
-// session reads the foreign run's lines out of the file and hands them over
-// (`since`, a .clc byte offset).
+// The pill's click: the claim may name a window that is gone (settleAnnouncedClaim
+// frees it when this machine can prove it), and then the pane re-reads the log
+// FROM DISK — not just a reconnect at its own watermark, which is what made the
+// click look like it did nothing: the page keeps the log it last painted, and a
+// session that ended unusually left lines after that watermark that no reconnect
+// will ever resend (the foreign writer appends to the file; a frame that was
+// never published is not a frame anybody owes this page).
 //
-// `currentProject = ""` first is what makes that a re-open: openProject answers
-// an already-active tab with an early return, and that no-op would leave the
-// pane exactly as it is.
-export async function reloadActiveProject() {
-  const tab = activeTab();
-  if (!tab || !tab.path) return;
-  currentProject = "";
-  await activateTab(tab);
+// The three facts a disk re-read needs, all of them this file's own records:
+//   * the memento written NOW names the range the reader is looking at, so the
+//     restore walk (restoreTabView) repaints this tab's tail from the LOG's end
+//     back to `oldest` — a bounded read (RESTORE_MAX_PAGES), not the whole file;
+//   * the DOM cache has to go with it, or paintCachedView hands back the very
+//     picture being re-read (activateTab's instant path) and nothing is fetched;
+//   * `currentProject = ""` is what makes it an open at all: activateTab answers
+//     an already-active tab with an early return, and that no-op was the click.
+export async function reloadActiveProject(tab?) {
+  const here = tab || activeTab();
+  if (!here || !here.path) return;
+  if (pendingClaim) await settleAnnouncedClaim(pendingClaim);
+  saveMemento(here.id, { older: olderRemaining, workdir: els.workspace.textContent || "" });
+  forgetDomCache(here.id);
+  if (state.activeTabId === here.id) currentProject = "";
+  await activateTab(here);
 }
 
 const claimPill = $("#claim-pill");

@@ -214,7 +214,12 @@ def claim_watch_loop(
     The reader is `LazyEventLog.catch_up`, the same catch-up a claimant runs
     before reasoning over a log somebody else wrote — and it is run only while a
     foreign run exists AND somebody is watching, so an idle session polls the
-    kernel and touches no file.
+    kernel and touches no file. That read is also the one thing here that can
+    fail on a live session (a remote workspace whose bridge just went away), and
+    a failed tick is caught and retried instead of ending the thread: this is the
+    only process that can announce the other window's run, drop this one's own
+    lapsed lease, or follow that run's lines, so a watcher that died is a page
+    left read-only forever with nothing left anywhere to end it.
     """
     last: tuple[str, bool] | None = None  # (project, running elsewhere) as last announced
     following = False  # was a foreign run being followed on the last tick?
@@ -228,25 +233,48 @@ def claim_watch_loop(
         path = str(project.path)
         if last is not None and last[0] != path:
             following = False  # another project: nothing was being followed here
-        # a lease that lapsed with the process still alive: the turn it stood for
-        # is over, and the page must not keep painting it as running
-        if state.drop_expired_claim():
-            broadcaster.publish(
-                StateUpdateEvent(key="execution_status", value="idle"), project=path
-            )
-        held = state.foreign_claim(path)  # another session is RUNNING it, right now
-        if last is None or last[0] != path or last[1] != held:
-            last = (path, held)
-            broadcaster.publish(
-                StateUpdateEvent(key="running_elsewhere", value=held), project=path
-            )
-        # Read the foreign run's new lines. `held or following`: the tick that
-        # ends a foreign run is also a tick that has not read its tail yet.
-        follow, following = held or following, held
-        if not follow or broadcaster.count(path) == 0:
-            continue  # nobody is looking: the next open or connect catches up
-        for _off, ev in project.log.catch_up():
-            broadcaster.publish(ev, project=path)
+        # Everything below touches the KERNEL, the file and the broadcaster, and
+        # a tick that raises takes the whole WATCHER with it: the thread ends, and
+        # with it go the three things only it can say (a lapsed lease dropped, the
+        # other window's run announced, its lines followed). The failure mode is
+        # silent and permanent — a project left read-only in every window with no
+        # process anywhere left to end it — so a bad tick is reported and the
+        # poll goes on. The one read that can raise on a healthy session is the
+        # foreign run's catch-up (a remote workspace read through a bridge that
+        # went away), which is exactly a reason to try again, not to give up.
+        try:
+            # a lease that lapsed with the process still alive: the turn it stood
+            # for is over, and the page must not keep painting it as running
+            if state.drop_expired_claim():
+                broadcaster.publish(
+                    StateUpdateEvent(key="execution_status", value="idle"), project=path
+                )
+            foreign = state.foreign_lock(path)  # another session RUNS it, right now
+            held = foreign["held"]
+            if last is None or last[0] != path or last[1] != held:
+                broadcaster.publish(
+                    StateUpdateEvent(
+                        key="running_elsewhere", value=held,
+                        # the holder's own record, so a page whose machine is the
+                        # one that claimed it can prove that window gone and free
+                        # the file (agent/events.py StateUpdateEvent.claim_owner)
+                        claim_owner=foreign["owner"],
+                    ),
+                    project=path,
+                )
+                # ...and only a published change counts as announced: a tick that
+                # failed below has to say it again, or the page keeps the last
+                # state it was told while this loop believes it was told
+                last = (path, held)
+            # Read the foreign run's new lines. `held or following`: the tick that
+            # ends a foreign run is also a tick that has not read its tail yet.
+            follow, following = held or following, held
+            if not follow or broadcaster.count(path) == 0:
+                continue  # nobody is looking: the next open or connect catches up
+            for _off, ev in project.log.catch_up():
+                broadcaster.publish(ev, project=path)
+        except Exception as err:  # noqa: BLE001 - see above: a bad tick is not the end
+            print(f"[clutch-server] claim watch tick failed: {err}", flush=True)
 
 
 def _settings_path() -> Path:

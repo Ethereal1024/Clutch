@@ -25,7 +25,7 @@ from typing import Any
 
 from .config import Config
 from .core.permission import PermissionGate
-from .core.project_lock import LockHandle, ProjectLock
+from .core.project_lock import LockHandle, ProjectLock, owner_summary
 from .project import Project
 from .tools.registry import ToolRegistry, build_tools
 from .tools.workspace import LocalWorkspace, RemoteWorkspace, Workspace
@@ -239,13 +239,28 @@ class RunState:
             return path is None or self._claim_path == os.path.abspath(path)
 
     def foreign_claim(self, path: str | None = None) -> bool:
-        """Is ANOTHER session running a turn on this .clc?
+        """Is ANOTHER session running a turn on this .clc? (See foreign_lock.)"""
+        return self.foreign_lock(path)["held"]
+
+    def foreign_lock(self, path: str | None = None) -> dict:
+        """The foreign claim on this .clc: ``{held, owner}``.
 
         Asked of the KERNEL (a trial lock, so a crashed holder left nothing to
         trust) and answered against our own claim: a lock this session holds is
         not foreign, and neither is the zero-length window inside claim_run
         where the kernel lock is already taken — both facts move under
         self.lock, so no reader can see half of one.
+
+        ``owner`` is the holder's own statement about itself
+        (project_lock.owner_summary): which process holds it, which machine that
+        process runs on, and the start tick that names it. It is reported
+        because a claim nobody can use is not answerable from this side alone —
+        a far host can never see the claiming window, so the machine named by
+        ``claim_host`` is the only one that can prove it gone
+        (agent/core/project_lock.py, lock_reconcile.witnessed). Handing the
+        record to the pages is what lets that machine say so and free the file.
+        Absence is doubt: a holder that left no record reports None, never a
+        guess.
 
         This is what "read-only" means now. It is not a property of the OPEN (an
         idle project is open everywhere and claimed nowhere); it is a fact about
@@ -255,15 +270,17 @@ class RunState:
         with self.lock:
             target = path if path is not None else (str(self.project.path) if self.project else None)
             if target is None:
-                return False
+                return {"held": False, "owner": None}
             mine = (
                 self._claim_lock is not None
                 and not self._claim_lock.released
                 and self._claim_path == os.path.abspath(target)
             )
         if mine:
-            return False
-        return bool(ProjectLock.inspect(str(target))["held"])
+            return {"held": False, "owner": None}
+        lock = ProjectLock.inspect(str(target))
+        held = bool(lock["held"])
+        return {"held": held, "owner": owner_summary(lock["owner"]) if held else None}
 
     def claim_run(self, project: str, ttl_s: float = LEASE_DEFAULT_S) -> str:
         """Claim or renew the run slot for `project`; answer "" or a refusal code.

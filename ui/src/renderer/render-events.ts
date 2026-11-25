@@ -72,8 +72,8 @@ export function announceProjectReadOnly(readOnly) {
   announce("clutch:project-read-only", { readOnly: !!readOnly });
 }
 
-export function announceProjectClaim(claimed) {
-  announce("clutch:project-claim", { claimed: !!claimed });
+export function announceProjectClaim(claimed, owner?) {
+  announce("clutch:project-claim", { claimed: !!claimed, owner: owner || null });
 }
 
 export function renderEvent(ev) {
@@ -129,9 +129,16 @@ export function renderEvent(ev) {
       // runs it now), and a live change arrives as its own `running_elsewhere`
       // frame. Announced, not called — project.ts owns the pill and the
       // composer and loads after this file (tests/ui-load-order-test.js).
+      //
+      // The frame also names the window behind the claim (`claim_owner`: the
+      // holder's own record). It is what lets the pill's click prove that window
+      // gone when this machine is the one that can see it — a claim with no owner
+      // is a claim, just one nobody here can settle (host-core settleClaim).
       if (typeof ev.read_only === "boolean") announceProjectReadOnly(ev.read_only);
-      if (typeof ev.running_elsewhere === "boolean") announceProjectClaim(ev.running_elsewhere);
-      if (ev.key === "running_elsewhere") announceProjectClaim(!!ev.value);
+      if (typeof ev.running_elsewhere === "boolean") {
+        announceProjectClaim(ev.running_elsewhere, ev.claim_owner);
+      }
+      if (ev.key === "running_elsewhere") announceProjectClaim(!!ev.value, ev.claim_owner);
       if (ev.key === "execution_status" && ev.value) {
         // The first frame of every connect is the host's own status. If this
         // window was busy when its session was replaced (see sseRunAtRisk), that

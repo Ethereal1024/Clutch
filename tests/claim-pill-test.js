@@ -117,10 +117,12 @@ check(writable(), "the viewer flag is the session's; turning it off gives the co
 const wire = evBody("renderEvent");
 check(/if \(typeof ev\.read_only === "boolean"\) announceProjectReadOnly\(ev\.read_only\);/.test(wire),
   "the status frame's `read_only` is announced (every connect re-answers the mode)");
-check(/if \(typeof ev\.running_elsewhere === "boolean"\) announceProjectClaim\(ev\.running_elsewhere\);/.test(wire),
+check(/if \(typeof ev\.running_elsewhere === "boolean"\)[\s\S]{0,120}announceProjectClaim\(ev\.running_elsewhere, ev\.claim_owner\);/.test(wire),
   "so is `running_elsewhere` — the same status frame carries whether another window holds the run");
-check(/if \(ev\.key === "running_elsewhere"\) announceProjectClaim\(!!ev\.value\);/.test(wire),
+check(/if \(ev\.key === "running_elsewhere"\) announceProjectClaim\(!!ev\.value, ev\.claim_owner\);/.test(wire),
   "and the live change arrives as its own frame (the claim watch loop sends transitions only)");
+check(/export function announceProjectClaim\(claimed, owner\?\)[\s\S]{0,120}owner: owner \|\| null/.test(events),
+  "the announcement carries the owner record: the window behind a claim is the one thing that can be proven gone");
 
 announceProjectClaim(true);
 const claim = dispatched.at(-1);
@@ -139,10 +141,27 @@ check(/addEventListener\("clutch:project-claim"[\s\S]{0,160}setClaimed\(!!d\.cla
   "and the claim announcement to its own");
 check(/claimPill\.addEventListener\("click", \(\) => \{ void reloadActiveProject\(\); \}\)/.test(project),
   "the pill's click is the reload the pill promises");
+check(
+  /addEventListener\("clutch:project-claim"[\s\S]{0,300}setClaimed\(!!d\.claimed\)[\s\S]{0,300}void settleAnnouncedClaim\(pendingClaim\)/.test(project),
+  "a claim that names a window is settled unasked, from the frame (this is what frees a dead window's claim)"
+);
+
+const settle = fnBodyOf("settleAnnouncedClaim");
+check(/settledClaims\.has\(key\)/.test(settle) && /settlingClaim/.test(settle),
+  "asking is once per claim and one at a time — a reclaim is not a poll");
+check(/typeof api\.settleClaim !== "function"\) return;/.test(settle) &&
+  /api\.settleClaim\(tab\.id, project, owner\)/.test(settle),
+  "the host is asked for the owner this page was told about, through its slot");
+check(/if \(answer && \(answer\.verdict === "reclaimed" \|\| answer\.verdict === "free"\)\) \{[\s\S]{0,200}await reloadActiveProject\(tab\)/.test(settle),
+  "a reclaimed (or already free) claim re-reads the pane: the transcript is not left at the dead window's last line");
+check(/catch \(e\) \{[\s\S]{0,300}settledClaims\.delete\(key\);/.test(settle),
+  "a settle that never reached the host is forgotten, not remembered as answered: a transient failure must not park the pill for the life of the page");
 
 const reload = fnBodyOf("reloadActiveProject");
-check(/currentProject = "";/.test(reload) && /await activateTab\(tab\)/.test(reload),
-  "reloadActiveProject really re-opens the tab (an already-open tab is answered with a no-op otherwise)");
+check(/saveMemento\(here\.id, \{ older: olderRemaining, workdir: els\.workspace\.textContent \|\| "" \}\);/.test(reload) &&
+  /forgetDomCache\(here\.id\)/.test(reload) && /currentProject = "";/.test(reload) &&
+  /await activateTab\(here\)/.test(reload),
+  "reloadActiveProject re-reads the log FROM DISK (memento + no DOM cache + a real open), not a reconnect at the same watermark");
 
 const info = fnBodyOf("setProjectInfo");
 check(!/setReadOnly|setClaimed/.test(info),

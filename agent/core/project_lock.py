@@ -128,7 +128,15 @@ _CONTEXT: dict = {}
 # that lives on its own machine, and must say whose machine a claim is on rather
 # than guess. Everything else in the record (boot id, start tick) is for the
 # reconciler, not for the UI.
-OWNER_FIELDS = ("pid", "host", "since", "claim", "claim_host", "claim_pid", "port")
+#
+# ``claim_start`` is in the list because a WITNESS has to name the claim exactly:
+# the client's machine answers "pid P started at tick S on host H is gone", and
+# that answer is only about this lock if it names the claim this record holds
+# (lock_reconcile.witnessed compares them field by field). Leaving the tick out
+# of the summary would force the client to witness by (host, pid) alone — the
+# bare-pid check this module exists to avoid, one recycled pid away from proving
+# the wrong window gone.
+OWNER_FIELDS = ("pid", "host", "since", "claim", "claim_host", "claim_pid", "claim_start", "port")
 
 
 def owner_summary(record: dict | None) -> dict | None:

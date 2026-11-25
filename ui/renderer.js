@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: c53f7fe511567e0ee2c836964a9737840d2be176fefd56ffba4d4a615512cb2f
+// sources sha256: c4589aa1fee56f52d433382f99166c279a34ae762d030547888e229a1f784548
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -91,6 +91,9 @@
       // call, exactly as any other route it does not serve.
       setSlotTarget: (slotId, target) => call("clutchApi", "setSlotTarget", [slotId, target]),
       getSlotTarget: (slotId) => call("clutchApi", "getSlotTarget", [slotId]),
+      // settle a claim whose window may be gone: same verb, same three arguments,
+      // as the desktop preload (the bridge host decides with its own procstat)
+      settleClaim: (slotId, project, owner) => call("clutchApi", "settleClaim", [slotId, project, owner]),
       onBaseChanged: (cb) => subscribe("backend:base-changed", cb)
     });
     expose("clutchSettings", {
@@ -2484,8 +2487,8 @@
   function announceProjectReadOnly(readOnly2) {
     announce("clutch:project-read-only", { readOnly: !!readOnly2 });
   }
-  function announceProjectClaim(claimed2) {
-    announce("clutch:project-claim", { claimed: !!claimed2 });
+  function announceProjectClaim(claimed2, owner) {
+    announce("clutch:project-claim", { claimed: !!claimed2, owner: owner || null });
   }
   function renderEvent(ev) {
     const wrap = document.createElement("div");
@@ -2525,8 +2528,10 @@
       }
       case "state_update": {
         if (typeof ev.read_only === "boolean") announceProjectReadOnly(ev.read_only);
-        if (typeof ev.running_elsewhere === "boolean") announceProjectClaim(ev.running_elsewhere);
-        if (ev.key === "running_elsewhere") announceProjectClaim(!!ev.value);
+        if (typeof ev.running_elsewhere === "boolean") {
+          announceProjectClaim(ev.running_elsewhere, ev.claim_owner);
+        }
+        if (ev.key === "running_elsewhere") announceProjectClaim(!!ev.value, ev.claim_owner);
         if (ev.key === "execution_status" && ev.value) {
           if (ev.value === "idle" && state.sseRunAtRisk) {
             state.sseRunAtRisk = false;
@@ -3927,15 +3932,57 @@
     const d = ev && ev.detail || {};
     setReadOnly(!!d.readOnly);
   });
+  var pendingClaim = null;
+  var settledClaims = /* @__PURE__ */ new Set();
+  var settlingClaim = false;
+  function claimIdentity(project, owner) {
+    const host = owner && typeof owner.claim_host === "string" ? owner.claim_host : "";
+    const pid = owner && Number.isInteger(owner.claim_pid) ? owner.claim_pid : 0;
+    const start = owner && typeof owner.claim_start === "string" ? owner.claim_start : "";
+    if (!project || !host || !pid) return "";
+    return [project, host, pid, start].join("|");
+  }
+  async function settleAnnouncedClaim(owner) {
+    const tab = activeTab();
+    if (!tab || !tab.path) return;
+    const project = tab.projectKey || tab.path;
+    const key = claimIdentity(project, owner);
+    if (!key || settledClaims.has(key) || settlingClaim) return;
+    const api = window.clutchApi;
+    if (!api || typeof api.settleClaim !== "function") return;
+    settledClaims.add(key);
+    if (settledClaims.size > 64) {
+      const oldest = settledClaims.values().next().value;
+      if (oldest) settledClaims.delete(oldest);
+    }
+    settlingClaim = true;
+    let answer = null;
+    try {
+      answer = await api.settleClaim(tab.id, project, owner);
+    } catch (e) {
+      settledClaims.delete(key);
+      return;
+    } finally {
+      settlingClaim = false;
+    }
+    if (answer && (answer.verdict === "reclaimed" || answer.verdict === "free")) {
+      if (state.activeTabId === tab.id && currentProject) await reloadActiveProject(tab);
+    }
+  }
   document.addEventListener("clutch:project-claim", (ev) => {
     const d = ev && ev.detail || {};
     setClaimed(!!d.claimed);
+    pendingClaim = d.claimed && d.owner && typeof d.owner === "object" ? d.owner : null;
+    if (pendingClaim) void settleAnnouncedClaim(pendingClaim);
   });
-  async function reloadActiveProject() {
-    const tab = activeTab();
-    if (!tab || !tab.path) return;
-    currentProject = "";
-    await activateTab(tab);
+  async function reloadActiveProject(tab) {
+    const here = tab || activeTab();
+    if (!here || !here.path) return;
+    if (pendingClaim) await settleAnnouncedClaim(pendingClaim);
+    saveMemento(here.id, { older: olderRemaining, workdir: els.workspace.textContent || "" });
+    forgetDomCache(here.id);
+    if (state.activeTabId === here.id) currentProject = "";
+    await activateTab(here);
   }
   var claimPill = $("#claim-pill");
   if (claimPill) claimPill.addEventListener("click", () => {

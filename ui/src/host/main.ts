@@ -473,6 +473,20 @@ if (!app.requestSingleInstanceLock()) {
       return hostCore.getSlotTarget(e.sender.id, slot);
     });
 
+    // Ask whether the window a claim names still exists, and — when this machine
+    // is the one that can tell and the answer is a proven "dead" — have the host
+    // that HOLDS the lock revoke it. The renderer never decides this: the owner
+    // record comes from the status frame and this machine's kernel answers for
+    // it (host-core settleClaim). Best effort: every doubt is reported, not thrown.
+    ipcMain.handle("claim:settle", async (e, slotId, project, owner) => {
+      const slot = typeof slotId === "string" ? slotId : "";
+      try {
+        return await hostCore.settleClaim(e.sender.id, slot, project, owner || null);
+      } catch (err) {
+        return { verdict: "doubt", why: String((err && err.message) || err) };
+      }
+    });
+
     // Enumerate connected and recently-connected tunnels. Used by the backend
     // picker to let the user choose which device a tab's session should run on.
     ipcMain.handle("tunnel:list", async () => {

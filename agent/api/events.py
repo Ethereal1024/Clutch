@@ -217,6 +217,7 @@ class EventsMixin:
             active = self._state.project
             read_only = None
             running_elsewhere = None
+            claim_owner = None
             if (active is not None and project is not None
                     and str(active.path) == str(project.path)):
                 # "not writable here" has two causes, and they are answered
@@ -224,10 +225,15 @@ class EventsMixin:
                 # the file as a viewer (fixed for the life of the open), or
                 # another session is RUNNING it right now (over by itself, and
                 # then this window may send again). The second one is asked of
-                # the kernel at connect time (RunState.foreign_claim) and watched
+                # the kernel at connect time (RunState.foreign_lock) and watched
                 # afterwards (server.py claim_watch_loop).
                 read_only = bool(active.read_only)
-                running_elsewhere = self._state.foreign_claim(str(active.path))
+                foreign = self._state.foreign_lock(str(active.path))
+                running_elsewhere = foreign["held"]
+                # ...and the record of WHO holds it travels with the answer: the
+                # page's machine is the only one that can prove that window gone
+                # (agent/events.py StateUpdateEvent.claim_owner)
+                claim_owner = foreign["owner"]
             # the status frame is a RESET for a window that has nothing in
             # flight (a project switch, an interrupted run) — and it is also
             # what a RECONNECTING window gets (EventSource retry, a phone
@@ -243,7 +249,8 @@ class EventsMixin:
             try:
                 self._write_sse(StateUpdateEvent(
                     key="execution_status", value="running" if in_flight else "idle",
-                    read_only=read_only, running_elsewhere=running_elsewhere))
+                    read_only=read_only, running_elsewhere=running_elsewhere,
+                    claim_owner=claim_owner))
                 # replay durable events only (deltas are transient); replay=False
                 # skips it when the UI just rendered the open NDJSON stream
                 if replay or since is not None:
