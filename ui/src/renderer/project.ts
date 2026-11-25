@@ -518,8 +518,8 @@ async function machineMismatch(tab): Promise<any | null> {
   } catch (e) {
     return null;
   }
-  // a tunnel claim that 400s is the right machine with a wrong path: no dial
-  if (!st || st.kind !== "local") return null;
+  // a remote claim that 400s is the right machine with a wrong path: no dial
+  if (!st || !st.claimed || st.remote) return null;
   if (await hereHasIt(tab)) return null; // the path is bad, not the machine
   return rememberedMachine();
 }

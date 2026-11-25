@@ -136,7 +136,7 @@ const RELEASE = {
 // sender) and no slot named. A slot is one tab, and "" is the window's default
 // session -- which is what every call site here wants. A view with NO window is
 // the one shape aimed at nothing at all, and section 1 reaches it by making
-// `windowKind` answer null for a window that has claimed no session.
+// `windowExecutor` answer null for a window that has claimed no session.
 const EMPTY_WIN = { id: 1 };
 
 function view(deps = {}) {
@@ -147,10 +147,12 @@ function view(deps = {}) {
       supervisorBase: () => "http://127.0.0.1:8890",
       tunnelStatus: () => ({ active: false, url: null }),
       // the page belongs to a TAB, and a tab that is running here says so: every
-      // host that wires this view passes `windowKind` (ui/main.js,
+      // host that wires this view passes `windowExecutor` (ui/main.js,
       // android/host/src/android-host.js), so "the session is on this machine" is
       // the honest default for a test that does not care which machine it is.
-      windowKind: () => "local",
+      // The value is host-core's executor id: "local" is THIS machine (executors.ts
+      // LOCAL_ID), anything else is a hop.
+      windowExecutor: () => "local",
       lib,
       ...deps.deps,
     }),
@@ -166,7 +168,7 @@ async function main() {
       "a tab whose session runs here asks this machine's supervisor"
     );
     // the tab's own machine answers, not "a live tunnel somewhere in this window"
-    const near = view({ deps: { windowKind: () => "tunnel", slotBase: () => "http://127.0.0.1:41000" } });
+    const near = view({ deps: { windowExecutor: () => "me@dev.example:22", slotBase: () => "http://127.0.0.1:41000" } });
     check(
       near.api.target({ id: 1 }).base === "http://127.0.0.1:41000" && near.api.target({ id: 1 }).kind === "remote",
       "a tab whose session runs on the far side asks THAT machine's supervisor"
@@ -177,7 +179,7 @@ async function main() {
     const fellBack = view({
       deps: {
         tunnelStatus: () => ({ active: true, url: "http://127.0.0.1:41000" }),
-        windowKind: () => "local",
+        windowExecutor: () => "local",
       },
     });
     check(
@@ -199,7 +201,7 @@ async function main() {
     const unclaimed = view({
       deps: {
         tunnelStatus: () => ({ active: true, url: "http://127.0.0.1:41000" }),
-        windowKind: () => null,
+        windowExecutor: () => null,
       },
     });
     check(
@@ -217,7 +219,7 @@ async function main() {
     );
     check(!/claimed/.test(said.error || ""), "and the host's word for it — 'claimed' — is not on the page");
     // a tunnel that died between claims: a target with no base is no machine
-    const deadTunnel = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowKind: () => "tunnel" } });
+    const deadTunnel = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowExecutor: () => "me@dev.example:22" } });
     check(deadTunnel.api.target({ id: 1 }).base === "", "a tunneled window after the tunnel died has no target base");
     const bad = await deadTunnel.api.list({ id: 1 });
     check(
@@ -470,7 +472,7 @@ async function main() {
     check(v2.versions.length === 0 && /answered 500/.test(v2.error || ""), "a version read that failed says why, instead of reporting an empty machine");
 
     // and a target that does not exist is not asked at all
-    const nowhere = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowKind: () => "tunnel" } });
+    const nowhere = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowExecutor: () => "me@dev.example:22" } });
     const v3 = await nowhere.api.versions("clutch-memory", "session", { id: 1 });
     check(v3.error && nowhere.lib.calls.versionReads.length === 0, "a machine with no supervisor URL is reported without a request being made");
   }
@@ -498,7 +500,7 @@ async function main() {
     const r3 = await refused.api.remove("clutch-memory", {}, "session", EMPTY_WIN);
     check(!r3.ok && /pid 4242/.test(r3.error), "a refusal surfaces with the host's own words");
 
-    const nowhere = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowKind: () => "tunnel" } });
+    const nowhere = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowExecutor: () => "me@dev.example:22" } });
     const r4 = await nowhere.api.remove("clutch-memory", {}, "session", { id: 1 });
     check(!r4.ok && nowhere.lib.calls.removals.length === 0, "a machine with no supervisor URL is refused before anything is sent");
   }
@@ -537,7 +539,7 @@ async function main() {
     const r = await refused.api.setDisabled("../../etc", true, "session", EMPTY_WIN);
     check(!r.ok && /bad component name/.test(r.error), "a refusal surfaces with the host's own words");
 
-    const unreachable = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowKind: () => "tunnel" } });
+    const unreachable = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowExecutor: () => "me@dev.example:22" } });
     const n = await unreachable.api.setDisabled("clutch-memory", true, "session", { id: 1 });
     check(!n.ok && unreachable.lib.calls.switches.length === 0, "a machine with no supervisor URL is refused before anything is sent");
   }
@@ -644,7 +646,7 @@ async function main() {
     check(bad.values === undefined, "with no values, so the page cannot draw a document no machine ever answered");
 
     // a machine with no supervisor URL is refused before anything is sent
-    const unreachable = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowKind: () => "tunnel" } });
+    const unreachable = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowExecutor: () => "me@dev.example:22" } });
     const n = await unreachable.api.settings("clutch-memory", "session", { id: 1 });
     check(!n.ok && unreachable.lib.calls.settingReads.length === 0, "a machine with no supervisor URL is refused before anything is sent");
   }
@@ -717,7 +719,10 @@ async function main() {
       lib: fakeLib({ specs: [CHECKOUT], held: [] }),
       deps: {
         tunnelStatus: () => ({ active: true, url: "http://127.0.0.1:41000" }),
-        windowKind: () => "tunnel",
+        windowExecutor: () => "me@dev.example:22",
+        // the far machine's supervisor, as the claim names it (host-core
+        // supervisorBaseFor): the tunnel being up is not the same fact
+        slotBase: () => "http://127.0.0.1:41000",
         ensureSupervisor: async () => {
           throw new Error("the far machine's supervisor is not this client's to start");
         },

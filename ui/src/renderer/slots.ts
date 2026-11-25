@@ -63,13 +63,15 @@ export function announceTabState() {
 // ---- which machine a tab's .clc lives on -------------------------------------
 //
 // The host keeps a session per slot, and WHICH MACHINE that session runs on is
-// decided at claim time (host-core.ts claimSlotBackend): a slot pinned to
-// "local" always gets this machine's supervisor, a live tunnel gets the far
-// side, and — the case this section exists for — no tunnel at all falls back to
-// a LOCAL session. A local session cannot open a file that lives on another
-// machine: it answers "not a .clc project file" (agent/api/project.py), which is
-// what a restored remote tab used to hit right after a quit (the slot table in
-// the host is memory, the tab store on disk is not).
+// decided at claim time (host-core.ts claimSlotBackend): the slot names an
+// execution endpoint and gets it or nothing — a tab pinned to this machine always
+// gets this machine's supervisor, a tab pinned to a machine gets the far side,
+// and a slot that names nothing follows the hop that is serving (falling back to
+// a LOCAL session when none is). A local session cannot open a file that lives on
+// another machine: it answers "not a .clc project file"
+// (agent/api/project.py), which is what a restored remote tab used to hit right
+// after a quit (the slot table in the host is memory, the tab store on disk is
+// not).
 //
 // So a tab remembers its machine, it travels with the working set
 // (tab-bar.ts), and every claim either serves that machine or refuses — it
@@ -119,12 +121,18 @@ async function tunnelNow(): Promise<{ active: boolean; target: Machine | null }>
   }
 }
 
-// Pin a slot's NEXT claim: { kind: "local" } forces this machine even while a
-// tunnel is up, { kind: "tunnel" } says this slot's file lives on a machine (the
-// hop that serves it is up — the claim follows the live tunnel, and host-core
-// reads the pin as the promise that a local session is NOT an acceptable answer),
-// null clears the pin (follow the live tunnel, either way). Only the next claim
-// moves — a session already running is not torn down by this.
+// This machine, in the executor table the host keeps (ui/executors.ts LOCAL_ID).
+// A pin names an ENDPOINT and this machine is one of them, so the renderer holds
+// the same reserved word instead of asking the host to special-case "local".
+const LOCAL_EXECUTOR = "local";
+
+// Pin a slot's NEXT claim: { kind: "executor", id: LOCAL_EXECUTOR } forces this
+// machine even while a hop is up; { kind: "executor", target: {host,user,port} }
+// says this slot's file lives on a machine — the host derives the endpoint from
+// that triple itself (the renderer never builds an id) and reads the pin as the
+// promise that a local session is NOT an acceptable answer; null clears the pin
+// (follow the live hop, either way). Only the next claim moves — a session
+// already running is not torn down by this.
 async function pinSlot(slotId: string, target: any): Promise<void> {
   if (!(window.clutchApi && window.clutchApi.setSlotTarget)) return;
   try {
@@ -250,20 +258,20 @@ function autoConnect(m: Machine): Promise<string> {
 async function prepareTabMachine(tab: Tab): Promise<string> {
   const m = tab.machine;
   if (m === null) {
-    // this machine's own file: pin it, so a tunnel another tab opened cannot
+    // this machine's own file: pin it, so a hop another tab opened cannot
     // route this claim to a host that has never heard of the path
-    await pinSlot(tab.id, { kind: "local" });
+    await pinSlot(tab.id, { kind: "executor", id: LOCAL_EXECUTOR });
     return "";
   }
   if (!m) return ""; // unknown (a store from before the field): claim normally
   const now = await tunnelNow();
   if (now.active && sameMachine(now.target, m)) {
-    // the hop IS this machine, and the pin SAYS so: host-core takes a
-    // {kind:"tunnel"} pin as "this slot's file lives on a machine", so a hop that
-    // stops serving between here and the claim is answered with a failure the
-    // renderer can name — never with a local session, which would open the path
-    // on the wrong machine and answer "not a .clc project file"
-    await pinSlot(tab.id, { kind: "tunnel" });
+    // the hop IS this machine, and the pin SAYS so: host-core takes a pin naming
+    // a machine as "this slot's file lives there", so a hop that stops serving
+    // between here and the claim is answered with a failure the renderer can name
+    // — never with a local session, which would open the path on the wrong
+    // machine and answer "not a .clc project file"
+    await pinSlot(tab.id, { kind: "executor", target: m });
     return "";
   }
   const name = tab.name || tab.path;
@@ -290,12 +298,15 @@ async function prepareTabMachine(tab: Tab): Promise<string> {
   if (why) return `${name} lives on ${machineLabel(m)} — ${why}`;
   // same promise as above, now that the hop is up: the file is on that machine,
   // so no claim of this slot may land on this one
-  await pinSlot(tab.id, { kind: "tunnel" });
+  await pinSlot(tab.id, { kind: "executor", target: m });
   return "";
 }
 
-// What the HOST actually claimed — never a guess from the path. "local" is this
-// machine; "tunnel" is the far side of the hop that is up.
+// What the HOST actually claimed — never a guess from the path. A claim on this
+// machine records null; a remote claim NAMES the machine it runs on
+// (slotStatus().target, the endpoint's own record), which is the fact the tab has
+// to remember. Asking the live hop instead was a guess: with more than one
+// device it is the wrong one as soon as two are known.
 //
 // Called once the project has OPENED on that claim (project.ts openInTab), not
 // when the slot is claimed: a claim is only a guess about where a path lives
@@ -311,12 +322,7 @@ export async function noteTabMachine(tab: Tab): Promise<void> {
     return;
   }
   if (!st || !st.claimed) return;
-  let next: Machine | null | undefined = tab.machine;
-  if (st.kind === "local") next = null;
-  else if (st.kind === "tunnel") {
-    const now = await tunnelNow();
-    if (now.target) next = now.target;
-  }
+  const next: Machine | null | undefined = st.remote ? asMachine(st.target) ?? undefined : null;
   if (sameMachine(tab.machine, next)) return;
   tab.machine = next;
   // the machine is part of the working set: tab-bar.ts saved it (onTabsPersist)
@@ -353,7 +359,7 @@ function noSessionThere(tab: Tab): string {
 }
 
 // Is the claim the host just made LOCAL over a file this machine does not have?
-// Asked, not assumed: the kind is the claim the host actually holds (host-core
+// Asked, not assumed: `remote` is the claim the host actually holds (host-core
 // slotStatus), and a directory that IS here is a real copy on this machine — a
 // perfectly good place to open the tab — so only an absent one is a mismatch.
 async function localClaimHasNoFile(tab: Tab): Promise<boolean> {
@@ -364,7 +370,7 @@ async function localClaimHasNoFile(tab: Tab): Promise<boolean> {
   } catch (e) {
     return false;
   }
-  if (!st || st.kind !== "local") return false; // a tunnel claim is the right machine
+  if (!st || !st.claimed || st.remote) return false; // a remote claim is the right machine
   const dir = String(tab.path || "").replace(/\/[^/]*$/, "");
   if (!dir) return false;
   try {

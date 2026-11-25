@@ -153,16 +153,17 @@ export async function resetBackendLocal() {
   }
 }
 
-// Is the claim the host holds for ONE slot the tunnel's? The renderer may not
-// assume it: `slot:status` answers { claimed, kind, url } without claiming anything
-// (host-core.ts slotStatus). "Could not ask" (a build with no slotStatus, a thrown
-// IPC) answers NO — that is the safe half, because the bit it guards is the flag
-// the picker reads as "this window is on the saved host".
+// Is the claim the host holds for ONE slot remote (a machine other than this
+// one)? The renderer may not assume it: `slot:status` answers
+// { claimed, executor, remote, url, target } without claiming anything
+// (host-core.ts slotStatus). "Could not ask" (a build with no slotStatus, a
+// thrown IPC) answers NO — that is the safe half, because the bit it guards is
+// the flag the picker reads as "this window is on the saved host".
 async function claimedByTunnel(slot) {
   if (!(window.clutchApi && window.clutchApi.slotStatus)) return false;
   try {
     const st = await window.clutchApi.slotStatus(slot);
-    return Boolean(st && st.claimed && st.kind === "tunnel");
+    return Boolean(st && st.claimed && st.remote);
   } catch (e) {
     return false;
   }

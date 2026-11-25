@@ -292,8 +292,9 @@ function twoTabs(ctx) {
   const prepare = slotsFn("prepareTabMachine");
   check(/const m = tab\.machine;/.test(prepare) && /if \(m === null\)/.test(prepare),
     "the claim looks at the tab's own machine first, and this machine (null) is its own answer");
-  check(/await pinSlot\(tab\.id, \{ kind: "local" \}\)/.test(prepare),
-    "a tab that lives HERE pins its claim local: a tunnel another tab opened must not route it away");
+  check(/await pinSlot\(tab\.id, \{ kind: "executor", id: LOCAL_EXECUTOR \}\)/.test(prepare),
+    "a tab that lives HERE pins its claim to this machine's endpoint: a tunnel another tab opened " +
+    "must not route it away");
   check(/if \(now\.active && sameMachine\(now\.target, m\)\)/.test(prepare),
     "a tab that lives THERE claims through the hop only when the live hop IS its machine");
   check(/if \(now\.active\) \{[\s\S]{0,400}in the file picker to open it/.test(prepare),
@@ -313,8 +314,8 @@ function twoTabs(ctx) {
     "two tabs of the same host claimed together share ONE dial instead of the second being refused as busy");
   check(/export function onTabAutoConnect\(fn\)/.test(slots),
     "the attempt is handed in from outside (slots.ts may not import conn-flow.ts: a cycle)");
-  check(/await pinSlot\(tab\.id, \{ kind: "tunnel" \}\)/.test(prepare),
-    "and the slot is pinned TUNNEL before the claim: the pin says the file lives on a machine, so a hop " +
+  check(/await pinSlot\(tab\.id, \{ kind: "executor", target: m \}\)/.test(prepare),
+    "and the slot is pinned to the MACHINE before the claim: the pin says the file lives there, so a hop " +
     "that stops serving is answered with a failure the pane can name, never with a local session");
 
   check(/const why = await prepareTabMachine\(tab\);[\s\S]{0,220}tab\.unreachable = why;/.test(slotsFn("claimTab")),
@@ -325,16 +326,16 @@ function twoTabs(ctx) {
   check(/if \(started\) await noteTabMachine\(tab\);/.test(projectFn("openInTab")),
     "the machine is recorded by the open that proved it (project.ts), from the host's own slot status");
   const note = slotsFn("noteTabMachine");
-  check(/st\.kind === "local"/.test(note) && /st\.kind === "tunnel"/.test(note) &&
-        /window\.clutchApi\.slotStatus/.test(note),
-    "that answer comes from the host's own slot status (local vs tunnel), not from a URL's shape");
+  check(/st\.remote \? asMachine\(st\.target\)/.test(note) && /window\.clutchApi\.slotStatus/.test(note),
+    "that answer comes from the host's own slot status (a remote claim names its machine; a local one is " +
+    "this machine), not from a URL's shape");
   check(/persistTabs\(\)/.test(note) && /onTabsPersist\(saveTabs\)/.test(tabBar),
     "a machine learned this way is persisted with the working set, so the NEXT boot knows it");
 
   const mismatch = projectFn("machineMismatch");
   check(/if \(tab\.machine !== undefined\) return null;/.test(mismatch),
     "the one-time migration only fires for a tab that has never recorded a machine");
-  check(/st\.kind !== "local"/.test(mismatch) && !/standingRemoteIntent/.test(mismatch),
+  check(/!st\.claimed \|\| st\.remote/.test(mismatch) && !/standingRemoteIntent/.test(mismatch),
     "and only when the claim landed HERE — the standing intent is no longer the gate: it is " +
     "cleared by a plain restart, which is exactly the state the reported blank tab was in");
   check(/if \(await hereHasIt\(tab\)\) return null;/.test(mismatch),
@@ -684,13 +685,18 @@ function machineWorld(opts) {
           calls.claims.push(id);
           return "http://127.0.0.1:9000/"; // the host's URL, trailing slash and all
         },
-        // what the HOST answers, from the pin it holds: a slot pinned local is
-        // claimed here even while a hop is up, exactly like host-core.ts
+        // what the HOST answers, from the pin it holds: a slot pinned to THIS
+        // machine is claimed here even while a hop is up, exactly like
+        // host-core.ts. The answer is the host's own shape (slotStatus):
+        // `remote` says the work happens on another machine, `target` names it
+        // (null for this one).
         slotStatus: async (id) => {
-          if (opts.claimKind) return { claimed: true, kind: opts.claimKind, url: "x" };
-          const pinnedLocal = pins.get(id) && pins.get(id).kind === "local";
-          const kind = !pinnedLocal && fake.tunnel ? "tunnel" : "local";
-          return { claimed: true, kind, url: "x" };
+          if (opts.claimRemote !== undefined)
+            return { claimed: true, remote: opts.claimRemote, url: "x", target: FAR };
+          const pin = pins.get(id);
+          const pinnedLocal = Boolean(pin && pin.id === "local");
+          const remote = !pinnedLocal && Boolean(fake.tunnel);
+          return { claimed: true, remote, url: "x", target: remote ? fake.tunnel : null };
         },
         releaseSession: async (id) => {
           calls.releases.push(id);
@@ -724,6 +730,9 @@ function machineWorld(opts) {
   // machine asks for — this runner is about the store, not the strip
   vm.runInContext(
     "let dialing = false; let persistTabs = null; function announceTabState() {}" +
+    // slots.ts names this machine in the same id space as a hop (executors.ts
+    // LOCAL_ID): it is a module const, so the slices read it from this context
+    '\nconst LOCAL_EXECUTOR = "local";' +
     // releaseTab stops the badge watcher before giving the session back
     "\nconst watchers = new Map();" +
     // the auto-connect door slots.ts is handed at load (boot.ts): this runner
@@ -750,7 +759,7 @@ function machineWorld(opts) {
     "one claim, for this tab's own slot");
   check(tab.machine && tab.machine.host === FAR.host && String(tab.machine.port) === "6001",
     "the tab keeps the machine it was opened on");
-  check(calls.pins.some(([id, t]) => id === "tab-fix" && t && t.kind === "tunnel"),
+  check(calls.pins.some(([id, t]) => id === "tab-fix" && t && t.kind === "executor" && t.target && String(t.target.port) === "6001"),
     "the pin says the file lives on a machine, so the host can never answer this slot with a local session " +
     "(the reported 'not a .clc file': the hop stopped serving and the claim silently landed here)");
   check(!tab.unreachable, "nothing to complain about: the tab opened where its file is");
@@ -801,7 +810,7 @@ function machineWorld(opts) {
   const base = await ctx.claimTab(tab);
   check(base === "http://127.0.0.1:9000" && calls.dials.length === 0,
     "a live hop to the tab's own machine is used as it is (no second connect)");
-  check(calls.pins.some(([id, t]) => id === "tab-fix" && t && t.kind === "tunnel"),
+  check(calls.pins.some(([id, t]) => id === "tab-fix" && t && t.kind === "executor" && t.target && String(t.target.port) === "6001"),
     "and the slot states where its file is: a hop that dies between here and the claim is a failure to " +
     "report, not an invitation to open the far path in a local session");
 }
@@ -813,7 +822,7 @@ function machineWorld(opts) {
   const base = await ctx.claimTab(tab);
   check(base === "http://127.0.0.1:9000" && calls.dials.length === 0,
     "a tab that lives HERE claims here, even while a tunnel is up");
-  check(calls.pins.some(([id, t]) => id === "tab-fix" && t && t.kind === "local"),
+  check(calls.pins.some(([id, t]) => id === "tab-fix" && t && t.kind === "executor" && t.id === "local"),
     "by pinning its slot local — otherwise the hop would carry the claim to a host without the file");
   check(tab.machine === null, "and it is still recorded as this machine's");
 }
@@ -841,7 +850,7 @@ function machineWorld(opts) {
   // only answer "not a .clc project file" — a refusal that names neither the
   // machine nor the way out. So the claim is refused, the wrong session given
   // back, and the pane says where the file really is.
-  const { ctx, calls } = machineWorld({ intent: true, remembered: FAR, claimKind: "local", localDirs: [] });
+  const { ctx, calls } = machineWorld({ intent: true, remembered: FAR, claimRemote: false, localDirs: [] });
   const tab = farTab({ ...FAR });
   const base = await ctx.claimTab(tab);
   check(base === null, "a local claim over a file only the machine has is refused (" + base + ")");
@@ -856,7 +865,7 @@ function machineWorld(opts) {
 {
   // ...but a local claim over a directory this machine DOES have is a real copy,
   // and a perfectly good place to open the tab: no refusal, no release
-  const { ctx, calls } = machineWorld({ intent: true, remembered: FAR, claimKind: "local", localDirs: ["/w"] });
+  const { ctx, calls } = machineWorld({ intent: true, remembered: FAR, claimRemote: false, localDirs: ["/w"] });
   const tab = farTab({ ...FAR });
   const base = await ctx.claimTab(tab);
   check(base === "http://127.0.0.1:9000" && calls.releases.length === 0 && !tab.unreachable,

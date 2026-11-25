@@ -338,6 +338,7 @@ module.exports = {
   state,
   tunnelLog,
   tunnelId,
+  PRIMARY_KEY,
   stateFor,
   primary,
   tunnels,

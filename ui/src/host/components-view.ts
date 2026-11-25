@@ -26,8 +26,10 @@
 //                                                 runs its commands through
 //   plugins()         => ui/plugin-host.js        THIS client's plugin domain
 //                      (or null)                 (null on a host that has none)
-//   windowKind(win, slot) => "local" | "tunnel" | null  which machine one of the
+//   windowExecutor(win, slot) => executor id | null  which machine one of the
 //                                                 window's slots (a tab) runs on
+//                                                 (host-core.ts backendExecutor;
+//                                                 "local" is this machine)
 //   slotBase(win, slot)   => "http://…"           that slot's supervisor URL
 //   ensureSupervisor()=> true | false             start THIS machine's supervisor
 //                      (absent on a host that owns none — the phone, N4)
@@ -39,6 +41,8 @@
 
 const defaultLib = require("./components");
 const defaultMirrors = require("./mirrors");
+// this machine's executor id, in the one table a machine is named in
+const { LOCAL_ID } = require("./executors");
 // The PLACEMENT rule is not an effect: it is one pure function over a
 // declaration, so it is read from the real module even when `lib` is a fake that
 // stands in for the network and the disk. A test that had to restate the rule
@@ -79,9 +83,9 @@ function createComponentsView(deps) {
     plugins = null, // a function: this client plugin domain, or null where it has none
     // which machine one of a WINDOW's slots (one tab = one slot) sits on, and the
     // supervisor URL that slot's machine answers on — the two facts that make an
-    // answer be about the tab whose page asked (host-core.ts backendKind /
+    // answer be about the tab whose page asked (host-core.ts backendExecutor /
     // supervisorBaseFor, both already per slot)
-    windowKind = null,
+    windowExecutor = null,
     slotBase = null,
     ensureSupervisor = null,
     log = () => {},
@@ -104,14 +108,16 @@ function createComponentsView(deps) {
   // names its tab's slot on every call, and an empty slot is the window's default
   // session (every call site that predates tabs).
   function target(win = null, slot = "") {
-    const kind = win && windowKind ? windowKind(win, slot) : null;
-    if (kind === "tunnel") {
-      const ts = tunnelStatus() || {};
-      const live = ts.active && ts.url ? String(ts.url) : "";
-      return { kind: "remote", base: (win && slotBase ? slotBase(win, slot) : "") || live };
+    const id = win && windowExecutor ? windowExecutor(win, slot) : null;
+    if (id === LOCAL_ID) {
+      // a session that runs HERE: its components are this machine's
+      return { kind: "local", base: supervisorBase() };
     }
-    // a slot pinned to "local" stays local even while the window holds a tunnel
-    if (kind === "local") return { kind: "local", base: supervisorBase() };
+    if (id) {
+      // a session on ANOTHER machine: its components live on that machine's
+      // supervisor, which the claim names
+      return { kind: "remote", base: (win && slotBase ? slotBase(win, slot) : "") || "" };
+    }
     // No session is claimed on this slot yet, and a live tunnel is NOT the answer:
     // that tunnel is the machine ONE tab is on, and this slot never said it was
     // that tab. Reading it here is how a list (and then a write aimed at it) used
@@ -138,7 +144,7 @@ function createComponentsView(deps) {
   //
   // A session whose commands run somewhere else than its own process does is the
   // SSH-tools degradation (ui/js/backend-lifecycle.js): a LOCAL agent with an exec
-  // bridge, so `backendKind` says local while every command a tool runs lands on
+  // bridge, so the executor says this machine while every command a tool runs lands on
   // the far machine. A cli/daemon component belongs where those commands run —
   // its own tools call it over THAT loopback — so installing it here would put it
   // on the wrong machine, which is exactly the failure the plug-in page used to

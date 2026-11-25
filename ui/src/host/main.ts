@@ -3,7 +3,8 @@
 const { app, BrowserWindow, ipcMain, session, shell } = require("electron");
 const path = require("path");
 const tunnel = require("./ssh-tunnel");
-const { SUPERVISOR_PORT, ensureSupervisor, startLocalSession } = require("./server-bootstrap");
+const { SUPERVISOR_PORT, localBase, ensureSupervisor } = require("./server-bootstrap");
+const { createExecutors } = require("./executors");
 const { createHostCore } = require("./host-core");
 // the same pure supervisor client host-core uses; the lock panel asks the host
 // that HOLDS a lock (local, or the far side of the tunnel) and never touches a
@@ -45,16 +46,26 @@ function tunnelLog(...args) {
 // "fallback" would only point it at a port that fails every request. A window
 // with no session gets null and shows "not running".
 
+// The execution endpoints this app can claim a session on: this machine, and every
+// hop it holds (ui/executors.ts). One table, so nothing below has to know which
+// kind of machine a session is on — a hop that is up but takes only commands is an
+// executor with `exec` and no `supervisor`, not a second code path.
+//
+// `wake` is this machine's supervisor: it exits when idle, so a claim onto THIS
+// machine starts it again instead of failing with "did not answer" (八 G1). The
+// far side of a hop starts its own.
+const executors = createExecutors({
+  tunnel,
+  local: { base: () => localBase, wake: ensureSupervisor },
+  log: tunnelLog,
+});
+
 // the session-claim state machine lives in host-core.js, shared with the
 // Android host; this shell only feeds it its desktop inputs. Electron
 // webContents already satisfies host-core's window-handle contract
 // ({id, isDestroyed(), send}).
 const hostCore = createHostCore({
-  supervisorBase: () => `http://127.0.0.1:${SUPERVISOR_PORT}`,
-  tunnelStatus: () => tunnel.tunnelStatus(),
-  restartRemoteServer: () => tunnel.restartRemoteServer(),
-  openSessionForward: (port) => tunnel.openSessionForward(port),
-  startLocalSession,
+  executors,
   log: tunnelLog,
 });
 
@@ -101,7 +112,7 @@ function slotArgs(first, second) {
 }
 
 function announcePlugins(winId, slotId, base) {
-  if (!base || hostCore.backendKind(winId, slotId) !== "tunnel") return;
+  if (!base || !hostCore.backendRemote(winId, slotId)) return;
   pluginLink
     .offer(base)
     .catch((e) => tunnelLog(`[plugin] declaring to ${base} failed: ${(e && e.message) || e}`));
@@ -174,12 +185,13 @@ const pluginHost = createPluginHost({
 pluginLink.useHost(pluginHost);
 
 const componentsView = createComponentsView({
-  supervisorBase: () => `http://127.0.0.1:${SUPERVISOR_PORT}`,
+  supervisorBase: () => localBase,
   tunnelStatus: () => tunnel.tunnelStatus(),
-  windowKind: (wc, slotId) => hostCore.backendKind(wc.id, slotId),
-  // the supervisor that slot's machine answers on: the tunnel's far end for a tab
-  // pinned to a hop, THIS machine's otherwise (host-core.ts already keeps that
-  // per slot, so nothing here decides it a second time)
+  // which endpoint a slot's session is on, and the supervisor that endpoint
+  // answers on: the far end of a hop for a tab that is out there, THIS machine
+  // otherwise (host-core.ts already keeps that per slot, so nothing here decides
+  // it a second time)
+  windowExecutor: (wc, slotId) => hostCore.backendExecutor(wc.id, slotId),
   slotBase: (wc, slotId) => hostCore.supervisorBaseFor(wc.id, slotId),
   plugins: () => pluginHost,
   ensureSupervisor,
@@ -384,10 +396,12 @@ if (!app.requestSingleInstanceLock()) {
       return { ...status, running: !!inst };
     });
 
-    // Pin a slot to a specific backend target:
-    //   { kind: "local" }                       — always use local supervisor
-    //   { kind: "tunnel", tunnelId: string }     — always route through this tunnel
-    //   null                                     — clear: use global default
+    // Pin a slot to a specific execution endpoint:
+    //   { kind: "executor", id: "local" }              — this machine's supervisor
+    //   { kind: "executor", target: {host,user,port} } — that machine (an id is
+    //                                                    derived from the triple)
+    //   { kind: "executor", id: <executor id> }        — an endpoint, by its id
+    //   null                                           — clear: use the default
     // A new claim (api:base) is needed after changing this for the slot to actually
     // move; changing the target alone only affects the NEXT claim, not the current one.
     ipcMain.handle("slot:set-target", async (e, slotId, target) => {

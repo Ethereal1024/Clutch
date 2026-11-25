@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit android/host/src/android-host.ts and run `node android/build-host.js`.
-// source sha256: 20ce179826c692bc66883be611cd0f122de58a4b799692eb142bf4019c4b2eaa
+// source sha256: aca09756379cd9142fa23b399aaa69b4c6535a6a6edb45a7527423733ac8b4bb
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -11,7 +11,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
 //   N2  HOME/TMPDIR are set by the Kotlin shell before Node boots, so
 //       os.homedir()-based paths (~/.clutch/...) land in the app sandbox
 //   N3  pylibs artifacts come from CI prebuilts (artifact-provider-android)
-//   N4  no local python: supervisorBase()=null, startLocalSession absent
+//   N4  no local python: no local supervisor, so this machine is an executor with
+//       no `supervisor` capability (ui/executors.ts) — the renderer shows
+//       "not running" until a hop serves a session
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -85,12 +87,12 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
     // N3: register the artifact provider BEFORE any tunnel strategy decision —
     // the desktop default would otherwise try to run bash/uv on the phone
     useUI("server-bundle.js").setArtifactProvider(createAndroidArtifactProvider());
+    // The endpoints this host can claim on: every hop it holds, and this machine —
+    // which has no supervisor (N4), so it is an executor that exists and cannot
+    // serve. `local: null` is how that is said; there is no second code path for it.
+    const executors = useUI("executors.js").createExecutors({ tunnel, local: null, log });
     const hostCore = createHostCore({
-        supervisorBase: () => null, // N4: no local supervisor on Android
-        tunnelStatus: () => tunnel.tunnelStatus(),
-        restartRemoteServer: () => tunnel.restartRemoteServer(),
-        openSessionForward: (port) => tunnel.openSessionForward(port),
-        startLocalSession: null, // N4: no local mode; the renderer shows "not running"
+        executors,
         log,
         sessions,
     });
@@ -125,17 +127,21 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
     pluginLink.useHost(pluginHost);
     // The plugin tab's backend — the same object the desktop shell builds
     // (ui/main.js:55), fed this host's answers. N4 decides which machine a request
-    // is about: this host has no local supervisor (`supervisorBase()` is null), and
-    // the CLAIM is what names a machine (`components-view.ts` `target`), so a window
-    // that holds no session has no machine to be about — the view answers with the
-    // quiet wait rather than the page dying on a missing channel. A window whose
-    // session sits on the tunnel targets the far supervisor's URL — components are
-    // installed on the machine that will RUN them, so "install onto the phone" is
-    // never the answer when the tools run on the far side.
+    // is about: this host has no local supervisor, and the CLAIM is what names a
+    // machine (`components-view.ts` `target`), so a window that holds no session has
+    // no machine to be about — the view answers with the quiet wait rather than the
+    // page dying on a missing channel. A window whose session sits on a hop targets
+    // that machine's supervisor URL — components are installed on the machine that
+    // will RUN them, so "install onto the phone" is never the answer when the tools
+    // run on the far side.
     const componentsView = createComponentsView({
         supervisorBase: () => null, // N4: no local supervisor on Android
         tunnelStatus: () => tunnel.tunnelStatus(),
-        windowKind: (w) => hostCore.backendKind(w.id),
+        windowExecutor: (w) => hostCore.backendExecutor(w.id),
+        // …and the URL that machine's supervisor answers on: the claim recorded the
+        // base it was opened through, which is the far side of the hop here (there is
+        // no local supervisor on Android to fall back to)
+        slotBase: (w) => hostCore.supervisorBaseFor(w.id),
         // …and the place a frontend plugin goes: THIS app process (ui/plugin-host.js).
         // Without it the page reads `client: false` and says a plugin has nowhere to go
         // here — which was true until this domain existed (ui/js/components-panel.js).
@@ -148,7 +154,7 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
     // later is a plugin appearing in a session that is already running, not a reason
     // to keep the window waiting on a push.
     function announcePlugins(base, slotId = "") {
-        if (!base || hostCore.backendKind(window.id, slotId) !== "tunnel")
+        if (!base || !hostCore.backendRemote(window.id, slotId))
             return;
         pluginLink.offer(base).catch((e) => log(`[plugin] declaring to ${base} failed: ${(e && e.message) || e}`));
     }

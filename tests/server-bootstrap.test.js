@@ -2,6 +2,14 @@
 // windows — first spawns the supervisor + session, second reuses it with its
 // own session child (independent processes, so the .clc lock is kernel-level);
 // last window closes -> supervisor idle-exits.
+//
+// The spawn path has no entry of its own any more: `startLocalSession` is gone,
+// this machine is one row of the endpoint table (ui/executors.ts) like any hop,
+// and the ONE claim path starts the supervisor when it is that machine's turn
+// (ui/host-core.ts claimSlotBackend -> server-bootstrap's ensureSupervisor). So
+// this runner drives exactly that: a real host core over a real executors table, a
+// hop module with no hops, and the real supervisor client — the three pieces the
+// desktop main process itself wires.
 // Run: node tests/server-bootstrap.test.js
 const assert = require("assert");
 const { spawn } = require("child_process");
@@ -19,15 +27,39 @@ const SUPERVISOR_PORT = Number(process.env.CLUTCH_SUPERVISOR_PORT);
 
 // server-bootstrap.js requires electron; satisfy it with a stub so the module
 // loads in plain node. Each fresh() gets a fresh module instance (its own
-// child/released state), like a separate app/window would.
+// child/retire state), like a separate app process would.
 Module._load = function (request, ...rest) {
   if (request === "electron") return { app: { isPackaged: false } };
   return origLoad.call(this, request, ...rest);
 };
 
+const { createHostCore } = require("../ui/host-core");
+const { createExecutors } = require("../ui/executors");
+const realSessions = require("../ui/supervisor-client");
+
 function fresh() {
   delete require.cache[require.resolve("../ui/server-bootstrap")];
   return require("../ui/server-bootstrap");
+}
+
+// Every session the real client starts, so the plain-release case below can name
+// the child that outlived its claim: a release that is not `leaving` drops the
+// record and leaves the process to the supervisor, which is the quit gate's to end.
+const started = [];
+const sessions = {
+  ...realSessions,
+  supervisorSessionStart: async (base) => {
+    const r = await realSessions.supervisorSessionStart(base);
+    if (r && r.sessionId) started.push({ base, sessionId: r.sessionId, port: r.port });
+    return r;
+  },
+};
+
+// A hop module with no hops: this runner is about the machine the app runs on.
+const noHop = { primaryTunnel: () => null, tunnelFor: () => null, listTunnels: () => [] };
+
+function fakeWin(id) {
+  return { id, isDestroyed: () => false, send: () => {} };
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -64,7 +96,19 @@ async function waitFor(what, pred, timeoutMs) {
   return false;
 }
 
-const windows = [];
+// One app process: its endpoint table (this machine — the shell's own supervisor —
+// and no hops) and the claim machine over it.
+const apps = []; // every app this run started, so cleanup can say it is leaving
+function app() {
+  const boot = fresh();
+  const local = { base: () => boot.localBase, wake: () => boot.ensureSupervisor() };
+  const executors = createExecutors({ tunnel: noHop, local });
+  const core = createHostCore({ executors, sessions });
+  const a = { core, boot };
+  apps.push(a);
+  return a;
+}
+
 let predecessor = null; // the fake old-build supervisor of the upgrade check
 
 async function cleanup() {
@@ -75,10 +119,10 @@ async function cleanup() {
       /* already gone */
     }
   }
-  for (const w of windows) {
+  for (const a of apps) {
     try {
-      // the app is leaving: say so, or a nameless claim keeps its session
-      await w.stop({ leaving: true });
+      // the app is leaving: say so, or a claim without a leaving note keeps its session
+      await a.core.releaseAllBackends({ leaving: true });
     } catch {
       /* already gone */
     }
@@ -96,16 +140,15 @@ async function main() {
     await waitFor("previous supervisor exits", async () => !(await supervisorUp()), 8000);
   }
 
-  // ---- window 1: first window spawns the supervisor + gets a session ----
-  const s1 = await fresh().startLocalSession();
-  windows.push(s1);
-  const res1 = s1;
-  assert(res1.mode === "spawned", `window 1 gets a session (got ${res1.mode})`);
-  assert(res1.sessionId && res1.sessionId.length > 0, "session id returned");
-  const p1 = res1.url;
+  // ---- window 1: the first claim spawns the supervisor + gets a session ----
+  const a = app();
+  const w1 = fakeWin(1);
+  const p1 = await a.core.ensureSlotBackend(w1, "", true);
   assert(p1 && !p1.includes(String(SUPERVISOR_PORT)), `session on a random port (got ${p1})`);
   assert(await healthy(p1), "session child healthy");
   assert(await supervisorUp(), "supervisor is up after window 1");
+  const s1 = started[started.length - 1];
+  assert(s1 && s1.sessionId && s1.sessionId.length > 0, "session id returned");
 
   // the extracted pure-HTTP client sees the same live supervisor
   const { supervisorProbe } = require("../ui/supervisor-client");
@@ -116,18 +159,15 @@ async function main() {
   );
 
   // ---- window 2: supervisor already up -> not re-spawned, second session ----
-  const s2 = await fresh().startLocalSession();
-  windows.push(s2);
-  const res2 = s2;
-  assert(res2.mode === "spawned", `window 2 gets its own session (got ${res2.mode})`);
-  assert(res2.url !== p1, `two windows get different ports (${p1} vs ${res2.url})`);
-  assert(await healthy(res2.url), "window 2's session healthy");
+  const w2 = fakeWin(2);
+  const p2 = await a.core.ensureSlotBackend(w2, "", true);
+  assert(p2 !== p1, `two windows get different ports (${p1} vs ${p2})`);
+  assert(await healthy(p2), "window 2's session healthy");
   assert(await healthy(p1), "window 1's session still healthy");
   assert(await supervisorUp(), "supervisor still up (single instance)");
 
   // ---- cross-process RUN claim: one running client per .clc ----
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "clutch-sup-"));
-  const p2 = res2.url;
   const st1 = await post(`${p1}/api/project/new`, { dir: workDir, name: "demo" });
   assert(st1.status === 200, "window 1 creates a project");
   const clc = JSON.parse(st1.body).project;
@@ -149,7 +189,7 @@ async function main() {
   // ---- window 1 closes: {leaving:true} -> session killed, and the claim goes
   // with it WITHOUT any TTL. This is the quit gate's POST: the app says it is
   // going for good, so the supervisor stops the child through its SIGTERM ladder.
-  await s1.stop({ leaving: true });
+  await a.core.releaseSlot(w1.id, "", { leaving: true });
   await sleep(700);
   assert(!(await healthy(p1)), "window 1's session died with its window");
   assert(await healthy(p2), "window 2's session survives window 1's close");
@@ -163,23 +203,27 @@ async function main() {
   // for a re-bind, never start a second session over the same work
   const runState = await post(`${p2}/api/run/state`, { busy: true, project: clc });
   assert(runState.status === 200, "the client claims the run slot");
-  await s2.stop();
+  await a.core.releaseSlot(w2.id, "", {});
   await sleep(700);
   assert(await healthy(p2), "a plain release keeps a session whose run is in flight");
 
   // ---- last window closes -> its session stops, supervisor self-exits (idle) ----
-  await s2.stop({ leaving: true });
+  // A plain release dropped the record with the claim (this machine's session is
+  // the supervisor's child, not another machine's to park), so what is left is the
+  // process: the quit gate's own POST is the door that stops it.
+  const orphan = started.find((s) => `http://127.0.0.1:${s.port}` === p2);
+  assert(orphan, "the session the plain release left running is the one this app started");
+  await realSessions.supervisorSessionStop(orphan.base, orphan.sessionId, { leaving: true });
   await sleep(700);
   assert(!(await healthy(p2)), "window 2's session died with its app");
   await waitFor("supervisor idle-exit after last window", async () => !(await supervisorUp()), 20000);
 
-  // ---- next window pulls the supervisor up again ----
-  const s3 = await fresh().startLocalSession();
-  windows.push(s3);
-  const res3 = s3;
-  assert(res3.mode === "spawned", "window 3 re-spawns the supervisor + session");
-  assert(await healthy(res3.url), "window 3's session healthy");
-  await s3.stop({ leaving: true });
+  // ---- next app pulls the supervisor up again ----
+  const b = app();
+  const w3 = fakeWin(3);
+  const p3 = await b.core.ensureSlotBackend(w3, "", true);
+  assert(await healthy(p3), "window 3 re-spawns the supervisor + session");
+  await b.core.releaseSlot(w3.id, "", { leaving: true });
   await waitFor("supervisor exits after cleanup", async () => !(await supervisorUp()), 20000);
 
   // ---- the plugin tab's wake: a write aimed at THIS machine starts its

@@ -19,10 +19,13 @@ contextBridge.exposeInMainWorld("clutchApi", {
     ipcRenderer.on("backend:base-changed", wrap);
     return () => ipcRenderer.removeListener("backend:base-changed", wrap);
   },
-  // per-slot backend target: pin this tab to a specific tunnel or to local.
-  //   { kind: "local" }                          — always local supervisor
-  //   { kind: "tunnel", tunnelId: string }        — route through this tunnel
-  //   null                                        — clear (use the global default)
+  // per-slot execution endpoint: pin this tab to a machine, or to this one.
+  //   { kind: "executor", id: "local" }           — this machine's supervisor
+  //   { kind: "executor", target: {host,user,port} } — that machine (the host
+  //                                                 derives the endpoint id from
+  //                                                 the triple; the page never builds one)
+  //   { kind: "executor", id: <executor id> }      — an endpoint, by its id
+  //   null                                         — clear (use the default endpoint)
   // A change affects the NEXT claim, not the current session.
   setSlotTarget: (slotId, target) => ipcRenderer.invoke("slot:set-target", slotId, target),
   getSlotTarget: (slotId) => ipcRenderer.invoke("slot:get-target", slotId),

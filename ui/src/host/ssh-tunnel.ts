@@ -12,7 +12,7 @@
 // instance for one tunnel id; the names exported here are the primary instance's,
 // which is what ui/main.js and android/host/android-host.js require.
 
-const { tunnelLog, stateFor, tunnels } = require("./tunnel-core");
+const { tunnelLog, stateFor, tunnels, PRIMARY_KEY } = require("./tunnel-core");
 const remote = require("./tunnel-remote");
 const bootstrap = require("./tunnel-bootstrap");
 const lifecycle = require("./tunnel-lifecycle");
@@ -20,10 +20,13 @@ const connect = require("./tunnel-connect");
 const { execBridgeFor } = require("./exec-bridge");
 
 // ---- binding ----
-// One instance per id, made once and reused. attach() closes over the hop's own
-// counters and its exec bridge, so a second bind of the same id would be a second
-// bridge on a second port for the same host; the state, which is the part that
-// has to survive a rebind, comes from tunnel-core either way.
+// One instance per STATE, made once and reused. attach() closes over the hop's
+// own counters and its exec bridge, so a second instance over one state would be
+// a second bridge on a second port for the same host. The cache is keyed by the
+// state object rather than by the id it was asked for, because an id is not what
+// distinguishes two instances: `tunnelFor("u@h:22")` and the primary tunnel the
+// picker drives are the SAME tunnel once a dial named the primary — same state,
+// so they must be the same instance (and the same bridge).
 //
 // `parts` supplies a part that is ALREADY built (a runner's fake wire, a fake
 // lifecycle) instead of attaching the real one. That is the composition seam the
@@ -33,18 +36,20 @@ const { execBridgeFor } = require("./exec-bridge");
 const bound = new Map();
 
 function bind({ id = null, parts = null } = {}) {
-  const key = id == null ? "__primary__" : String(id);
-  const existing = bound.get(key);
+  const key = id == null ? null : String(id);
+  const st = stateFor(id);
+  const existing = bound.get(st);
   if (existing && !parts) return existing;
   const supplied = parts || {};
-  const ctx = { id: id == null ? null : key, st: stateFor(id) } as any;
+  const ctx = { id: key, st } as any;
   // the DAG's order: each attach may read the parts before it, never after
   ctx.remote = supplied.remote || remote.attach(ctx);
   ctx.bootstrap = supplied.bootstrap || bootstrap.attach(ctx);
-  ctx.bridge = supplied.bridge || execBridgeFor(key, ctx.remote.remoteExec);
+  // the bridge is keyed per INSTANCE, and an instance is one state
+  ctx.bridge = supplied.bridge || execBridgeFor(key == null ? PRIMARY_KEY : key, ctx.remote.remoteExec);
   ctx.lifecycle = supplied.lifecycle || lifecycle.attach(ctx);
   ctx.connect = supplied.connect || connect.attach(ctx);
-  if (!parts) bound.set(key, ctx);
+  if (!parts) bound.set(st, ctx);
   return ctx;
 }
 

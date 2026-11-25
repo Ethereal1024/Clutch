@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/ssh-tunnel.ts and run `npm run build:host`.
-// source sha256: 328d978142b90d5014294950ebd2913cbcf1b885055c0d3a8e1b067bb7b86444
+// source sha256: 2a39a7ad37bb420982469d88d27c2b23dc7f85bcac459118db9c17827491456f
 
 "use strict";
 // SSH tunnel (ssh2) to a remote clutch-server, embedded in the Electron main
@@ -16,17 +16,20 @@
 // instance for one tunnel id; the names exported here are the primary instance's,
 // which is what ui/main.js and android/host/android-host.js require.
 Object.defineProperty(exports, "__esModule", { value: true });
-const { tunnelLog, stateFor, tunnels } = require("./tunnel-core");
+const { tunnelLog, stateFor, tunnels, PRIMARY_KEY } = require("./tunnel-core");
 const remote = require("./tunnel-remote");
 const bootstrap = require("./tunnel-bootstrap");
 const lifecycle = require("./tunnel-lifecycle");
 const connect = require("./tunnel-connect");
 const { execBridgeFor } = require("./exec-bridge");
 // ---- binding ----
-// One instance per id, made once and reused. attach() closes over the hop's own
-// counters and its exec bridge, so a second bind of the same id would be a second
-// bridge on a second port for the same host; the state, which is the part that
-// has to survive a rebind, comes from tunnel-core either way.
+// One instance per STATE, made once and reused. attach() closes over the hop's
+// own counters and its exec bridge, so a second instance over one state would be
+// a second bridge on a second port for the same host. The cache is keyed by the
+// state object rather than by the id it was asked for, because an id is not what
+// distinguishes two instances: `tunnelFor("u@h:22")` and the primary tunnel the
+// picker drives are the SAME tunnel once a dial named the primary — same state,
+// so they must be the same instance (and the same bridge).
 //
 // `parts` supplies a part that is ALREADY built (a runner's fake wire, a fake
 // lifecycle) instead of attaching the real one. That is the composition seam the
@@ -35,20 +38,22 @@ const { execBridgeFor } = require("./exec-bridge");
 // state as its id, but with somebody else's parts.
 const bound = new Map();
 function bind({ id = null, parts = null } = {}) {
-    const key = id == null ? "__primary__" : String(id);
-    const existing = bound.get(key);
+    const key = id == null ? null : String(id);
+    const st = stateFor(id);
+    const existing = bound.get(st);
     if (existing && !parts)
         return existing;
     const supplied = parts || {};
-    const ctx = { id: id == null ? null : key, st: stateFor(id) };
+    const ctx = { id: key, st };
     // the DAG's order: each attach may read the parts before it, never after
     ctx.remote = supplied.remote || remote.attach(ctx);
     ctx.bootstrap = supplied.bootstrap || bootstrap.attach(ctx);
-    ctx.bridge = supplied.bridge || execBridgeFor(key, ctx.remote.remoteExec);
+    // the bridge is keyed per INSTANCE, and an instance is one state
+    ctx.bridge = supplied.bridge || execBridgeFor(key == null ? PRIMARY_KEY : key, ctx.remote.remoteExec);
     ctx.lifecycle = supplied.lifecycle || lifecycle.attach(ctx);
     ctx.connect = supplied.connect || connect.attach(ctx);
     if (!parts)
-        bound.set(key, ctx);
+        bound.set(st, ctx);
     return ctx;
 }
 // The tunnel the window's own picker drives: the one no id has named yet, and

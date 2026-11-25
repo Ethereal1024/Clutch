@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/preload.ts and run `npm run build:host`.
-// source sha256: 02d0f89eb3f70d3edc7a7196cabd9eac63c3ea2f9ebc17fe365c282b9328222d
+// source sha256: c1a2d222de22bcd4658ec501f9b9f000403abd465b979730dfa7a409f37f95ad
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -23,10 +23,13 @@ contextBridge.exposeInMainWorld("clutchApi", {
         ipcRenderer.on("backend:base-changed", wrap);
         return () => ipcRenderer.removeListener("backend:base-changed", wrap);
     },
-    // per-slot backend target: pin this tab to a specific tunnel or to local.
-    //   { kind: "local" }                          — always local supervisor
-    //   { kind: "tunnel", tunnelId: string }        — route through this tunnel
-    //   null                                        — clear (use the global default)
+    // per-slot execution endpoint: pin this tab to a machine, or to this one.
+    //   { kind: "executor", id: "local" }           — this machine's supervisor
+    //   { kind: "executor", target: {host,user,port} } — that machine (the host
+    //                                                 derives the endpoint id from
+    //                                                 the triple; the page never builds one)
+    //   { kind: "executor", id: <executor id> }      — an endpoint, by its id
+    //   null                                         — clear (use the default endpoint)
     // A change affects the NEXT claim, not the current session.
     setSlotTarget: (slotId, target) => ipcRenderer.invoke("slot:set-target", slotId, target),
     getSlotTarget: (slotId) => ipcRenderer.invoke("slot:get-target", slotId),

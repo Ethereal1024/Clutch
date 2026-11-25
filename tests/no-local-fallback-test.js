@@ -160,16 +160,33 @@ check(!/["']http:\/\/127\.0\.0\.1:[\d]+["']/.test(MAIN_BASE),
 // behavioral: the REAL handler, with a tunnel that is down and one that is up
 const { createAndroidHost } = require(path.join(ROOT, "android", "host", "android-host.js"));
 
+// A hop module as the executor table reads it (ui/ssh-tunnel.js: primaryTunnel /
+// tunnelFor / listTunnels, each hop being { tunnelId, lifecycle }), plus the flat
+// names the rest of the host calls. One lifecycle behind both halves, so a
+// scenario that flips `state.status` is seen by both.
+const TARGET = { host: "dev.example", user: "me", port: 22 };
+const TARGET_ID = "me@dev.example:22"; // tunnel-core's tunnelId spelling
+
 function fakeTunnel(status) {
   const state = { status, forwards: [], connects: [] };
-  return {
-    state,
-    tunnelStatus: () => state.status,
+  const lifecycle = {
+    // a live hop names the machine it is open to; "up" alone is not an answer
+    tunnelStatus: () => Object.assign({ target: TARGET }, state.status),
     restartRemoteServer: async () => true,
     openSessionForward: async (port) => {
       state.forwards.push(port);
       return { localPort: port + 1000, close: () => {} };
     },
+  };
+  const hop = { tunnelId: TARGET_ID, lifecycle };
+  return {
+    state,
+    primaryTunnel: () => hop,
+    tunnelFor: (id) => (id === TARGET_ID ? hop : null),
+    listTunnels: () => [hop],
+    tunnelStatus: () => lifecycle.tunnelStatus(),
+    restartRemoteServer: lifecycle.restartRemoteServer,
+    openSessionForward: lifecycle.openSessionForward,
     connectTunnel: async (cfg, onProgress) => {
       state.connects.push(cfg);
       state.progress = onProgress;

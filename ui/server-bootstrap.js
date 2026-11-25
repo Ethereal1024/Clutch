@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/server-bootstrap.ts and run `npm run build:host`.
-// source sha256: 73713febba50479f9a4058c8e33be9df197b3a020cf74285507cb7e9cde1058c
+// source sha256: 9d5467ff502d23efa5e88bf7eca02d75155ab39b6d359ec121bfb3e71079eb53
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -10,7 +10,7 @@ const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { supervisorProbe, supervisorIdentity, supervisorSessionStart, supervisorSessionStop, startSupervisorHeartbeat, supervisorShutdown, } = require("./supervisor-client");
+const { supervisorProbe, supervisorIdentity, supervisorShutdown, } = require("./supervisor-client");
 const SUPERVISOR_PORT = parseInt(process.env.CLUTCH_SUPERVISOR_PORT || "8890", 10); // fixed machine-wide single instance
 const HEALTH_TIMEOUT_MS = 20_000; // PyInstaller onefile extracts on first run
 const HEALTH_POLL_MS = 250;
@@ -168,38 +168,14 @@ async function ensureSupervisor() {
     }
     return false;
 }
-// ---- local session: this window's session child from the LOCAL supervisor ----
-// onFail fires when the supervisor stops answering (idle-exit or crash).
-// The claim that names this window (host + pid + start tick) is attached by the
-// supervisor client itself, so a local and a tunnelled session carry the same
-// one; nothing here has to know what a claim is.
-async function startLocalSession(onFail = null) {
-    if (!(await ensureSupervisor())) {
-        return { mode: "failed", reason: "could not start the machine supervisor" };
-    }
-    const res = await supervisorSessionStart(localBase, undefined, undefined, {});
-    if (res.error)
-        return { mode: "failed", reason: res.error };
-    const hb = startSupervisorHeartbeat(localBase, res.sessionId, onFail);
-    console.log(`[server-bootstrap] session ${res.sessionId} on port ${res.port}`);
-    return {
-        mode: "spawned",
-        sessionId: res.sessionId,
-        url: `http://127.0.0.1:${res.port}`,
-        // Awaitable: the quit gate has one bounded moment to release this session
-        // before the process goes. `{leaving:true}` tells the supervisor the app is
-        // quitting (not merely losing a hop), so it stops the session through its
-        // SIGTERM ladder and a `released` final lands; without it a live claim keeps
-        // its session, exactly as a hop loss must.
-        stop: (opts = {}) => {
-            hb.stop();
-            return supervisorSessionStop(localBase, res.sessionId, { leaving: !!(opts && opts.leaving) });
-            // we don't own the supervisor's lifetime: it self-exits at zero sessions
-        },
-    };
-}
+// `localBase` is what makes this machine an EXECUTOR (ui/executors.ts): the base
+// a session is claimed on and the address the renderer reaches it at. Nothing
+// here claims a session any more — the claim is one path for every endpoint
+// (host-core.ts claimSlotBackend), and this machine is one of them; what this
+// module owns is the machine-wide process: waking it, and knowing it is not
+// another build.
 module.exports = {
     SUPERVISOR_PORT,
+    localBase,
     ensureSupervisor,
-    startLocalSession,
 };

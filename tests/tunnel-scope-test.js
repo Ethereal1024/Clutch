@@ -40,6 +40,7 @@ const fs = require("fs");
 const path = require("path");
 const { check, summary, uiSource } = require("./harness.js");
 const { createHostCore } = require("../ui/host-core");
+const { createExecutors, LOCAL_ID } = require("../ui/executors");
 
 const ROOT = path.join(__dirname, "..");
 const APP = uiSource(); // the renderer, every module in page load order
@@ -123,21 +124,33 @@ function fakeWin(id) {
 }
 
 // the smallest host core that can hold two claims (the state machine itself is
-// exercised in host-core.test.js; here it only has to answer "whose was the hop?")
+// exercised in host-core.test.js; here it only has to answer "whose was the hop?").
+// The endpoint table is the REAL one (ui/executors.js) over a fake hop module and
+// a fake local supervisor: "here" and "the hop" are two rows of one table, and
+// the assertion below is about which ROW a window's claim landed on.
+const LOCAL_BASE = "http://127.0.0.1:8890";
+const FAR = { host: "far.example", user: "me", port: 22 };
+const FAR_ID = "me@far.example:22"; // tunnel-core's tunnelId spelling: user@host:port
+
 function makeCore(tunnel) {
-  let lseq = 0;
   let sseq = 0;
+  const hop = {
+    tunnelId: FAR_ID,
+    lifecycle: {
+      tunnelStatus: () => ({ active: !!tunnel.active, url: tunnel.url || null, target: FAR }),
+      openSessionForward: async (port) => ({ localPort: port + 1000, close: () => {} }),
+      restartRemoteServer: async () => true,
+    },
+  };
+  const tunnelModule = {
+    primaryTunnel: () => hop,
+    tunnelFor: (id) => (id === FAR_ID ? hop : null),
+    listTunnels: () => (tunnel.active ? [hop] : []),
+  };
+  const local = { base: () => LOCAL_BASE, wake: async () => true };
+  const executors = createExecutors({ tunnel: tunnelModule, local, log: () => {} });
   return createHostCore({
-    supervisorBase: () => "http://127.0.0.1:8890",
-    tunnelStatus: () => tunnel,
-    restartRemoteServer: async () => true,
-    openSessionForward: async (port) => ({ localPort: port + 1000, close: () => {} }),
-    startLocalSession: async () => ({
-      mode: "spawned",
-      sessionId: "L" + ++lseq,
-      url: "http://127.0.0.1:" + (40000 + lseq),
-      stop: () => {},
-    }),
+    executors,
     log: () => {},
     sessions: {
       supervisorSessionStart: async () => ({ sessionId: "s" + ++sseq, port: 30000 + sseq }),
@@ -181,7 +194,8 @@ async function main() {
   tunnel.active = true;
   tunnel.url = "http://127.0.0.1:8891";
   await core.ensureSlotBackend(theirs);
-  check(core.backendKind(mine.id) === "local" && core.backendKind(theirs.id) === "tunnel",
+  check(core.backendExecutor(mine.id) === LOCAL_ID && !core.backendRemote(mine.id) &&
+    core.backendExecutor(theirs.id) === FAR_ID && core.backendRemote(theirs.id),
     "two windows, one app: one on its own local session, one over the shared hop");
 
   // the hop dies, and the shell notifies each window with its own verdict —
@@ -192,7 +206,7 @@ async function main() {
     "the window that was never on the hop is told so");
   check(theirs.sent.length === 1 && theirs.sent[0][1].lost === true,
     "and the window that was on it is told the truth about itself");
-  check(core.backendKind(mine.id) === "local" && core.backendKind(theirs.id) === "tunnel",
+  check(core.backendExecutor(mine.id) === LOCAL_ID && core.backendExecutor(theirs.id) === FAR_ID,
     "the hop's end dropped the claims of nobody: a session outlives the hop that carried it");
 
   // ...and now each window's own handler, with its own verdict

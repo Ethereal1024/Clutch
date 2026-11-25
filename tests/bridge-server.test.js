@@ -24,6 +24,14 @@ os.homedir = () => HOME;
 const { createAndroidHost } = require("../android/host/android-host");
 
 // ---- fakes: the ssh2 tunnel face + the supervisor HTTP client face ----
+// The host reads hops through the executor table (ui/executors.js), which asks
+// the hop MODULE (ui/ssh-tunnel.js): primaryTunnel / tunnelFor / listTunnels,
+// each hop being { tunnelId, lifecycle }. The flat names below are what the rest
+// of the host calls, and the two halves share one lifecycle so a scenario can
+// flip `state.status` and be seen by both.
+const TARGET = { host: "dev.example", user: "me", port: 22 };
+const TARGET_ID = "me@dev.example:22"; // tunnel-core's tunnelId spelling
+
 function fakeTunnel() {
   const state = {
     status: { active: true, url: "http://127.0.0.1:8891" },
@@ -35,15 +43,26 @@ function fakeTunnel() {
     endCbs: [],
     logs: [],
   };
-  return {
-    state,
-    tunnelStatus: () => state.status,
+  const lifecycle = {
+    // a live hop always names the machine it is open to: the default endpoint
+    // ("the hop that is serving") is that machine, not "anything that is up"
+    tunnelStatus: () => Object.assign({ target: TARGET }, state.status),
     restartRemoteServer: async () => true,
     openSessionForward: async (port) => {
       state.forwards.push(port);
       // OS-assigned local port: a fresh one per open, like the real forwarder
       return { localPort: 31000 + state.forwards.length, close: () => (state.forwardClosed = true) };
     },
+  };
+  const hop = { tunnelId: TARGET_ID, lifecycle };
+  return {
+    state,
+    primaryTunnel: () => hop,
+    tunnelFor: (id) => (id === TARGET_ID ? hop : null),
+    listTunnels: () => [hop],
+    tunnelStatus: () => lifecycle.tunnelStatus(),
+    restartRemoteServer: lifecycle.restartRemoteServer,
+    openSessionForward: lifecycle.openSessionForward,
     connectTunnel: async (cfg, onProgress) => {
       state.connects.push(cfg);
       state.progress = onProgress;

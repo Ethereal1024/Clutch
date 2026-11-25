@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-core.ts and run `npm run build:host`.
-// source sha256: 74dd898588e45904f43710a76f6ea2f0504eaaec10c5c70b639bc2158b3f94dd
+// source sha256: 2a42016b0d40724c7842e32bcbebc6ce7a8d1e9baa5ab8c0920158a70b4cb7f4
 
 "use strict";
 // the tunnel's state object, its wire constants, and the log every phase writes to
@@ -340,6 +340,7 @@ module.exports = {
     state,
     tunnelLog,
     tunnelId,
+    PRIMARY_KEY,
     stateFor,
     primary,
     tunnels,

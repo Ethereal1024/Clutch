@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: df4dc36b23056efcad9c781273759a2c53b27a5add5af7d5c2af4d7da41c6cbc
+// sources sha256: 84a2c69553b9f0cb1c66721628ad9ec2c6705eb8c50a8e9ef3f399f5e546a87c
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -752,6 +752,7 @@
       return { active: false, target: null };
     }
   }
+  var LOCAL_EXECUTOR = "local";
   async function pinSlot(slotId, target) {
     if (!(window.clutchApi && window.clutchApi.setSlotTarget)) return;
     try {
@@ -827,13 +828,13 @@
   async function prepareTabMachine(tab) {
     const m = tab.machine;
     if (m === null) {
-      await pinSlot(tab.id, { kind: "local" });
+      await pinSlot(tab.id, { kind: "executor", id: LOCAL_EXECUTOR });
       return "";
     }
     if (!m) return "";
     const now = await tunnelNow();
     if (now.active && sameMachine(now.target, m)) {
-      await pinSlot(tab.id, { kind: "tunnel" });
+      await pinSlot(tab.id, { kind: "executor", target: m });
       return "";
     }
     const name = tab.name || tab.path;
@@ -842,7 +843,7 @@
     }
     const why = await autoConnect(m);
     if (why) return `${name} lives on ${machineLabel(m)} \u2014 ${why}`;
-    await pinSlot(tab.id, { kind: "tunnel" });
+    await pinSlot(tab.id, { kind: "executor", target: m });
     return "";
   }
   async function noteTabMachine(tab) {
@@ -854,12 +855,7 @@
       return;
     }
     if (!st || !st.claimed) return;
-    let next = tab.machine;
-    if (st.kind === "local") next = null;
-    else if (st.kind === "tunnel") {
-      const now = await tunnelNow();
-      if (now.target) next = now.target;
-    }
+    const next = st.remote ? asMachine(st.target) ?? void 0 : null;
     if (sameMachine(tab.machine, next)) return;
     tab.machine = next;
     announceTabState();
@@ -885,7 +881,7 @@
     } catch (e) {
       return false;
     }
-    if (!st || st.kind !== "local") return false;
+    if (!st || !st.claimed || st.remote) return false;
     const dir = String(tab.path || "").replace(/\/[^/]*$/, "");
     if (!dir) return false;
     try {
@@ -4013,7 +4009,7 @@
     } catch (e) {
       return null;
     }
-    if (!st || st.kind !== "local") return null;
+    if (!st || !st.claimed || st.remote) return null;
     if (await hereHasIt(tab)) return null;
     return rememberedMachine();
   }
@@ -6243,7 +6239,7 @@
     if (!(window.clutchApi && window.clutchApi.slotStatus)) return false;
     try {
       const st = await window.clutchApi.slotStatus(slot);
-      return Boolean(st && st.claimed && st.kind === "tunnel");
+      return Boolean(st && st.claimed && st.remote);
     } catch (e) {
       return false;
     }

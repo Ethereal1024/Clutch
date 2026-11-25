@@ -1,14 +1,26 @@
 // Hermetic check of the session-claim state machine (ui/host-core.js).
 // Everything platform-shaped is faked, so the machine that main.js AND the
-// future Android host both run is exercised directly: claim/dedup, tunnel
-// vs local paths, heartbeat self-heal, re-bind over a bounced hop, supersede
+// future Android host both run is exercised directly: claim/dedup, remote vs
+// local claims, heartbeat self-heal, re-bind over a bounced hop, supersede
 // guards, shutdown fan-out.
+//
+// The "where does it run" half is the REAL executor table (ui/executors.js) over
+// a fake hop module and a fake local supervisor — the point of the table is that
+// this test does not have to re-implement its decisions, and that host-core sees
+// one kind of endpoint either way.
 // Run: node tests/host-core.test.js
 const assert = require("assert");
 const { createHostCore } = require("../ui/host-core");
+const { createExecutors, LOCAL_ID } = require("../ui/executors");
 
 const tick = () => new Promise((r) => setImmediate(r));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// this machine's supervisor, and the one machine a hop could be open to
+const LOCAL_BASE = "http://127.0.0.1:8890";
+const FAR = { host: "far.example", user: "me", port: 22 };
+const FAR_ID = "me@far.example:22"; // tunnel-core's tunnelId spelling: user@host:port
+const FAR_BASE = "http://127.0.0.1:8891";
 
 function fakeSessions() {
   const calls = { started: [], stopped: [], shutdown: [], forwards: [], heartbeats: [] };
@@ -58,43 +70,73 @@ function fakeWin(id) {
 }
 
 // deps factory; each knob is reconfigurable per scenario via .over
-function makeCore({ tunnel = { active: false, url: null }, localSessions = 99, slowLocal = 0, over = {} } = {}) {
-  const sessions = fakeSessions();
-  const state = { localStarts: [], localStops: [], localClaims: [], logs: [] };
-  let lseq = 0;
-  const deps = {
-    supervisorBase: () => "http://127.0.0.1:8890",
-    tunnelStatus: () => tunnel,
-    restartRemoteServer: async () => true,
-    openSessionForward: async (port) => {
-      sessions.calls.forwards.push(port);
-      return { localPort: port + 1000, close: () => sessions.calls.forwards.closed = true };
+//
+// `tunnel` is the mutable hop the fake module reports (active/url/target/
+// execBridge): scenarios flip it to model a hop that comes back with a new
+// forward URL, one that is up but serving nothing, or one that is gone.
+//   over.openSessionForward / over.restartRemoteServer  the hop's two verbs
+//   over.local        the local supervisor (null = a host with no local mode)
+//   over.sessions     the supervisor HTTP client, faked
+function makeCore({ tunnel = { active: false, url: null }, over = {} } = {}) {
+  const sessions = over.sessions || fakeSessions();
+  const state = { wakes: [], logs: [] };
+  const log = (...a) => state.logs.push(a.join(" "));
+
+  const hop = {
+    tunnelId: FAR_ID,
+    lifecycle: {
+      tunnelStatus: () => ({
+        active: !!tunnel.active,
+        url: tunnel.url || null,
+        target: tunnel.target === undefined ? FAR : tunnel.target,
+        execBridge: tunnel.execBridge,
+      }),
+      openSessionForward:
+        over.openSessionForward ||
+        (async (port) => {
+          sessions.calls.forwards.push(port);
+          return { localPort: port + 1000, close: () => (sessions.calls.forwards.closed = true) };
+        }),
+      restartRemoteServer: over.restartRemoteServer || (async () => true),
     },
-    startLocalSession: async (onFail, claimPid) => {
-      if (localSessions-- <= 0) return { mode: "failed", reason: "no local python" };
-      if (slowLocal) await sleep(slowLocal);
-      state.localStarts.push(onFail);
-      state.localClaims.push(claimPid);
-      return {
-        mode: "spawned",
-        sessionId: "L" + ++lseq,
-        url: `http://127.0.0.1:${40000 + lseq}`,
-        stop: () => state.localStops.push(lseq),
-      };
-    },
-    log: (...a) => state.logs.push(a.join(" ")),
-    sessions,
   };
-  return { core: createHostCore(Object.assign(deps, over)), sessions, state, deps };
+  // the hop module's surface (ui/ssh-tunnel.ts): primaryTunnel / tunnelFor / listTunnels
+  const tunnelModule = {
+    primaryTunnel: () => hop,
+    tunnelFor: (id) => (id === FAR_ID ? hop : null),
+    listTunnels: () => (tunnel.active || tunnel.url ? [hop] : []),
+  };
+  const local =
+    over.local === undefined
+      ? {
+          base: () => LOCAL_BASE,
+          wake: async () => {
+            state.wakes.push(1);
+            return true;
+          },
+        }
+      : over.local;
+
+  const executors =
+    over.executors || createExecutors({ tunnel: tunnelModule, local, log });
+  const core = createHostCore({ executors, log, sessions });
+
+  // "a session was started on THIS machine": the base the supervisor client was
+  // handed is the one and only tell — a local session is an ordinary session on
+  // this machine's supervisor, not a second code path
+  const localStarts = () => sessions.calls.started.filter((c) => c.base === LOCAL_BASE);
+  const localStops = () => sessions.calls.stopped.filter((c) => c.base === LOCAL_BASE);
+
+  return { core, sessions, state, deps: { executors, local, sessions, log }, localStarts, localStops };
 }
 
 async function main() {
-  // 1. tunnel active: remote claim through the tunnel's forwarded supervisor
+  // 1. hop active: a remote claim through the tunnel's forwarded supervisor
   {
-    const { core, sessions } = makeCore({ tunnel: { active: true, url: "http://127.0.0.1:8891" } });
+    const { core, sessions } = makeCore({ tunnel: { active: true, url: FAR_BASE } });
     const url = await core.ensureSlotBackend(fakeWin(1));
-    assert.strictEqual(url, "http://127.0.0.1:31001", "tunnel claim forwards the session port");
-    assert.strictEqual(sessions.calls.started[0].base, "http://127.0.0.1:8891");
+    assert.strictEqual(url, "http://127.0.0.1:31001", "remote claim forwards the session port");
+    assert.strictEqual(sessions.calls.started[0].base, FAR_BASE);
     // Nothing about a model travels with the claim: the run's model calls are
     // made in THIS process (ui/llm-client), so the far side is never handed an
     // endpoint, a model name or a knob — and never has one to go stale on.
@@ -104,33 +146,43 @@ async function main() {
       "the claim names the supervisor and nothing else",
     );
     // second ensure: same window reuses its backend, no new session child
-    assert.strictEqual(await core.ensureSlotBackend(fakeWin(1)), url, "existing tunnel backend is reused");
+    assert.strictEqual(await core.ensureSlotBackend(fakeWin(1)), url, "existing remote backend is reused");
     assert.strictEqual(sessions.calls.started.length, 1);
     assert.strictEqual(core.backendCount(), 1);
   }
 
   // 2. notify=true pushes backend:base-changed
   {
-    const { core } = makeCore();
+    const { core, sessions } = makeCore();
     const w = fakeWin(2);
-    await core.ensureSlotBackend(w, "", true);
-    assert.deepStrictEqual(w.sent, [["backend:base-changed", "http://127.0.0.1:40001"]], "local claim notifies");
+    const url = await core.ensureSlotBackend(w, "", true);
+    assert.deepStrictEqual(w.sent, [["backend:base-changed", url]], "local claim notifies");
+    assert.strictEqual(url, "http://127.0.0.1:30001",
+      "a local session needs no forward: the port it listens on IS the URL");
   }
 
   // 3. overlapping claims share ONE in-flight session (no double spawn)
   {
-    const { core, state } = makeCore({ slowLocal: 40 });
+    const sessions = fakeSessions();
+    const orig = sessions.supervisorSessionStart;
+    sessions.supervisorSessionStart = async (...a) => {
+      await sleep(40);
+      return orig(...a);
+    };
+    const { core, localStarts } = makeCore({ over: { sessions } });
     const w = fakeWin(3);
     const [a, b] = await Promise.all([core.ensureSlotBackend(w), core.ensureSlotBackend(w)]);
     assert.strictEqual(a, b, "concurrent ensures get the same URL");
-    assert.strictEqual(state.localStarts.length, 1, "one session child for overlapping claims");
+    assert.strictEqual(localStarts().length, 1, "one session child for overlapping claims");
   }
 
-  // 4. Android shape: tunnel down + no local mode -> null (renderer shows not running)
+  // 4. Android shape: no hop serving and no local mode -> null (renderer shows
+  //    "not running"). There is no endpoint at all, which is what the table says
+  //    when this build has no supervisor of its own.
   {
-    const { core, state } = makeCore({ over: { startLocalSession: null } });
+    const { core, state } = makeCore({ over: { local: null } });
     const w = fakeWin(4);
-    assert.strictEqual(await core.ensureSlotBackend(w), null, "no tunnel + no local mode -> null");
+    assert.strictEqual(await core.ensureSlotBackend(w), null, "no hop + no local mode -> null");
     assert.strictEqual(core.backendCount(), 0);
     assert(state.logs.some((l) => l.includes("no local mode")), "absence is logged");
   }
@@ -146,7 +198,7 @@ async function main() {
     };
     let restarts = 0;
     const { core } = makeCore({
-      tunnel: { active: true, url: "http://127.0.0.1:8891" },
+      tunnel: { active: true, url: FAR_BASE },
       over: { sessions, restartRemoteServer: async () => ++restarts && true },
     });
     const url = await core.ensureSlotBackend(fakeWin(5));
@@ -155,13 +207,13 @@ async function main() {
     assert.ok(url, "retry succeeds");
   }
 
-  // 6. tunnel heartbeat failure with the session STILL on the far host: the
+  // 6. remote heartbeat failure with the session STILL on the far host: the
   //    dead thing is this client's own forward — re-bind the SAME session over
   //    the current hop (stop + start here is what SIGTERMed runs in flight)
   {
     let n = 0;
     const { core, sessions } = makeCore({
-      tunnel: { active: true, url: "http://127.0.0.1:8891" },
+      tunnel: { active: true, url: FAR_BASE },
       over: { openSessionForward: async () => ({ localPort: 31000 + ++n, close: () => {} }) },
     });
     const w = fakeWin(6);
@@ -176,13 +228,13 @@ async function main() {
     assert.strictEqual(sessions.calls.started.length, 1,
       "the SAME session is kept: no stop + start over work in flight");
     assert.deepStrictEqual(sessions.calls.stopped, [], "and the far-side session is never told to stop");
-    assert.deepStrictEqual(sessions.calls.heartbeats, [{ base: "http://127.0.0.1:8891", sid: "s1" }],
+    assert.deepStrictEqual(sessions.calls.heartbeats, [{ base: FAR_BASE, sid: "s1" }],
       "the re-claim asks the supervisor first: it alone knows the session is still there");
   }
 
   // 7. supersede guard: a heartbeat from a replaced backend must not fire
   {
-    const { core, sessions } = makeCore({ tunnel: { active: true, url: "http://127.0.0.1:8891" } });
+    const { core, sessions } = makeCore({ tunnel: { active: true, url: FAR_BASE } });
     const w = fakeWin(7);
     await core.ensureSlotBackend(w);
     await core.releaseWindowBackends(w.id); // window closed; heartbeat still armed
@@ -193,70 +245,68 @@ async function main() {
     assert.strictEqual(sessions.calls.started.length, 1, "no extra session after release");
   }
 
-  // 8. local heartbeat failure: re-claim the local session, notify the window
+  // 8. local heartbeat failure: a session HERE is a child of this machine's
+  //    supervisor, so there is nothing out there to re-bind — release and claim
+  //    again, and tell the window where it landed
   {
-    const { core, state } = makeCore();
+    const { core, sessions } = makeCore();
     const w = fakeWin(8);
-    await core.ensureSlotBackend(w);
-    assert.strictEqual(typeof state.localStarts[0], "function", "local session got an onFail hook");
-    state.localStarts[0]();
+    const first = await core.ensureSlotBackend(w);
+    assert.strictEqual(first, "http://127.0.0.1:30001");
+    sessions.beats[0].onFail();
     await tick();
     await tick();
     await tick();
     const sent = w.sent.find(([ch]) => ch === "backend:base-changed");
-    assert(sent && sent[1] !== "http://127.0.0.1:40001", "local self-heal repoints the window");
-    assert.strictEqual(state.localStops.length, 1, "the dead local session was stopped");
+    assert(sent && sent[1] !== first, "local self-heal repoints the window");
+    assert.strictEqual(sessions.calls.stopped.length, 1, "the dead local session was stopped");
+    assert.strictEqual(sessions.calls.started.length, 2, "and exactly one fresh session was claimed");
   }
 
   // 9. stopAllBackends: stops sessions + closes forwards + shutdown both supervisors
   {
-    const { core, sessions } = makeCore({ tunnel: { active: true, url: "http://127.0.0.1:8891" } });
-    await core.ensureSlotBackend(fakeWin(9)); // tunnel backend
+    const { core, sessions } = makeCore({ tunnel: { active: true, url: FAR_BASE } });
+    await core.ensureSlotBackend(fakeWin(9)); // remote backend
     await core.stopAllBackends();
     assert.strictEqual(sessions.calls.forwards.closed, true, "session forward closed");
     assert.deepStrictEqual(
       [...sessions.calls.shutdown].sort(),
-      ["http://127.0.0.1:8890", "http://127.0.0.1:8891"],
+      [LOCAL_BASE, FAR_BASE],
       "shutdown reaches the local AND the remote supervisor"
     );
     assert.strictEqual(sessions.calls.stopped.length, 1, "session stop told to the remote supervisor");
     assert.strictEqual(core.backendCount(), 0);
   }
 
-  // 10. Android shutdown: supervisorBase()=null -> only the remote is told
+  // 10. Android shutdown: no local supervisor -> only the remote is told
   {
     const { core, sessions } = makeCore({
-      tunnel: { active: true, url: "http://127.0.0.1:8891" },
-      over: { supervisorBase: () => null },
+      tunnel: { active: true, url: FAR_BASE },
+      over: { local: { base: () => null, wake: async () => false } },
     });
     await core.ensureSlotBackend(fakeWin(10));
     await core.stopAllBackends();
-    assert.deepStrictEqual(sessions.calls.shutdown, ["http://127.0.0.1:8891"], "no local shutdown on a local-mode-less host");
+    assert.deepStrictEqual(sessions.calls.shutdown, [FAR_BASE], "no local shutdown on a local-mode-less host");
   }
 
-  // 11. transient local boot failure: the RETRY session must carry the onFail
-  //     hook too (regression: the retried session used to heal nobody)
+  // 11. transient local boot failure: the retried claim is a claim like any
+  //     other — it carries a heartbeat too (regression: the retried session used
+  //     to heal nobody)
   {
+    const sessions = fakeSessions();
     let calls = 0;
-    const { core, state } = makeCore({
-      over: {
-        startLocalSession: async (onFail) => {
-          state.localStarts.push(onFail);
-          if (++calls === 1) return { mode: "failed", reason: "mid-spawn hiccup" };
-          return {
-            mode: "spawned",
-            sessionId: "LR1",
-            url: "http://127.0.0.1:41111",
-            stop: () => {},
-          };
-        },
-      },
-    });
+    const orig = sessions.supervisorSessionStart;
+    sessions.supervisorSessionStart = async (...a) => {
+      if (++calls === 1) return { error: "mid-spawn hiccup" };
+      return orig(...a);
+    };
+    const { core, state } = makeCore({ over: { sessions } });
     const w = fakeWin(11);
-    assert.strictEqual(await core.ensureSlotBackend(w), "http://127.0.0.1:41111", "one failure then a landed retry");
+    assert.strictEqual(await core.ensureSlotBackend(w), "http://127.0.0.1:30001", "one failure then a landed retry");
     assert.strictEqual(calls, 2, "exactly one retry");
-    assert.strictEqual(typeof state.localStarts[1], "function", "the retry session got an onFail hook");
-    state.localStarts[1](); // the retried session's heartbeat dies later
+    assert.strictEqual(sessions.beats.length, 1, "the retried claim is watched like any other");
+    assert.strictEqual(state.wakes.length, 2, "the wake ran before the ask and once as the reboot");
+    sessions.beats[0].onFail(); // the retried session's heartbeat dies later
     await tick();
     await tick();
     await tick();
@@ -265,13 +315,13 @@ async function main() {
     assert.strictEqual(calls, 3, "heal spawned one more session");
   }
 
-  // 12. a tunnel end drops the window's forward but NOT its claim: the session
+  // 12. a hop end drops the window's forward but NOT its claim: the session
   //     is a process on the far host that outlives the hop (a run in flight
   //     must outlive it too), so the returning hop re-opens a forward over the
   //     SAME session — never stop + start over work in flight (the shells call
   //     this from their tunnel-end notification, BEFORE they tell the renderer)
   {
-    const ts = { active: true, url: "http://127.0.0.1:8891" };
+    const ts = { active: true, url: FAR_BASE };
     let closedForwards = 0;
     let n = 0;
     const { core, sessions } = makeCore({
@@ -302,7 +352,7 @@ async function main() {
   //     back (the notification may race the re-claim that follows it) — what is
   //     handed back is a forward the CURRENT hop opened, over the same session
   {
-    const ts = { active: true, url: "http://127.0.0.1:8891" };
+    const ts = { active: true, url: FAR_BASE };
     const opened = [];
     const { core, sessions } = makeCore({
       tunnel: ts,
@@ -325,16 +375,16 @@ async function main() {
     assert.strictEqual(opened.length, 2, "the new hop's own forward is the answer");
   }
 
-  // 14. a tunnel end leaves a LOCAL backend alone: its session never went through
+  // 14. a hop end leaves a LOCAL backend alone: its session never went through
   //     the tunnel (the desktop keeps its local claim; the phone has none)
   {
-    const { core, state } = makeCore();
+    const { core, localStarts } = makeCore();
     const w = fakeWin(14);
     const local = await core.ensureSlotBackend(w);
-    assert.deepStrictEqual(await core.releaseTunnelBackends(), [], "nothing tunnel-shaped to drop");
+    assert.deepStrictEqual(await core.releaseTunnelBackends(), [], "nothing remote-shaped to drop");
     assert.strictEqual(core.backendCount(), 1, "the local session is still this window's backend");
     assert.strictEqual(await core.ensureSlotBackend(w), local, "and it is still the same URL");
-    assert.strictEqual(state.localStarts.length, 1);
+    assert.strictEqual(localStarts().length, 1);
   }
 
   // 14b. the list is a per-window verdict, not a count: the hop's end names the
@@ -350,15 +400,17 @@ async function main() {
     const theirs = fakeWin(22);
     const localUrl = await core.ensureSlotBackend(mine); // this machine's own session
     tunnel.active = true;
-    tunnel.url = "http://127.0.0.1:8891";
+    tunnel.url = FAR_BASE;
     await core.ensureSlotBackend(theirs); // and this window went over the hop
     assert.strictEqual(core.backendCount(), 2, "two windows, two sessions");
     assert.deepStrictEqual(await core.releaseTunnelBackends(), [{ winId: 22, slotId: "" }],
       "the hop names the window it owned — the local one is not in the list");
     assert.strictEqual(core.backendCount(), 2, "and that window's claim outlives its forward");
-    assert.strictEqual(core.backendKind(mine.id), "local",
+    assert.strictEqual(core.backendRemote(mine.id), false,
       "the untouched window is still on its own session, unharmed by a hop it never used");
-    assert.strictEqual(localUrl, "http://127.0.0.1:40001",
+    assert.strictEqual(core.backendExecutor(mine.id), LOCAL_ID, "and the executor it names is this machine");
+    assert.strictEqual(core.backendRemote(theirs.id), true, "while the other window's claim is the hop's");
+    assert.strictEqual(localUrl, "http://127.0.0.1:30001",
       "and that session is this machine's own, never the hop's forward");
   }
 
@@ -366,7 +418,7 @@ async function main() {
   //      `session:release` rule in ui/main.js): releasing one window's claim must
   //      leave the hop up for the windows still on it
   {
-    const { core } = makeCore({ tunnel: { active: true, url: "http://127.0.0.1:8891" } });
+    const { core } = makeCore({ tunnel: { active: true, url: FAR_BASE } });
     const a = fakeWin(31);
     const b = fakeWin(32);
     await core.ensureSlotBackend(a);
@@ -375,7 +427,7 @@ async function main() {
     await core.releaseWindowBackends(a.id);
     assert.strictEqual(core.anyTunnelWindow(), true,
       "one window left, so the tunnel is still somebody's: it must not be stopped");
-    assert.strictEqual(core.backendKind(b.id), "tunnel", "and the other window's claim is untouched");
+    assert.strictEqual(core.backendRemote(b.id), true, "and the other window's claim is untouched");
     await core.releaseWindowBackends(b.id);
     assert.strictEqual(core.anyTunnelWindow(), false, "nobody is left on it: now the tunnel may go");
   }
@@ -383,7 +435,7 @@ async function main() {
   // 15. heartbeat failure and the session is PROVABLY gone: only then is it
   //     replaced — "re-bind first" answers a stale forward, never a stale guess
   {
-    const { core, sessions } = makeCore({ tunnel: { active: true, url: "http://127.0.0.1:8891" } });
+    const { core, sessions } = makeCore({ tunnel: { active: true, url: FAR_BASE } });
     const w = fakeWin(15);
     await core.ensureSlotBackend(w);
     sessions.sessionAlive = false; // the supervisor no longer holds it
@@ -392,7 +444,7 @@ async function main() {
     await tick();
     await tick();
     assert.strictEqual(sessions.calls.started.length, 2, "a provably gone session is replaced");
-    assert.strictEqual(sessions.calls.started[1].base, "http://127.0.0.1:8891");
+    assert.strictEqual(sessions.calls.started[1].base, FAR_BASE);
     const sent = w.sent.find(([ch]) => ch === "backend:base-changed");
     assert(sent, "and the window is pointed at the replacement");
   }
@@ -400,7 +452,7 @@ async function main() {
   // 16. the re-bind supersede guard: a claim that changed hands while the
   //     question was in flight is not replaced behind the new holder's back
   {
-    const ts = { active: true, url: "http://127.0.0.1:8891" };
+    const ts = { active: true, url: FAR_BASE };
     const sessions = fakeSessions();
     const slow = { ...sessions };
     slow.supervisorSessionHeartbeat = async (base, sid) => {
@@ -421,7 +473,7 @@ async function main() {
   // 17. the reuse guard keys on the HOP, never the port number: a new hop with
   //     the same local port on offer still re-opens a forward of its own
   {
-    const ts = { active: true, url: "http://127.0.0.1:8891" };
+    const ts = { active: true, url: FAR_BASE };
     const opened = [];
     const { core, sessions } = makeCore({
       tunnel: ts,
@@ -447,7 +499,7 @@ async function main() {
   //     work — the far host then reports "this project is already open in
   //     another window", which is exactly the ssh-drop -> reconnect outage
   {
-    const ts = { active: true, url: "http://127.0.0.1:8891" };
+    const ts = { active: true, url: FAR_BASE };
     let n = 0;
     const { core, sessions } = makeCore({
       tunnel: ts,
@@ -470,18 +522,18 @@ async function main() {
     assert.strictEqual(sessions.calls.started.length, 1, "the returning hop keeps the session child it had");
     assert.deepStrictEqual(
       sessions.calls.heartbeats.map((h) => h.base),
-      ["http://127.0.0.1:8891", "http://127.0.0.1:9999"],
+      [FAR_BASE, "http://127.0.0.1:9999"],
       "the re-claim asked the supervisor through the hop that is up now",
     );
     assert.ok(again, "and the window is handed a live forward again");
   }
 
-  // 19. the local fallback never takes over a parked tunnel claim: while the
+  // 19. the local fallback never takes over a parked remote claim: while the
   //     far session is not provably gone, a local session is the second window
   //     over its work. "Not running" is state, not advice — wait for the hop
   {
-    const ts = { active: true, url: "http://127.0.0.1:8891" };
-    const { core, sessions, state } = makeCore({ tunnel: ts });
+    const ts = { active: true, url: FAR_BASE };
+    const { core, sessions, localStarts } = makeCore({ tunnel: ts });
     const w = fakeWin(19);
     await core.ensureSlotBackend(w);
     sessions.sessionAlive = null;
@@ -492,7 +544,7 @@ async function main() {
     ts.active = false;
     ts.url = null; // the hop is gone again before any claim ran
     assert.strictEqual(await core.ensureSlotBackend(w), null, "no local session over an unconfirmed far one");
-    assert.strictEqual(state.localStarts.length, 0, "the local fallback did not fire");
+    assert.strictEqual(localStarts().length, 0, "the local fallback did not fire");
     assert.strictEqual(core.backendCount(), 1, "the parked claim still names the far session");
   }
 
@@ -507,17 +559,16 @@ async function main() {
   //     What the claim actually carries is asserted in
   //     tests/session-heartbeat-test.js, on the client that builds it.
   {
-    const { core, state } = makeCore();
+    const { core, sessions } = makeCore();
     const w = fakeWin(23);
     w.getOSProcessId = () => 4242; // the renderer's pid: NOT something to claim by
     assert.ok(await core.ensureSlotBackend(w), "a window claims as usual");
-    assert.strictEqual(state.localClaims[0], undefined,
-      "host-core hands the local start no pid: the claim has one author");
-    assert.notStrictEqual(state.localClaims[0], 4242, "and never the renderer's pid");
+    assert.deepStrictEqual(sessions.calls.started[0].rest, [],
+      "host-core hands the session start nothing: the claim has one author");
 
-    const { core: core2, state: state2 } = makeCore();
+    const { core: core2, sessions: sessions2 } = makeCore();
     assert.ok(await core2.ensureSlotBackend(fakeWin(24)), "a handle without getOSProcessId still claims");
-    assert.strictEqual(state2.localStarts.length, 1,
+    assert.strictEqual(sessions2.calls.started.length, 1,
       "and the claim does not depend on the window handle at all");
   }
 
@@ -525,12 +576,12 @@ async function main() {
   //     independently, and every notification names the slot it is about —
   //     the whole point of the tab refactor (old windows = old sessions).
   {
-    const { core, sessions, state } = makeCore();
+    const { core, sessions, localStarts, localStops } = makeCore();
     const w = fakeWin(25);
     const a = await core.ensureSlotBackend(w, "tab-a", true);
     const b = await core.ensureSlotBackend(w, "tab-b", true);
     assert.notStrictEqual(a, b, "two tabs are two sessions");
-    assert.strictEqual(state.localStarts.length, 2, "each claim spawned its own child");
+    assert.strictEqual(localStarts().length, 2, "each claim spawned its own child");
     assert.strictEqual(core.backendCount(), 2, "the window holds both");
     assert.deepStrictEqual(
       w.sent,
@@ -540,16 +591,20 @@ async function main() {
       ],
       "a named slot's notification names the slot (a bare URL stays the default slot's shape)",
     );
-    assert.deepStrictEqual(core.slotStatus(w.id, "tab-a"), { claimed: true, kind: "local", url: a });
+    assert.deepStrictEqual(core.slotStatus(w.id, "tab-a"), {
+      claimed: true, executor: LOCAL_ID, remote: false, url: a, target: null,
+    }, "a claim on this machine names the reserved local executor and no machine record");
     assert.strictEqual(await core.ensureSlotBackend(w, "tab-a"), a, "re-asking a slot reuses its session");
-    assert.strictEqual(state.localStarts.length, 2, "no second child for the same tab");
+    assert.strictEqual(localStarts().length, 2, "no second child for the same tab");
     await core.releaseSlot(w.id, "tab-a");
-    assert.deepStrictEqual(core.slotStatus(w.id, "tab-a"), { claimed: false, kind: null, url: null });
+    assert.deepStrictEqual(core.slotStatus(w.id, "tab-a"), {
+      claimed: false, executor: null, remote: false, url: null, target: null,
+    });
     assert.strictEqual(core.slotStatus(w.id, "tab-b").claimed, true, "the other tab is untouched");
-    assert.strictEqual(state.localStops.length, 1, "only the released tab's child was stopped");
+    assert.strictEqual(localStops().length, 1, "only the released tab's child was stopped");
     await core.releaseWindowBackends(w.id);
     assert.strictEqual(core.backendCount(), 0, "closing the window releases the rest");
-    assert.strictEqual(state.localStops.length, 2, "each stop is per session");
+    assert.strictEqual(localStops().length, 2, "each stop is per session");
   }
 
   // 22. a slot whose FILE LIVES ON A MACHINE is never served by a local session
@@ -557,27 +612,40 @@ async function main() {
   // The reported dead end: a restored remote tab claimed a slot while the hop
   // was not serving it, the host fell back to a local session, and the open
   // answered "not a .clc project file" — a refusal that names neither the
-  // machine nor the way back. slots.ts pins {kind:"tunnel"} for such a tab
+  // machine nor the way back. slots.ts pins the MACHINE for such a tab
   // (prepareTabMachine), and that pin is the host's licence to refuse.
   {
-    const { core, state } = makeCore(); // no tunnel at all
+    const { core, state, localStarts } = makeCore(); // no hop at all
     const w = fakeWin(25);
-    core.setSlotTarget(w.id, "tab-far", { kind: "tunnel" });
+    core.setSlotTarget(w.id, "tab-far", { kind: "executor", target: FAR });
     assert.strictEqual(await core.ensureSlotBackend(w, "tab-far"), null,
       "no hop and a machine's file: no base (the pane then names the machine)");
-    assert.strictEqual(state.localStarts.length, 0, "and no local session was ever started over that path");
-    assert.deepStrictEqual(core.slotStatus(w.id, "tab-far"), { claimed: false, kind: null, url: null });
+    assert.strictEqual(localStarts().length, 0, "and no local session was ever started over that path");
+    assert.deepStrictEqual(core.slotStatus(w.id, "tab-far"), {
+      claimed: false, executor: null, remote: false, url: null, target: null,
+    });
     assert(state.logs.some((l) => /slot .*tab-far.* is on a machine .*no local session/.test(l)),
       "the refusal is on the record: " + JSON.stringify(state.logs.filter((l) => /tab-far/.test(l))));
   }
 
+  // 22b. a pin may also name an endpoint by its id (the picker's own answer),
+  //      not only by the machine triple a tab remembers
+  {
+    const { core, localStarts } = makeCore({ tunnel: { active: true, url: FAR_BASE } });
+    const w = fakeWin(29);
+    core.setSlotTarget(w.id, "tab-here", { kind: "executor", id: LOCAL_ID });
+    assert.strictEqual(await core.ensureSlotBackend(w, "tab-here"), "http://127.0.0.1:30001",
+      "an id pin claims on exactly that endpoint, whatever the hop is doing");
+    assert.strictEqual(localStarts().length, 1);
+  }
+
   // 25b. the hop is up but between forwards (active, no url): same answer
   {
-    const { core, state } = makeCore({ tunnel: { active: true, url: null } });
+    const { core, localStarts } = makeCore({ tunnel: { active: true, url: null } });
     const w = fakeWin(25);
-    core.setSlotTarget(w.id, "tab-far", { kind: "tunnel" });
+    core.setSlotTarget(w.id, "tab-far", { kind: "executor", target: FAR });
     assert.strictEqual(await core.ensureSlotBackend(w, "tab-far"), null, "a hop with no URL serves nothing");
-    assert.strictEqual(state.localStarts.length, 0, "and it is still not an invitation to open the far path here");
+    assert.strictEqual(localStarts().length, 0, "and it is still not an invitation to open the far path here");
   }
 
   // 25c. the hop is up and the FAR supervisor will not start a session: the
@@ -585,14 +653,14 @@ async function main() {
   {
     const sessions = fakeSessions();
     sessions.supervisorSessionStart = async () => ({ error: "no python on the far side" });
-    const { core, state } = makeCore({
-      tunnel: { active: true, url: "http://127.0.0.1:8891" },
+    const { core, state, localStarts } = makeCore({
+      tunnel: { active: true, url: FAR_BASE },
       over: { restartRemoteServer: async () => false, sessions },
     });
     const w = fakeWin(25);
-    core.setSlotTarget(w.id, "tab-far", { kind: "tunnel" });
+    core.setSlotTarget(w.id, "tab-far", { kind: "executor", target: FAR });
     assert.strictEqual(await core.ensureSlotBackend(w, "tab-far"), null, "a far-side failure is the claim's failure");
-    assert.strictEqual(state.localStarts.length, 0, "no local session for a slot whose file is on a machine");
+    assert.strictEqual(localStarts().length, 0, "no local session for a slot whose file is on a machine");
     assert(state.logs.some((l) => /is on a machine and no tunnel session could be started/.test(l)),
       "and the log says which it was: " + JSON.stringify(state.logs.filter((l) => /tab-far/.test(l))));
     assert(!state.logs.some((l) => /falling back to a local session/.test(l)),
@@ -600,13 +668,14 @@ async function main() {
   }
 
   // 25d. control: the SAME window without the pin keeps its local fallback — a
-  // tab known to live here must not change behaviour
+  // tab known to live here must not change behaviour. The default endpoint is
+  // "the hop that is serving, else this machine", and this hop serves nothing.
   {
-    const { core, state } = makeCore({ tunnel: { active: true, url: null } });
+    const { core, localStarts } = makeCore({ tunnel: { active: true, url: null } });
     const w = fakeWin(25);
     const url = await core.ensureSlotBackend(w, "tab-local");
-    assert.strictEqual(url, "http://127.0.0.1:40001", "an unpinned slot still falls back to a local session");
-    assert.strictEqual(state.localStarts.length, 1);
+    assert.strictEqual(url, "http://127.0.0.1:30001", "an unpinned slot still falls back to a local session");
+    assert.strictEqual(localStarts().length, 1);
   }
 
   // 23. a release the supervisor did NOT confirm keeps the claim, PARKED
@@ -623,7 +692,7 @@ async function main() {
   // picker's Disconnect and the outage's Cancel must still be able to end a hop
   // no window is using — and re-bindable by the next claim.
   {
-    const ts = { active: true, url: "http://127.0.0.1:8891" };
+    const ts = { active: true, url: FAR_BASE };
     const { core, sessions, state } = makeCore({ tunnel: ts });
     sessions.supervisorSessionStop = async () => ({ ok: false }); // the release never left this machine
     const w = fakeWin(26);
@@ -653,7 +722,7 @@ async function main() {
   // 26b. a release the supervisor DID confirm drops the claim outright: a
   // parked claim exists only for the doubt, never as a place to hide a stop
   {
-    const ts = { active: true, url: "http://127.0.0.1:8891" };
+    const ts = { active: true, url: FAR_BASE };
     const { core, sessions, state } = makeCore({ tunnel: ts });
     sessions.supervisorSessionStop = async () => ({ ok: true });
     const w = fakeWin(26);
@@ -666,7 +735,7 @@ async function main() {
   // 26c. the APP is leaving: nothing will ever re-bind, so nothing is parked —
   // a claim kept on the way out is a claim nobody can ask about again
   {
-    const ts = { active: true, url: "http://127.0.0.1:8891" };
+    const ts = { active: true, url: FAR_BASE };
     const { core, sessions } = makeCore({ tunnel: ts });
     sessions.supervisorSessionStop = async () => ({ ok: false });
     const w = fakeWin(26);
@@ -675,16 +744,47 @@ async function main() {
     assert.strictEqual(core.backendCount(), 0, "a quitting app keeps no claim for a hop that will never come");
   }
 
-  // 26d. only a TUNNEL claim is parked. A local session's release runs on the
+  // 26d. only a REMOTE claim is parked. A local session's release runs on the
   // same machine as the session, so a stop that reported failure there is not
   // the far-side leak the parking exists for (and a local stop reports nothing)
   {
-    const { core, state } = makeCore();
+    const { core, localStops } = makeCore();
     const w = fakeWin(26);
     await core.ensureSlotBackend(w, "tab-a");
     await core.releaseSlot(w.id, "tab-a");
     assert.strictEqual(core.backendCount(), 0, "a local claim goes when its window lets it go");
-    assert(state.localStops.length === 1, "and its session was told to stop");
+    assert.strictEqual(localStops().length, 1, "and its session was told to stop");
+  }
+
+  // 27. the executor table itself: this machine is a row like any other, and a
+  //     slot that names nothing follows the hop that is serving — or this
+  //     machine when none is — in ONE place instead of per caller
+  {
+    const tunnel = { active: false, url: null };
+    const { deps } = makeCore({ tunnel });
+    const ex = deps.executors;
+    assert.strictEqual(ex.defaultId(), LOCAL_ID, "no hop serving: this machine is the default endpoint");
+    assert.deepStrictEqual(
+      ex.list().map((r) => [r.id, r.remote]),
+      [[LOCAL_ID, false]],
+      "and the list says so, with its capabilities",
+    );
+    assert.strictEqual(ex.get(LOCAL_ID).capabilities().supervisor, true, "this machine can hold a session");
+    assert.deepStrictEqual(ex.get(LOCAL_ID).forward(4123).then ? "promise" : "value", "promise",
+      "a local forward is awaited like any other");
+    tunnel.active = true;
+    tunnel.url = FAR_BASE;
+    assert.strictEqual(ex.defaultId(), FAR_ID, "a serving hop takes the default");
+    assert.deepStrictEqual(
+      ex.list().map((r) => [r.id, r.remote, r.base]),
+      [[LOCAL_ID, false, LOCAL_BASE], [FAR_ID, true, FAR_BASE]],
+      "both endpoints are rows: this machine first, then the hop",
+    );
+    const far = ex.get(FAR_ID);
+    assert.deepStrictEqual(far.target(), FAR, "a remote endpoint remembers the machine it is");
+    assert.strictEqual(ex.get(LOCAL_ID).target(), null, "and this machine has no machine record to be");
+    assert.strictEqual(far.ready && (await far.ready()), true,
+      "the far supervisor starts itself: nothing here may wake it");
   }
 
   console.log("host-core: all checks passed");

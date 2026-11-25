@@ -68,7 +68,7 @@ async function main() {
   // What the main process would answer. `asks` records the SLOT each ask was
   // made for, because that is the half that used to be wrong.
   const asks = [];
-  let claim = { claimed: true, kind: "tunnel", url: "http://127.0.0.1:40555" };
+  let claim = { claimed: true, remote: true, url: "http://127.0.0.1:40555" };
   let tunnel = { active: true, url: "http://127.0.0.1:41000" };
   global.window = {
     clutchApi: {
@@ -77,8 +77,8 @@ async function main() {
         return claim.url;
       },
       slotStatus: async (slotId) => {
-        asks.push("kind:" + (slotId === undefined ? "<undefined>" : String(slotId)));
-        return { claimed: claim.claimed, kind: claim.kind, url: claim.url };
+        asks.push("status:" + (slotId === undefined ? "<undefined>" : String(slotId)));
+        return { claimed: claim.claimed, remote: claim.remote, url: claim.url };
       },
     },
     clutchTunnel: { status: async () => tunnel },
@@ -94,10 +94,10 @@ async function main() {
     asks.length = 0;
     switches = 0;
     note = false;
-    claim = { claimed: true, kind: "tunnel", url: "http://127.0.0.1:40555" };
+    claim = { claimed: true, remote: true, url: "http://127.0.0.1:40555" };
     global.window.clutchApi.slotStatus = async (slotId) => {
-      asks.push("kind:" + (slotId === undefined ? "<undefined>" : String(slotId)));
-      return { claimed: claim.claimed, kind: claim.kind, url: claim.url };
+      asks.push("status:" + (slotId === undefined ? "<undefined>" : String(slotId)));
+      return { claimed: claim.claimed, remote: claim.remote, url: claim.url };
     };
     tunnel = { active: true, url: "http://127.0.0.1:41000" };
   };
@@ -123,8 +123,8 @@ async function main() {
   const target = await reconciledBackendUrl("tab-7");
   check(target === "http://127.0.0.1:40555",
     `the reconcile hands back the host's answer for that slot (got ${JSON.stringify(target)})`);
-  check(asks[0] === "tab-7" && asks.includes("kind:tab-7"),
-    `both questions in it — the URL, and what kind of claim it is — are asked about the TAB (asked ${JSON.stringify(asks)})`);
+  check(asks[0] === "tab-7" && asks.includes("status:tab-7"),
+    `both questions in it — the URL, and whether the claim is on another machine — are asked about the TAB (asked ${JSON.stringify(asks)})`);
   check(asks.every((a) => !a.endsWith("<undefined>")),
     "nothing in it is asked without a slot: an unnamed ask is the window's default session, which is the one that gets claimed");
 
@@ -137,7 +137,7 @@ async function main() {
 
   reset();
   session.set("clutch_api_url", "http://127.0.0.1:39999");
-  claim.kind = "local"; // the fallback: a session on THIS machine, tunnel still up
+  claim.remote = false; // the fallback: a session on THIS machine, tunnel still up
   const local = await reconciledBackendUrl("tab-7");
   check(local === "http://127.0.0.1:40555",
     `the local claim is still returned — the caller adopts what the host holds (got ${JSON.stringify(local)})`);
