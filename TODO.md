@@ -865,3 +865,23 @@ CLUTCH_E2E_HOST=… CLUTCH_E2E_USER=… CLUTCH_E2E_PASS=… node tests/remote-bo
   - 主仓这侧收尾：`market/entries.json` 两行 → `v0.2.0`，`scripts/market_index.py --write` 重生成
     `ui/market.snapshot.json`（新的 `manifest_sha256` 就是上面两个 `clutch-component.json` 的字节），
     `--check` 通过；两个 gitlink 指到上面那两个提交。
+- **第四次推：全绿，发布页就是 tag 的 note**。run `45571757929`（tag `v0.2.2` → `ebab3d0`）11 个 job
+  全 `success`：`verify`、`verify-py38`、`deb`、`dmg`、`win`、`pylibs-matrix`×4、`pylibs-index`、
+  `android-apk`。`deb` 里 "Read the tag's note" 这次一秒都没停——它拿到的确实是 tag object，写出来的
+  正文和 `tmp/note-release.txt` **逐字节相同**（7678 字符）。
+  - release `v0.2.2` 在 `07:59:16Z` 发布（`draft=false`，`target=master`），9 个资产全部
+    `state=uploaded`：`Clutch-0.2.2-arm64.dmg` 157 MB、`Clutch.Setup.0.2.2.exe` 137.9 MB、
+    `clutch-ui_0.2.2_amd64.deb` 129.7 MB、`clutch-android-v0.2.2.apk` 53.7 MB、四个
+    `agent-pylibs-linux-*`（249149 B，键里已经没有 `py3.N`）、`pylibs-index.json` 843 B。
+  - 市场那一侧也按客户端的路径核过：三行 `market/entries.json` 的 manifest 用 API 资产端点取回**真字节**，
+    sha256 与 `ui/market.snapshot.json` 的 `manifest_sha256` 一致、`version` 与 tag 都是 `0.2.0`
+    （`tmp/market_verify.py`，`MISMATCHES: 0`）；`market` workflow `45565676550` 在 runner 上
+    `--check` 绿。`scripts/market_index.py --check` 在本沙箱跑不完（`releases/download` 直链超时、脚本
+    5 次重试 × 30s），所以另走这条路——**核的是同一批字节，只是换了一条能到的路**。
+  - 发布前后各留了一个可复跑的检查：`tmp/note_step_check.sh` 在推之前把 `deb` 那一步的脚本原文抽出来跑
+    七种形状（正常 tag / ref 指向 commit / 没有 tag ref / 空白 note / 远端只有轻量 tag / 临时目录不可写 /
+    `RUNNER_TEMP` 未设置）；`tmp/release_verify.py` 在发布后对比正文、tag、资产、平台覆盖与工作树。
+    **先复现再推**，省掉第五次红。
+  - 教训补一条：这次的三个红（门自己的夹具、测试的 stdlib 枚举、note 步骤）没有一个是"代码写错了"，
+    全是**只在真实环境里才成立的前提**——门的夹具要在它运行的解释器上测，标准库要按解释器实际形态枚举，
+    发布说明要从 tag object 读。声明一个地板，就得在**别人的地板**上验一遍。
