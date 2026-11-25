@@ -283,18 +283,42 @@ jobs:
       # A tag that is not annotated has no note to show, so the release stops here
       # instead of publishing a page that says nothing. The tag is already pushed
       # by then — but nothing has been published, and the fix is one `git tag -a`.
+      #
+      # The note belongs to the TAG OBJECT, not to the commit, and the two are
+      # not the same address: a checkout that fetched the tag as
+      # `+<commit>:refs/tags/<name>` leaves a ref that looks like a tag and is a
+      # commit, and `git tag -l` on it prints nothing. So the object is fetched
+      # by its own name when the local ref is not one, the note is read from the
+      # object, and every way this can fail says why as an ANNOTATION — the first
+      # attempt at this step failed in the same second it started, with the reason
+      # in a log that needs a login to open.
       - name: Read the tag's note
         run: |
-          if [ "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" != tag ]; then
-            echo "tag $GITHUB_REF_NAME is lightweight: a release page is its tag's note" >&2
-            echo "re-tag with: git tag -a $GITHUB_REF_NAME -F <notes>" >&2
+          ref="refs/tags/$GITHUB_REF_NAME"
+          notes="${RUNNER_TEMP:-/tmp}/release-notes.md"
+          say() { echo "::error title=the note on $GITHUB_REF_NAME::$1"; }
+          : > "$notes" || { say "cannot write $notes (RUNNER_TEMP=${RUNNER_TEMP:-unset})"; exit 1; }
+          kind="$(git cat-file -t "$ref" 2>&1 || true)"
+          if [ "$kind" != tag ]; then
+            git fetch --no-tags --force origin "+$ref:$ref" >/dev/null 2>&1 || true
+            kind="$(git cat-file -t "$ref" 2>&1 || true)"
+          fi
+          if [ "$kind" != tag ]; then
+            say "this checkout has no tag object for $ref (git: ${kind:-nothing}; remote: $(git ls-remote --tags origin "$ref" 2>&1 | tr '\n\t' '  ' | tr -d '\r')). A release page is its tag's note: re-tag with git tag -a $GITHUB_REF_NAME -F <notes>"
             exit 1
           fi
-          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
-          if [ ! -s "$RUNNER_TEMP/release-notes.md" ]; then
-            echo "tag $GITHUB_REF_NAME carries an empty note: a release page has to say what changed" >&2
+          if ! git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > "$notes" 2>/dev/null || [ ! -s "$notes" ]; then
+            git cat-file -p "$ref" | sed '1,/^$/d' > "$notes" 2>/dev/null || true
+          fi
+          if [ ! -s "$notes" ]; then
+            say "the tag object for $GITHUB_REF_NAME carries no note: a release page has to say what changed (re-tag with git tag -a $GITHUB_REF_NAME -F <notes>)"
             exit 1
           fi
+          if [ -z "$(tr -d '[:space:]' < "$notes")" ]; then
+            say "the note on $GITHUB_REF_NAME is whitespace: a release page has to say what changed (re-tag with git tag -a $GITHUB_REF_NAME -F <notes>)"
+            exit 1
+          fi
+          echo "release body: $(wc -c < "$notes") bytes from tag object $(git rev-parse "$ref")"
 
       - name: Attach to GitHub release
         uses: softprops/action-gh-release@v2

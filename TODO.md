@@ -801,6 +801,28 @@ CLUTCH_E2E_HOST=… CLUTCH_E2E_USER=… CLUTCH_E2E_PASS=… node tests/remote-bo
     `sysconfig.get_paths()` 指向"只有 lib-dynload"的假标准库、`sys.builtin_module_names` 清空，
     然后**新旧两版逻辑跑同一形状**：旧版 `fcntl known = False`（与 runner 一字不差）、新版 True。
     3.10 与 3.8 两个解释器上都验过。
+- **第三次红，在 `deb` 里，而且这次连日志都打不开**。run `45570007244`：`verify` 与 `verify-py38` 都
+  绿了（上面那条修好了），`deb` 建包、传 artifact 全成功，然后卡在 **"Read the tag's note"**——0.2.2 新
+  加的步骤，负责把 tag 的 note 读成 release 页面正文（`body_path`）。
+  - 现象：那一步 `data-started-at` 与 `data-completed-at` 是**同一秒**，说明它在第一条命令上就退出了；
+    而它的两条错误信息都写 stderr，**失败步骤的日志在公开仓库里也要登录才能看**（`Sign in to view`，
+    job 页的 `data-log-url` 抓回来是 404）。于是"为什么红"完全不可读——这正是上一轮给 `verify-py38`
+    加 annotation 的同一条教训，只是这次踩在发布链最后一步上。
+  - 两种可能在秒级退出下无法区分：`git cat-file -t refs/tags/$GITHUB_REF_NAME` 不是 `tag`（本地 ref
+    被 checkout 拉成了"指向 commit 的 tag ref"），或写 `$RUNNER_TEMP/release-notes.md` 时目录不可写。
+    两种都"看起来像 tag、其实读不出 note"。
+  - 修法：**先保证拿到 tag object，再从 object 读**——`git cat-file -t "$ref"` 不是 `tag` 就
+    `git fetch --no-tags --force origin "+$ref:$ref"` 重取（`+` 允许把轻量 ref 覆盖成 tag object）；
+    写完用 `git cat-file -p "$ref" | sed '1,/^$/d'` 兜底（`%(contents)` 在 commit ref 上只有空行）；
+    note 只有空白也算没有；`notes="${RUNNER_TEMP:-/tmp}/..."` 让临时目录缺失不再致命；
+    **每一条失败路径都 `::error title=` 出声**，下次红的时候原因在 run 页上，不用登录。
+  - 回归夹具进 `tests/release_graph_check.py`：`deb` 里必须有 `git cat-file -p`（读 object，不信 ref）
+    和 `::error title=`（失败要能读）；两个可拆夹具分别证明去掉任一件都会被报出来。
+    `tmp/note_step_check.sh` 从 release.yml 里**抽出这一步的脚本原文**，在七种形状上跑：正常 tag、
+    ref 指向 commit、完全没有 tag ref、note 是空白、远端只有轻量 tag、临时目录不可写、`RUNNER_TEMP`
+    未设置——前三种都要读出同一份 note，后四种都要给出能读的 `::error`。
+  - 教训：发布链最后一步"读发布说明"这种东西，**失败信号的可见性和功能正确性一样重要**；把原因写进
+    stderr 等于没写。
 - **真跑 3.8 抓出来的（静态门漏掉或只报了一部分的）**：`agent/tools/gates.py:39` 的 PEP 604 **别名**
   （运行时不求值，`GuardImpl = Foo | None` 在 3.8 直接 TypeError）；`agent/tools/settings.py:65` 与
   `tests/settings_test.py:136,194` 的 dict 合并 `|`（PEP 584）；`tests/server_test.py:191` 的括号式

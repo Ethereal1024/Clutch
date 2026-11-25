@@ -27,7 +27,10 @@ Checks (offline, stdlib only — a runner executes them with bare python3):
   3. every attaching job transitively needs `verify`
   4. the phone chain (pylibs-index, android-apk) transitively needs `deb`
   5. `deb` reads the release note from the tag and attaches it as `body_path`,
-     so a release page cannot go out blank
+     so a release page cannot go out blank — from the tag OBJECT (a checkout can
+     leave a ref that is shaped like a tag and points at the commit), and with an
+     `::error` annotation when it cannot, because a failed step's log needs a
+     login
   6. the parsing itself: the pre-fix graph (phone chain with no `needs:`), a
      missing scan, a package install in `verify`, and a body-less release are all
      reported
@@ -178,6 +181,13 @@ def problems(jobs: dict[str, Job]) -> list[str]:
         if "git tag -l --format='%(contents)'" not in creator.body:
             out.append(f"`{DEB}` does not read the release note from the tag: the "
                        "page would be a second copy of the notes, or blank")
+        if "git cat-file -p" not in creator.body:
+            out.append(f"`{DEB}` reads the note without reading the tag OBJECT: a "
+                       "checkout can leave the ref pointing at the commit, and "
+                       "then the tag's note is not there to read")
+        if "::error title=" not in creator.body:
+            out.append(f"`{DEB}` fails without an annotation: a failed step's log "
+                       "needs a login, so the reason would be unreadable")
         if "body_path:" not in creator.body:
             out.append(f"`{DEB}` attaches the release with no `body_path`: the page "
                        "goes out saying nothing")
@@ -250,6 +260,21 @@ def check_regression(text: str) -> None:
     check(any("does not read the release note from the tag" in p
               for p in problems(parse(paraphrased))),
           "a release note written a second time is reported")
+
+    # 8. the tag OBJECT, not the ref that is shaped like one — 0.2.2's deb job
+    #    died here in a second, and the reason was in a log nobody could open
+    object_read = '            git cat-file -p "$ref" | sed \'1,/^$/d\' > "$notes" 2>/dev/null || true\n'
+    no_object = text.replace(object_read, "")
+    check(no_object != text, "regression fixture: the tag-object read is removable")
+    check(any("without reading the tag OBJECT" in p for p in problems(parse(no_object))),
+          "a note read that trusts the ref is reported")
+
+    # 9. …and a failure that only writes to the log is not reportable
+    silent = text.replace('          say() { echo "::error title=the note on $GITHUB_REF_NAME::$1"; }',
+                          '          say() { echo "$1" >&2; }')
+    check(silent != text, "regression fixture: the annotation is removable")
+    check(any("fails without an annotation" in p for p in problems(parse(silent))),
+          "a note step that dies silently is reported")
 
 
 def main() -> int:
