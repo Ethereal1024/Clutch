@@ -27,9 +27,11 @@
 //   2. the renderer's tunnel-end handler reads it (js/backend-lifecycle.js): a
 //      window the hop never owned keeps its session, its stream and its work;
 //   3. leaving an outage releases THIS window's claim and stops the shared tunnel
-//      only when it was the last window on it (`session:release`); releasing every
-//      window's claim stays the picker's own Disconnect — the user leaving the
-//      machine (tunnel:disconnect);
+//      only when it was the last window on it (`session:release`); the picker's
+//      own Disconnect (tunnel:disconnect) is the user leaving ONE HOP — it
+//      releases the claims whose forward went through it, and leaves a session on
+//      THIS machine (which never went through a hop) and every other endpoint's
+//      hop alone;
 //   4. what the renderer remembers about its session URL is per window
 //      (sessionStorage), so one window's base is never the next window's memory.
 //
@@ -71,7 +73,7 @@ check(/const affected = await hostCore\.releaseTunnelBackends\(\);/.test(HOST) &
   /bus\.broadcast\("tunnel:ended", \{ lost: slots\.length > 0, slots \}\)/.test(HOST),
   "the phone asks the same question of the same core (one window there, so the answer is its own claim)");
 
-// ---- 2. leaving an outage is a WINDOW act; the machine-wide release is the picker ----
+// ---- 2. leaving an outage is a WINDOW act; the picker's Disconnect is ONE HOP ----
 const releaseAt = MAIN.indexOf('ipcMain.handle("session:release"');
 const releaseHandler = releaseAt < 0 ? "" : MAIN.slice(releaseAt, releaseAt + 1000);
 check(/hostCore\.releaseSlot\(e\.sender\.id, slotId\)/.test(releaseHandler) &&
@@ -83,9 +85,17 @@ check(/if \(!hostCore\.anyTunnelWindow\(\)\) \{[\s\S]{0,200}ladder\.noteUserLeft
   "…and that exit disarms the standing reconnect intent too (ui/tunnel-ladder.js): nothing may redial a host the user is done with");
 // the handler got longer with named hops — its one-endpoint branch comes first —
 // so the budget is the whole handler up to `session:release`, no further: a
-// releaseAllBackends that MOVED into session:release must still fail this
-check(/ipcMain\.handle\("tunnel:disconnect"[\s\S]{0,2000}releaseAllBackends\(\{ leaving: true \}\)/.test(MAIN),
-  "releasing EVERY window's claim stays where it belongs: the picker's own Disconnect, which is the user leaving the machine");
+// machine-wide release that MOVED back into it must still fail this
+const discAt = MAIN.indexOf('ipcMain.handle("tunnel:disconnect"');
+const discEnd = discAt < 0 ? -1 : MAIN.indexOf('ipcMain.handle("session:release"', discAt);
+const disconnect = discAt < 0 || discEnd < discAt ? "" : MAIN.slice(discAt, discEnd);
+check(/const st = tunnel\.tunnelStatus\(\)/.test(disconnect) &&
+  /const affected = st && st\.url \? await hostCore\.releaseTunnelBackends\(st\.url\) : \[\]/.test(disconnect) &&
+  /for \(const s of affected\)\s*await hostCore\.releaseSlot\(s\.winId, s\.slotId, \{ leaving: true \}\)/.test(disconnect),
+  "the picker's own Disconnect releases only the claims whose forward went through the hop it is stopping — and tells those sessions to stop while the hop is still up");
+check(!/releaseAllBackends/.test(disconnect) &&
+  /await tunnel\.stopTunnel\(\)/.test(disconnect) && /stopIdleTunnels\(\)/.test(disconnect),
+  "…and nothing else: no machine-wide release, because a tab on THIS machine never went through a hop and a tab on another machine is not on this one");
 check(/releaseSession: async \(slotId\) => \{[\s\S]{0,500}hostCore\.releaseSlot\(window\.id, slotId\)/.test(HOST) &&
   /releaseSession: async \(slotId\) => \{[\s\S]{0,700}hostCore\.releaseWindowBackends\(window\.id\)/.test(HOST) &&
   /releaseSession: async \(slotId\) => \{[\s\S]{0,900}anyTunnelWindow\(\)/.test(HOST),
@@ -254,6 +264,40 @@ async function main() {
   await onEnd({ lost: false });
   check(losts === lostsBefore && pickerPaints === paintsBefore,
     "no intent = the user left on purpose: neither verdict raises the dialog (that check is older than this one, and it still stands)");
+
+  // ---- 6. driven: the picker's own Disconnect is scoped to ITS hop ----
+  //
+  // The reported bug: choosing Local (or any picker switch) in one window told the
+  // host "the user is leaving this machine", and the host took that to mean EVERY
+  // claim — a tab already open on THIS machine lost its session (its forward died
+  // under it: "fetch failed", and the next send started a session with no project
+  // open), and a tab on another machine lost a hop nobody had dropped. The fix is
+  // the one-endpoint branch's rule, one level down: release the claims whose
+  // forward went through the hop being stopped, and nothing else.
+  const picker = { active: true, url: "http://127.0.0.1:8893" };
+  const core2 = makeCore(picker);
+  const localTab = fakeWin(11); // a tab on this machine: pinned there, no hop
+  core2.setSlotTarget(localTab.id, "", { kind: "executor", id: LOCAL_ID });
+  const hopTab = fakeWin(12); // a tab following the picker's hop
+  await core2.ensureSlotBackend(localTab);
+  await core2.ensureSlotBackend(hopTab);
+  const localBefore = core2.slotStatus(localTab.id);
+  check(!localBefore.remote && !!(localBefore.url || "").match(/^http:\/\/127\.0\.0\.1:\d+$/) &&
+    core2.slotStatus(hopTab.id).remote,
+    "the picker's Disconnect starts from one tab on this machine and one on its hop");
+
+  // ui/main.ts's own sequence, driven: tunnelStatus().url -> releaseTunnelBackends
+  // -> releaseSlot({leaving:true}) for each slot the hop owned
+  const dying = await core2.releaseTunnelBackends(picker.url);
+  for (const s of dying) await core2.releaseSlot(s.winId, s.slotId, { leaving: true });
+
+  check(dying.length === 1 && dying[0].winId === hopTab.id,
+    "only the tab whose forward went through that hop is released — the hop's name is the scope, exactly as in the one-endpoint branch");
+  check(core2.slotStatus(localTab.id).claimed && core2.slotStatus(localTab.id).url === localBefore.url &&
+    core2.backendExecutor(localTab.id) === LOCAL_ID,
+    "the tab on THIS machine keeps its session and its base: nothing of the picker's hop was ever in its path — that is the tab that showed fetch failed");
+  check(!core2.slotStatus(hopTab.id).claimed,
+    "the tab on the hop is released outright, not parked: the hop was still up, so its supervisor was told to stop the session (a `released` final)");
 
   summary("tunnel-scope");
 }

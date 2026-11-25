@@ -690,16 +690,28 @@ if (!app.requestSingleInstanceLock()) {
         if (st) await tunnel.stopTunnelOn(id);
         return { ok: true };
       }
-      // THE MACHINE-WIDE act: the picker's own Disconnect, i.e. the user leaving
-      // this machine. Every window's claim goes, because every window was on a
-      // tunnel the user just dropped — and the standing intents go with them.
-      for (const l of ladders.values()) l.noteUserLeft();
-      // `leaving` here too: the user is leaving this MACHINE, not just losing a
-      // hop — the supervisor is told so it stops these sessions through its
-      // SIGTERM ladder (a `released` final) instead of keeping them for a claim
-      // that will never come back. A tab closing, by contrast, releases without
-      // it: the window is still here and may re-bind (session:release below).
-      await hostCore.releaseAllBackends({ leaving: true });
+      // THE WINDOW'S OWN Disconnect: the picker's, i.e. the user leaving the
+      // machine this window was on. `stopTunnel()` below drops exactly that hop.
+      //
+      // Scoped to THAT hop, like the one-endpoint branch above: with a hop per
+      // endpoint (tunnel-lifecycle's connectTunnelOn) "every window was on the
+      // tunnel the user just dropped" is no longer true. A session on THIS machine
+      // never went through a hop at all, and a tab on another machine holds a
+      // different one. Releasing every claim here killed the local tabs' sessions
+      // — a tab already open here turned into "fetch failed", and its next send
+      // started a fresh session with no project open — and pulled the far tabs'
+      // forwards out from under hops that were still up. The user leaving one
+      // machine is not every window leaving every machine.
+      ladder.noteUserLeft();
+      const st = tunnel.tunnelStatus();
+      const affected = st && st.url ? await hostCore.releaseTunnelBackends(st.url) : [];
+      // …and the SESSIONS those forwards carried. The hop is still up, so each
+      // claim can be told to stop through its supervisor's SIGTERM ladder (a
+      // `released` final) instead of being parked for a claim that will never come
+      // back — `leaving`, because this is the user leaving, not an outage. A tab
+      // closing releases without it: the window is still here and may re-bind
+      // (session:release below).
+      for (const s of affected) await hostCore.releaseSlot(s.winId, s.slotId, { leaving: true });
       await tunnel.stopTunnel();
       // …and the hops tabs opened for their own machines, which `stopTunnel()`
       // (the window's own tunnel) does not own
