@@ -1,14 +1,16 @@
-// the tunnel's shared singleton — the state every phase works on, its wire
-// constants, and the log they all write to
+// the tunnel's state object, its wire constants, and the log every phase writes to
 //
 // The tunnel is one connection with one lifetime, and five modules work on it
 // (net, remote, bootstrap, lifecycle, connect). This file is the sixth and the
 // only one that declares mutable state: a phase that must remember something
 // across calls puts the field here, so the question "who owns this" has
-// exactly one answer, and a fresh module graph gets a fresh tunnel. The ports
-// and timeouts are the wire contract with the remote host; tunnelLog appends to
-// ~/.clutch/tunnel.log, which holds whatever the caller passed in — including
-// an SSH password in plaintext (see the module header of ssh-tunnel.js).
+// exactly one answer, and a fresh state object gets a fresh tunnel. Each state
+// is reached by its tunnel id (see tunnelId/stateFor), so ONE process can hold
+// more than one hop; ssh-tunnel hands each bound instance its own object. The
+// ports and timeouts are the wire contract with the remote host; tunnelLog
+// appends to ~/.clutch/tunnel.log, which holds whatever the caller passed in —
+// including an SSH password in plaintext (see the module header of
+// ssh-tunnel.js).
 
 const os = require("os");
 const path = require("path");
@@ -18,8 +20,18 @@ const fs = require("fs");
 // Create an independent tunnel state object. Multiple tunnels (to different hosts)
 // each have their own state. The global `state` below is created once for
 // backward compatibility with existing code.
-function createTunnelState() {
+function createTunnelState(id = null) {
   return {
+    // The tunnel's KEY: `user@host:port`, or null on a state no dial has
+    // answered for yet. It is the connection record's own name — the same triple
+    // as settings-mirror's sshSecretId — and it is never parsed: it is a Map key
+    // and an equality test, so upper layers can hold one and compare it without
+    // knowing what it is made of. A tab remembers it across restart, which is
+    // why the id exists at all and why it cannot be the host's address: loopback
+    // is only unique relative to a device (a local supervisor and a remote one
+    // are both 127.0.0.1:8890), and the same address under two users is two
+    // execution contexts with different homes and locks.
+    id,
     sshClient: null,
     // The host THIS hop belongs to: { host, user, port }, or null with no hop.
     // One tunnel carries one host, and connectTunnel may only ever hand it back
@@ -29,7 +41,6 @@ function createTunnelState() {
     // a picker switch share the one answer.
     target: null,
     localSrv: null,
-    execBridgePort: null,
     sftpHandle: null,
     sftpUnavailable: false, // the current host has no SFTP subsystem: use exec uploads
     currentUrl: null,
@@ -63,13 +74,52 @@ function createTunnelState() {
 // ---- the global state (backward compatibility) ----
 // One object, not thirteen module-level lets: the field a function assigns is
 // visible to every other module on the next call, with no export to keep in step.
-const state = createTunnelState();
+const state = createTunnelState(null);
+
+// ---- tunnel ids ----
+// The one place a key is BUILT. Everything else compares two of them.
+function tunnelId(host, user, port) {
+  return `${String(user || "")}@${String(host || "")}:${Number(port) || 22}`;
+}
 
 // ---- multi-tunnel registry ----
-// Maps tunnelId (e.g., "host:user:port") to its state object.
-// The default/primary tunnel is keyed as "__primary__".
+// Maps tunnelId to its state object. The default/primary tunnel — the one the
+// window's own picker drives — is keyed as "__primary__" and is the object every
+// module bound before a host was named works on; a state that has been named by
+// a dial is ALSO registered under its id, so a later caller asking for that host
+// gets the same object rather than a second, empty one.
+const PRIMARY_KEY = "__primary__";
 const tunnelRegistry = new Map();
-tunnelRegistry.set("__primary__", state);
+tunnelRegistry.set(PRIMARY_KEY, state);
+
+// The state for `id`: the primary for null/undefined (the un-named tunnel), the
+// primary again once a dial has named it with this id, the registered one for a
+// key this process already holds, and a fresh registered state for a key it does
+// not. Never returns null — an id is a name, not a lookup that can fail.
+function stateFor(id) {
+  if (id == null) return state;
+  if (state.id === id) return state;
+  const known = tunnelRegistry.get(id);
+  if (known) return known;
+  const fresh = createTunnelState(id);
+  tunnelRegistry.set(id, fresh);
+  return fresh;
+}
+
+function primary() {
+  return state;
+}
+
+// Every state a dial has named, primary included if it has one. This is what
+// "which hops does this process hold" means; it says nothing about liveness.
+function tunnels() {
+  const list = [];
+  for (const st of tunnelRegistry.values()) {
+    if (st.id) list.push(st);
+  }
+  return list;
+}
+
 
 // ---- the wire contract ----
 const LOG_FILE = path.join(os.homedir(), ".clutch", "tunnel.log");
@@ -245,6 +295,39 @@ function tunnelLog(...args) {
 // machine (ui/llm-client), so no far-side session reaches a model through the
 // tunnel.
 
+// ---- the compat surface ----
+//
+// Before tunnels were instances, each hop module was a bag of functions and a
+// caller could `require("./tunnel-bootstrap")` and call installServer directly.
+// That has to keep working — tests and android/host do exactly that — so a hop
+// module exports `{ attach, ...compatSurface(part, names) }`: getters that
+// resolve the name against the PRIMARY tunnel's attached part AT CALL TIME. A
+// getter, not a copied value, because ssh-tunnel is the module that binds the
+// primary and it requires the hop modules first: reading at load would close the
+// cycle we are trying to avoid.
+// `base` is the module's own exports (attach); the compat names are defined ON
+// that object as getters rather than copied into it, because a copy — spread,
+// Object.assign — evaluates the getter at load, which is exactly the cycle this
+// exists to avoid.
+function compatSurface(part, names, base = {}) {
+  const out = Object.assign({}, base);
+  for (const name of names) {
+    Object.defineProperty(out, name, {
+      enumerable: true,
+      configurable: true,
+      get() {
+        const api = require("./ssh-tunnel").primaryTunnel()[part];
+        const value = api && api[name];
+        if (value === undefined) {
+          throw new Error(`tunnel: the primary tunnel has no ${part}.${name}`);
+        }
+        return value;
+      },
+    });
+  }
+  return out;
+}
+
 module.exports = {
   REMOTE_API_PORT,
   CONNECT_TIMEOUT_MS,
@@ -254,4 +337,9 @@ module.exports = {
   channelFor,
   state,
   tunnelLog,
+  tunnelId,
+  stateFor,
+  primary,
+  tunnels,
+  compatSurface,
 };

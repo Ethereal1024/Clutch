@@ -4,53 +4,93 @@
 // logging appends to ~/.clutch/tunnel.log (the auth secret itself is never
 // written there — only whether one is offered).
 //
-// This file is the module's public face and nothing else. The tunnel itself is
-// six modules over one state object: tunnel-core.js owns the state and the log,
-// and the five below it (net -> remote -> bootstrap -> lifecycle -> connect) are
-// required in dependency order. The names exported here are the module's
-// contract — ui/main.js, ui/exec-bridge.js (a lazy require, which is what keeps
-// its cycle with this file from closing) and android/host/android-host.js.
+// This file is the module's public face and its binding point. The tunnel itself
+// is six modules over one state object: tunnel-core.js owns the state and the
+// log, and the five below it (net -> remote -> bootstrap -> lifecycle -> connect)
+// are required in dependency order and ATTACHED to an instance — each exports
+// attach(ctx) and works only through what ctx carries. bind() makes one such
+// instance for one tunnel id; the names exported here are the primary instance's,
+// which is what ui/main.js and android/host/android-host.js require.
 
-const { tunnelLog } = require("./tunnel-core");
-const { remoteExec, uploadFileViaExec } = require("./tunnel-remote");
-const { chooseStrategy } = require("./tunnel-bootstrap");
-const { connectTunnel } = require("./tunnel-connect");
-const {
-  stopTunnel,
-  onTunnelEnd,
-  tunnelStatus,
-  openSessionForward,
-  restartRemoteServer,
-} = require("./tunnel-lifecycle");
+const { tunnelLog, stateFor, tunnels } = require("./tunnel-core");
+const remote = require("./tunnel-remote");
+const bootstrap = require("./tunnel-bootstrap");
+const lifecycle = require("./tunnel-lifecycle");
+const connect = require("./tunnel-connect");
+const { execBridgeFor } = require("./exec-bridge");
 
-// List all active tunnels: currently just the primary tunnel. In a multi-tunnel
-// future this would return instances from the registry.
+// ---- binding ----
+// One instance per id, made once and reused. attach() closes over the hop's own
+// counters and its exec bridge, so a second bind of the same id would be a second
+// bridge on a second port for the same host; the state, which is the part that
+// has to survive a rebind, comes from tunnel-core either way.
+//
+// `parts` supplies a part that is ALREADY built (a runner's fake wire, a fake
+// lifecycle) instead of attaching the real one. That is the composition seam the
+// hop modules used to expose as a require: what a test swaps is the part, not the
+// module. An instance bound this way is not cached — it stands over the same
+// state as its id, but with somebody else's parts.
+const bound = new Map();
+
+function bind({ id = null, parts = null } = {}) {
+  const key = id == null ? "__primary__" : String(id);
+  const existing = bound.get(key);
+  if (existing && !parts) return existing;
+  const supplied = parts || {};
+  const ctx = { id: id == null ? null : key, st: stateFor(id) } as any;
+  // the DAG's order: each attach may read the parts before it, never after
+  ctx.remote = supplied.remote || remote.attach(ctx);
+  ctx.bootstrap = supplied.bootstrap || bootstrap.attach(ctx);
+  ctx.bridge = supplied.bridge || execBridgeFor(key, ctx.remote.remoteExec);
+  ctx.lifecycle = supplied.lifecycle || lifecycle.attach(ctx);
+  ctx.connect = supplied.connect || connect.attach(ctx);
+  if (!parts) bound.set(key, ctx);
+  return ctx;
+}
+
+// The tunnel the window's own picker drives: the one no id has named yet, and
+// the one a dial names (see tunnel-connect's state.id).
+function primaryTunnel() {
+  return bind({});
+}
+
+// The instance for a tunnel id — a durable key (user@host:port), never parsed,
+// only held and compared.
+function tunnelFor(id) {
+  return bind({ id });
+}
+
+// List the tunnels this process holds a state for. Used by the backend picker to
+// let the user choose which device a tab's session should run on.
 function listTunnels() {
   const list = [];
-  const primary = tunnelStatus();
-  // Only include tunnels with a target (i.e., connected or once connected)
-  if (primary.target) {
-    const tunnelId = `${primary.target.host}:${primary.target.user}:${primary.target.port}`;
+  for (const st of tunnels()) {
     list.push({
-      tunnelId,
-      active: primary.active,
-      url: primary.url,
-      target: primary.target,
+      tunnelId: st.id,
+      active: Boolean(st.sshClient),
+      url: st.currentUrl,
+      target: st.target,
     });
   }
   return list;
 }
 
 module.exports = {
-  connectTunnel,
-  stopTunnel,
-  remoteExec,
+  bind,
+  primaryTunnel,
+  tunnelFor,
   tunnelLog,
-  onTunnelEnd,
-  tunnelStatus,
-  uploadFileViaExec,
-  openSessionForward,
-  restartRemoteServer,
-  chooseStrategy,
   listTunnels,
+  // The old contract, on the primary instance. Arrow functions on purpose: they
+  // read the primary at CALL time, so an instance bound later (or a rebind) is
+  // not a load-order question.
+  connectTunnel: (...a) => primaryTunnel().connect.connectTunnel(...a),
+  stopTunnel: (...a) => primaryTunnel().lifecycle.stopTunnel(...a),
+  remoteExec: (...a) => primaryTunnel().remote.remoteExec(...a),
+  onTunnelEnd: (...a) => primaryTunnel().lifecycle.onTunnelEnd(...a),
+  tunnelStatus: (...a) => primaryTunnel().lifecycle.tunnelStatus(...a),
+  uploadFileViaExec: (...a) => primaryTunnel().remote.uploadFileViaExec(...a),
+  openSessionForward: (...a) => primaryTunnel().lifecycle.openSessionForward(...a),
+  restartRemoteServer: (...a) => primaryTunnel().lifecycle.restartRemoteServer(...a),
+  chooseStrategy: (...a) => primaryTunnel().bootstrap.chooseStrategy(...a),
 };

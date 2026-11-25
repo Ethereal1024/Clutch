@@ -11,25 +11,32 @@ const os = require("os");
 const path = require("path");
 const fs = require("fs");
 const { Client } = require("ssh2");
-const {
-  state,
-  tunnelLog,
-  REMOTE_API_PORT,
-  CONNECT_TIMEOUT_MS,
-  channelFor,
-} = require("./tunnel-core");
+const { tunnelLog, tunnelId, REMOTE_API_PORT, CONNECT_TIMEOUT_MS, channelFor } = require("./tunnel-core");
 const { freePort, listen, waitForServer, probeServer, probeSupervisorShape } = require("./tunnel-net");
-const { remoteExec } = require("./tunnel-remote");
+const { getSshSecret, saveSshSecret, forgetSshSecret } = require("./settings-mirror");
+
+// ---- the instance ----
+// One bound tunnel's dial. Everything that is per-hop is read from `ctx` at
+// attach time — the state, the wire helpers, the bootstrap it installs through,
+// the lifecycle it tears down with, and its own exec bridge — so connecting B
+// cannot see, reuse or kill A's client. (The MOVE is a decision made on top of
+// this, not by it: a caller that holds two bound tunnels keeps two hops.)
+function attach(ctx) {
+// (the body below keeps the module's own indentation: this move lifted it whole,
+// and re-indenting 300-800 lines would have rewritten a diff whose point is that
+// nothing in them changed)
+const state = ctx.st;
+const { remoteExec } = ctx.remote;
 const {
   PROBE_CMD,
   parseProbe,
   installServer,
   installComponents,
   remoteServingState,
-} = require("./tunnel-bootstrap");
-const { stopTunnel, reopenForward, notifyEnd, startHealing, stopHealing } = require("./tunnel-lifecycle");
-const { startExecBridge, stopExecBridge } = require("./exec-bridge");
-const { getSshSecret, saveSshSecret, forgetSshSecret } = require("./settings-mirror");
+} = ctx.bootstrap;
+const { stopTunnel, reopenForward, notifyEnd, startHealing, stopHealing } = ctx.lifecycle;
+const startExecBridge = () => ctx.bridge.start();
+const stopExecBridge = () => ctx.bridge.stop();
 
 // How long a dial that was reset before the handshake waits before its one more
 // ask. Short on purpose: the reset is either a moment that has already passed (a
@@ -152,6 +159,10 @@ async function connectTunnel({ host, user, port, password }, progress) {
   // renderer's own switch does, and its failure cannot be papered over with the
   // tunnel it left behind.
   const target = { host, user, port: Number(port) || 22 };
+  // The hop's KEY, assigned together with the target: from here on this state is
+  // "the tunnel to user@host:port", and stateFor(that id) hands back this object
+  // instead of a second, empty one. Nothing parses it — it is a name.
+  state.id = tunnelId(target.host, target.user, target.port);
   if (state.sshClient) {
     const current = state.target;
     const same =
@@ -231,7 +242,7 @@ async function connectTunnel({ host, user, port, password }, progress) {
   const myDial = ++dialSeq;
   try {
     const localPort = await freePort();
-    state.execBridgePort = await startExecBridge();
+    await startExecBridge(); // this instance's bridge; tunnelStatus asks it for its port
 
     const opts: any = {
       host,
@@ -816,7 +827,14 @@ async function establishForwardAndHealth(localPort, client) {
   return { ok: true, url: state.currentUrl };
 }
 
-module.exports = {
+return {
   connectTunnel,
   installReverseForward,
 };
+}
+
+// The old direct-require names resolve against the primary tunnel; `attach` is
+// this module's own export (see tunnel-core's compatSurface).
+module.exports = require("./tunnel-core").compatSurface("connect", ["connectTunnel", "installReverseForward"], {
+  attach,
+});

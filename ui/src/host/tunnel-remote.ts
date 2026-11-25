@@ -6,7 +6,28 @@
 // exec chunks that stay under the command size a minimal sshd drops.
 
 const fs = require("fs");
-const { state } = require("./tunnel-core");
+
+// ---- the instance ----
+// One bound tunnel's wire helpers. Everything they touch that is per-hop comes
+// from `ctx` (the state object, and — in bootstrap/lifecycle/connect — the
+// parts attached before this one), so two bound tunnels never share a client.
+//
+// `info` is what a transfer that is going to take a quarter of an hour owes the
+// person watching it: how fast, and how much longer. Both are measured here
+// because this is the only place that sees the acks arrive.
+type UploadInfo = { bps: number; eta: number; total: number };
+type UploadOpts = {
+  onProgress?: (sent: number, total: number, info?: UploadInfo) => void;
+  stallMs?: number;
+  deadlineMs?: number;
+  timeoutMs?: number; // the exec fallback's per-command budget
+};
+
+function attach(ctx) {
+// (the body below keeps the module's own indentation: this move lifted it whole,
+// and re-indenting 300-800 lines would have rewritten a diff whose point is that
+// nothing in them changed)
+const state = ctx.st;
 
 // ---- remote command/file helpers (used by bootstrap) ----
 
@@ -115,17 +136,6 @@ function uploadSize(n) {
 function uploadSpan(ms) {
   return ms >= 60000 ? Math.round(ms / 60000) + " min" : Math.max(1, Math.round(ms / 1000)) + " s";
 }
-
-// `info` is what a transfer that is going to take a quarter of an hour owes the
-// person watching it: how fast, and how much longer. Both are measured here
-// because this is the only place that sees the acks arrive.
-type UploadInfo = { bps: number; eta: number; total: number };
-type UploadOpts = {
-  onProgress?: (sent: number, total: number, info?: UploadInfo) => void;
-  stallMs?: number;
-  deadlineMs?: number;
-  timeoutMs?: number; // the exec fallback's per-command budget
-};
 
 function uploadFile(localPath, remotePath, opts: UploadOpts = {}) {
   const onProgress = typeof opts.onProgress === "function" ? opts.onProgress : null;
@@ -322,8 +332,15 @@ function uploadFileViaExec(localPath, remotePath, timeoutMs = 120000, exec = rem
   return p;
 }
 
-module.exports = {
+return {
   remoteExec,
   uploadFile,
   uploadFileViaExec,
 };
+}
+
+// The old direct-require names resolve against the primary tunnel; `attach` is
+// this module's own export (see tunnel-core's compatSurface).
+module.exports = require("./tunnel-core").compatSurface("remote", ["remoteExec", "uploadFile", "uploadFileViaExec"], {
+  attach,
+});

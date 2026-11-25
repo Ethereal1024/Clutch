@@ -165,19 +165,21 @@ const fakeTunnelRemote = {
   uploadFileViaExec: () => Promise.resolve(),
 };
 
-// Swap at the module seam: bootstrap's own imports of the wire and the
-// artifacts, everything else (parseProbe, the commands, the decision) is the
-// production code.
+// Swap at the module seam: bootstrap's own imports of the ARTIFACTS, everything
+// else (parseProbe, the commands, the decision) is the production code. The wire
+// is a part of the bound tunnel now (ui/ssh-tunnel.js bind), not a require the
+// bootstrap makes — a hop module reaches the wire through the instance it was
+// attached to.
 const origLoad = Module._load;
 Module._load = function (request, parent, isMain) {
   if (parent && parent.filename === BOOTSTRAP) {
-    if (request === "./tunnel-remote") return fakeTunnelRemote;
     if (request === "./server-bundle") return fakeArtifacts;
   }
   return origLoad.apply(this, arguments);
 };
 
-const { installServer, stopServerCmd, startCommand, parseProbe } = require("../ui/tunnel-bootstrap");
+const hop = require("../ui/ssh-tunnel").bind({ parts: { remote: fakeTunnelRemote } });
+const { installServer, stopServerCmd, startCommand, parseProbe } = hop.bootstrap;
 
 const PROBE = {
   os: "Linux",
@@ -427,7 +429,7 @@ async function main() {
     const net = require("net");
     const { state } = require("../ui/tunnel-core");
     const { freePort } = require("../ui/tunnel-net");
-    const { healOnce } = require("../ui/tunnel-lifecycle");
+    const { healOnce } = hop.lifecycle;
 
     // the far supervisor as the rebound forward reaches it: the fake ssh
     // client's forwardOut pipes whatever crosses the local listener here
@@ -498,7 +500,9 @@ async function main() {
     const net = require("net");
     const { state } = require("../ui/tunnel-core");
     const { freePort } = require("../ui/tunnel-net");
-    const { healOnce, onTunnelEnd } = require("../ui/tunnel-lifecycle");
+    // the heal asks the far side about ITSELF over exec, so it has to run on the
+    // instance attached to the fake wire (see the top of this file)
+    const { healOnce, onTunnelEnd } = hop.lifecycle;
 
     const far = http.createServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -576,7 +580,7 @@ async function main() {
   {
     const http = require("http");
     const { state } = require("../ui/tunnel-core");
-    const { healOnce } = require("../ui/tunnel-lifecycle");
+    const { healOnce } = hop.lifecycle;
 
     let asks = 0;
     const slow = http.createServer((req, res) => {

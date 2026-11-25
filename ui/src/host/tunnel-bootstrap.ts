@@ -10,10 +10,27 @@
 
 const path = require("path");
 const fs = require("fs");
-const { state, tunnelLog, REMOTE_API_PORT } = require("./tunnel-core");
-const { remoteExec, uploadFile } = require("./tunnel-remote");
+const { tunnelLog, REMOTE_API_PORT } = require("./tunnel-core");
 const { platformTag, ensureBundle, ensurePyLibsTar, resolvePyLibsVersion, hasLocalBundle } = require("./server-bundle");
 const components = require("./components");
+
+// ---- the instance ----
+// One bound tunnel's bootstrap: what to install, how to start it, and the probe
+// that decides. `ctx.st` is the hop this answers for and `ctx.remote` is the wire
+// it runs over; nothing here reaches a second tunnel.
+//
+// force is for tests; auto-decides when omitted. progress(stage, frac?, info?) drives the UI
+// progress bar — `frac` is that stage's own measured fraction, for the stage that has one
+// (the upload), and is left off for the ones that do not. `info` carries the rate and the
+// time left for the transfer that measured them (see uploadFile).
+type ProgressInfo = { bps?: number; eta?: number };
+
+function attach(ctx) {
+// (the body below keeps the module's own indentation: this move lifted it whole,
+// and re-indenting 300-800 lines would have rewritten a diff whose point is that
+// nothing in them changed)
+const state = ctx.st;
+const { remoteExec, uploadFile } = ctx.remote;
 
 // ---- bootstrap ----
 
@@ -353,11 +370,6 @@ function pylibsInstallCmd(dir) {
   return `${chain} ; rc=$?; rm -rf ${stage}; test $rc -eq 0`;
 }
 
-// force is for tests; auto-decides when omitted. progress(stage, frac?, info?) drives the UI
-// progress bar — `frac` is that stage's own measured fraction, for the stage that has one
-// (the upload), and is left off for the ones that do not. `info` carries the rate and the
-// time left for the transfer that measured them (see uploadFile).
-type ProgressInfo = { bps?: number; eta?: number };
 async function installServer(
   probe,
   { force, progress }: { force?: boolean; progress?: (stage: string, frac?: number, info?: ProgressInfo) => void } = {},
@@ -717,7 +729,7 @@ function installComponents(base) {
     });
 }
 
-module.exports = {
+return {
   PROBE_CMD,
   TREE_PROBE_CMD,
   parseProbe,
@@ -732,3 +744,26 @@ module.exports = {
   installServer,
   installComponents,
 };
+}
+
+// The old direct-require names resolve against the primary tunnel; `attach` is
+// this module's own export (see tunnel-core's compatSurface).
+module.exports = require("./tunnel-core").compatSurface(
+  "bootstrap",
+  [
+    "PROBE_CMD",
+    "TREE_PROBE_CMD",
+    "parseProbe",
+    "pylibsTreeSound",
+    "pylibsInstallCmd",
+    "startCommand",
+    "stopServerCmd",
+    "stopServer",
+    "remoteRunningCmd",
+    "remoteServingState",
+    "chooseStrategy",
+    "installServer",
+    "installComponents",
+  ],
+  { attach },
+);

@@ -41,7 +41,6 @@ function tunnelLogText() {
 }
 
 const UI_DIR = path.join(__dirname, "..", "ui");
-const CONNECT_JS = path.join(UI_DIR, "tunnel-connect.js");
 const CONNECT_SRC = fs.readFileSync(path.join(UI_DIR, "src", "host", "tunnel-connect.ts"), "utf8");
 
 // ---- the stubs ----
@@ -107,21 +106,16 @@ function fakeRemoteExec(cmd) {
   return Promise.resolve({ code: 0, stdout: "", stderr: "" });
 }
 
-const BOOTSTRAP_JS = path.join(UI_DIR, "tunnel-bootstrap.js");
+// The hop's wire and its forwards are supplied as PARTS of one bound tunnel
+// (ui/ssh-tunnel.js bind). The hop modules no longer reach each other by require,
+// so what a runner swaps is the part, not the module edge: the connect under test
+// is attached over this fake wire and this fake lifecycle, and everything else
+// (probeServer, the branch's own shape, the real bootstrap over the fake wire) is
+// production code.
 const fakeRemote = { remoteExec: fakeRemoteExec, uploadFile: () => Promise.resolve() };
-const origLoad = Module._load;
-Module._load = function (request, parent, isMain) {
-  if (parent && parent.filename === CONNECT_JS) {
-    if (request === "./tunnel-lifecycle") return fakeLifecycle;
-    if (request === "./tunnel-remote") return fakeRemote;
-  }
-  // the far-side verdict (remoteServingState) is asked over exec, so it needs the
-  // same fake wire — otherwise it fails on a hop this runner never dialled
-  if (parent && parent.filename === BOOTSTRAP_JS && request === "./tunnel-remote") return fakeRemote;
-  return origLoad.apply(this, arguments);
-};
+const hop = require("../ui/ssh-tunnel").bind({ parts: { remote: fakeRemote, lifecycle: fakeLifecycle } });
 
-const { connectTunnel } = require("../ui/tunnel-connect");
+const { connectTunnel } = hop.connect;
 const { state } = require("../ui/tunnel-core");
 
 const HOST = { host: "fanshu", user: "fanshu", port: 6001, password: "x" };

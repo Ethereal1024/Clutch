@@ -72,6 +72,10 @@ bootMod.exports = {
   installComponents: () => {},
   remoteServingState: async () => farReports,
 };
+// the part a bound instance is given (see ssh-tunnel's bind): a hop module no
+// longer requires its neighbours, so the fake has to be attachable too — and it
+// hands back the SAME object, so `farReports` stays live per scenario
+bootMod.exports.attach = () => bootMod.exports;
 require.cache[bootPath] = bootMod;
 
 const { connectTunnel, stopTunnel } = require("../ui/ssh-tunnel");

@@ -57,15 +57,19 @@ const PICKED = 46200;
 // installed. Both answers are "yes, a modern host, already running" so the
 // runner reaches the forwards — the part under test — without a remote shell.
 const bootPath = require.resolve("../ui/tunnel-bootstrap");
-const bootMod = new Module(bootPath);
-bootMod.filename = bootPath;
-bootMod.loaded = true;
-bootMod.exports = {
+const fakeBootstrap = {
   PROBE_CMD: "clutch-probe",
   parseProbe: () => ({ os: "linux", home: "/home/far", version: "0.0.0-test" }),
   installServer: async () => ({ ok: true }),
   installComponents: () => {},
 };
+// the part a bound instance is given (see ssh-tunnel's bind): the hop modules no
+// longer reach each other by require, so the seam is the instance's part
+fakeBootstrap.attach = () => fakeBootstrap;
+const bootMod = new Module(bootPath);
+bootMod.filename = bootPath;
+bootMod.loaded = true;
+bootMod.exports = fakeBootstrap;
 require.cache[bootPath] = bootMod;
 
 // ---- the fake ssh2 wire ----------------------------------------------------

@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-lifecycle.ts and run `npm run build:host`.
-// source sha256: 1d4dcd657019f174c53807c9a57f407db6e3f79c0a52186f9b6deea569bbfafa
+// source sha256: f9012ea73525f9b7ab4ae6e96745d6b93507ba163259bb8949d44f7c1eb81661
 
 "use strict";
 // teardown, the per-window session forwards, and self-healing
@@ -17,397 +17,425 @@
 // the end: the renderer must never keep posting into a port nobody serves.
 Object.defineProperty(exports, "__esModule", { value: true });
 const net = require("net");
-const { state, tunnelLog, HEAL_INTERVAL_MS, REMOTE_API_PORT } = require("./tunnel-core");
+const { tunnelLog, HEAL_INTERVAL_MS, REMOTE_API_PORT } = require("./tunnel-core");
 const { freePort, listen, waitForServer, probeServer } = require("./tunnel-net");
-const { remoteExec } = require("./tunnel-remote");
-const { startCommand, stopServer, remoteServingState } = require("./tunnel-bootstrap");
-const { stopExecBridge } = require("./exec-bridge");
-// `notify` is for teardowns the RENDERER did not ask for. Its own disconnect
-// (the SSH picker, window close) is caller-managed: the renderer clears its
-// flag and re-claims a local session itself, in the same turn. A teardown it
-// does NOT know about must be announced, because until then it keeps talking
-// to a port nobody serves: the SSE stream ends silently (the window shows a
-// run that is not there) and Stop posts the cancel into nothing while the
-// remote session keeps running -- unreachable, and unable to be stopped.
-async function stopTunnel(notify = false) {
-    tunnelLog("[disconnect] stopTunnel");
-    stopHealing();
-    if (state.localSrv) {
-        state.localSrv.close();
+// ---- the instance ----
+// One bound tunnel's teardown, session forwards and healing. The state, the wire
+// and the far side's bootstrap all come from `ctx`, and the exec bridge is this
+// hop's own row (exec-bridge keys it by tunnel id) — so a heal on one tunnel can
+// never touch another's server or another's port.
+function attach(ctx) {
+    // (the body below keeps the module's own indentation: this move lifted it whole,
+    // and re-indenting 300-800 lines would have rewritten a diff whose point is that
+    // nothing in them changed)
+    const state = ctx.st;
+    const { remoteExec } = ctx.remote;
+    const { startCommand, stopServer, remoteServingState } = ctx.bootstrap;
+    const stopExecBridge = () => ctx.bridge.stop();
+    // `notify` is for teardowns the RENDERER did not ask for. Its own disconnect
+    // (the SSH picker, window close) is caller-managed: the renderer clears its
+    // flag and re-claims a local session itself, in the same turn. A teardown it
+    // does NOT know about must be announced, because until then it keeps talking
+    // to a port nobody serves: the SSE stream ends silently (the window shows a
+    // run that is not there) and Stop posts the cancel into nothing while the
+    // remote session keeps running -- unreachable, and unable to be stopped.
+    async function stopTunnel(notify = false) {
+        tunnelLog("[disconnect] stopTunnel");
+        stopHealing();
+        if (state.localSrv) {
+            state.localSrv.close();
+            state.localSrv = null;
+        }
+        for (const srv of state.sessionForwards) {
+            try {
+                srv.close();
+            }
+            catch (e) {
+                /* already closed */
+            }
+        }
+        state.sessionForwards = new Set();
+        // null the global before end() so a stale 'end' cannot clear a newer client
+        const cur = state.sshClient;
+        if (cur) {
+            state.sshClient = null;
+            cur.end();
+        }
+        state.target = null; // the hop's host dies with the hop
+        state.currentUrl = null;
+        if (state.sftpHandle) {
+            state.sftpHandle = null;
+        }
+        stopExecBridge();
+        // intentional disconnects are caller-managed; an unexpected death (the ssh
+        // 'end' event) and a teardown the caller flags both notify
+        if (notify)
+            notifyEnd();
+    }
+    function notifyEnd() {
+        if (state.wasDisconnected)
+            return; // both stopTunnel and the ssh 'end' event fire; emit once
+        state.wasDisconnected = true;
+        for (const cb of state.endListeners) {
+            try {
+                cb();
+            }
+            catch (e) {
+                /* listener errors are non-fatal */
+            }
+        }
+    }
+    function onTunnelEnd(cb) {
+        state.endListeners.add(cb);
+        return () => state.endListeners.delete(cb);
+    }
+    function tunnelStatus() {
+        return {
+            active: Boolean(state.sshClient),
+            url: state.currentUrl,
+            // WHICH host the live hop is for. Without it the page can only ask "is
+            // anything up?", and a hop to another host answering that question is how a
+            // window ends up ticked as connected over somebody else's file system (see
+            // tunnel-connect's reuse gate). It is also what lets a connect that lost the
+            // wire to a concurrent attempt tell "that attempt landed for ME" from
+            // "something else is up".
+            target: state.target ? { host: state.target.host, user: state.target.user, port: state.target.port } : null,
+            // exec bridge URL for the local agent's SshTransport; null with no live tunnel.
+            // Asked of the bridge itself: it owns its port, and a rebind replaces the
+            // server rather than rewriting a field the status would have to remember to
+            // read.
+            execBridge: state.sshClient && ctx.bridge.port() ? "http://127.0.0.1:" + ctx.bridge.port() : null,
+        };
+    }
+    // ---- per-window session forwards ----
+    // Each window gets its own forward to its session child's port; all die with the tunnel.
+    // A local listener whose connections are piped through the live ssh client to
+    // ONE port on the far host. Both forwards this module owns are built from it:
+    // the supervisor's API (establishForwardAndHealth, reopenForward) and each
+    // window's session (below) — so "the forward died" and "the far side died"
+    // are the same plumbing in both directions of the story.
+    function forwardServer(remotePort) {
+        return net.createServer((sock) => {
+            if (!state.sshClient)
+                return sock.destroy();
+            // ssh2 throws synchronously on a client whose socket is already gone
+            // ("Not connected"); a request racing the teardown must fail its own
+            // socket, not escape this handler and hang until the browser gives up
+            try {
+                state.sshClient.forwardOut("127.0.0.1", 0, "127.0.0.1", remotePort, (err, stream) => {
+                    if (err) {
+                        tunnelLog("[forward] forwardOut failed: " + (err && err.message));
+                        sock.destroy();
+                        return;
+                    }
+                    sock.pipe(stream).pipe(sock);
+                });
+            }
+            catch (e) {
+                tunnelLog("[forward] forwardOut threw: " + ((e && e.message) || e));
+                sock.destroy();
+            }
+        });
+    }
+    function openSessionForward(remotePort) {
+        return new Promise((resolve, reject) => {
+            freePort().then((localPort) => {
+                const srv = forwardServer(remotePort);
+                listen(srv, localPort).then(() => {
+                    state.sessionForwards.add(srv);
+                    tunnelLog(`[session] forward 127.0.0.1:${localPort} -> remote :${remotePort}`);
+                    resolve({
+                        localPort,
+                        close: () => {
+                            state.sessionForwards.delete(srv);
+                            try {
+                                srv.close();
+                            }
+                            catch (e) {
+                                /* already closed */
+                            }
+                        },
+                    });
+                }, reject);
+            }, reject);
+        });
+    }
+    // ---- dead-backend self-healing ----
+    // Health-check the forward, restart the backend via the tunnel, else tear down.
+    // The clocks of one heal round, all of them wider than the connect's, because
+    // this is not a cold dial: it is a QUESTION to a far side that was serving until
+    // a moment ago, on a wire that just failed to carry an answer. Measured through
+    // the live forward, a healthy /api/health on the field's mobile link took 0.35 s
+    // to 0.72 s — and one lost retransmission is seconds, not milliseconds. The old
+    // 3 s deadline with a 2 s per-request timeout read such a wire as a dead far side
+    // and closed the listener under it, which the window saw as "Connection lost".
+    const HEAL_PROBE_MS = 5000;
+    const HEAL_REQUEST_MS = 4000;
+    // The re-ask that stands between a failed poll and a CLOSED listener. It is
+    // deliberately longer than the poll that failed: everything that failed with
+    // "timeout" is asked again with time to answer, and only a listener that is not
+    // there at all (a refusal: nothing is bound) is re-opened without waiting.
+    const HEAL_PATIENT_MS = 7000;
+    const HEAL_PATIENT_REQUEST_MS = 5000;
+    // The far side's own verdict travels over exec. It must not outlast the tick
+    // that asked it: an exec on a dead wire used to sit on remoteExec's 60 s default
+    // (two of them = the 2 minutes the field log shows between "backend unreachable"
+    // and the teardown it caused).
+    const HEAL_EXEC_MS = 12000;
+    async function collectRemoteDiagnostics() {
+        try {
+            const r = await remoteExec("echo '--- server log ---'; tail -30 /tmp/clutch-server.log 2>/dev/null; " +
+                "echo '--- ps ---'; ps aux | grep -E '[a]gent' | head -5; " +
+                "echo '--- dmesg segfault ---'; (dmesg 2>/dev/null | grep -iE 'segfault|python3' | tail -3) || echo '(dmesg needs root)'");
+            tunnelLog("[heal] remote diagnostics:\n" + (r.stdout || "").slice(0, 1500));
+        }
+        catch (e) {
+            tunnelLog("[heal] diagnostics failed: " + e.message);
+        }
+    }
+    async function restartRemoteServer() {
+        if (!state.sshClient || !state.lastStrategy || !state.lastHome)
+            return false;
+        tunnelLog("[heal] restarting remote server");
+        // stopServer proves the port came free: a restart that only *tries* to kill
+        // the old process reports "recovered" against the survivor that made the
+        // heal necessary, since the survivor is what answers the health poll.
+        const stopped = await stopServer(state.lastProbe || {}, state.lastStrategy);
+        if (!stopped.ok) {
+            tunnelLog(`[heal] port ${REMOTE_API_PORT} still held after the stop:\n` + stopped.diag);
+            return false;
+        }
+        await remoteExec(startCommand(state.lastStrategy, state.lastHome));
+        const base = state.currentUrl;
+        if (!base)
+            return false;
+        return waitForServer(base + "/api/health", 20000);
+    }
+    // The health poll failed, but the far host reports its server SERVING (or
+    // cannot be asked at all): the casualty is THIS client's own forward — a stale
+    // local port after the phone froze in the background, a half-dead channel —
+    // and the far host keeps running, its sessions' runs included. Bounce the
+    // forward, on the SAME local port (state.currentUrl names it, and every window
+    // claim names state.currentUrl), and never touch the far side: a restart there
+    // is a pkill of every session child with it, which ends runs in flight.
+    //
+    // `ask` is the poll that got us here, and its KIND decides whether the listener
+    // may be closed at all. Closing it is destructive in a way the old code took for
+    // granted: every connection in flight (the window's event stream, its Stop
+    // button, a fetch mid-reply) is speaking through this listener, and a rebind to
+    // the same port is only safe because nothing alive is using it. So:
+    //
+    //   * "refused" — nothing is bound on this port. There is no listener to
+    //     preserve and no connection to break: re-open at once.
+    //   * anything else — a listener answered nothing, or the attempt failed some
+    //     other way. That is a QUESTION, not a verdict on the listener: ask once
+    //     more, patiently, and only close what is demonstrably not answering.
+    async function reopenForward(ask) {
+        const m = /^http:\/\/127\.0\.0\.1:(\d+)$/.exec(state.currentUrl || "");
+        const localPort = m ? Number(m[1]) : 0;
+        if (!localPort || !state.sshClient)
+            return false;
+        if (!(ask && ask.kind === "refused")) {
+            if (await waitForServer(state.currentUrl + "/api/health", HEAL_PATIENT_MS, HEAL_PATIENT_REQUEST_MS)) {
+                tunnelLog("[heal] the forward answered a patient ask; nothing to rebind");
+                return true;
+            }
+        }
+        const old = state.localSrv;
         state.localSrv = null;
-    }
-    for (const srv of state.sessionForwards) {
+        if (old) {
+            try {
+                old.close();
+            }
+            catch (e) {
+                /* already closed */
+            }
+        }
         try {
-            srv.close();
+            state.localSrv = forwardServer(REMOTE_API_PORT);
+            await listen(state.localSrv, localPort);
         }
         catch (e) {
-            /* already closed */
+            tunnelLog("[heal] forward re-open failed: " + ((e && e.message) || e));
+            state.localSrv = null;
+            return false;
+        }
+        tunnelLog(`[phase] local forward rebound 127.0.0.1:${localPort} -> remote 127.0.0.1:${REMOTE_API_PORT}`);
+        // the same patience after the rebind: the fresh listener has to dial the far
+        // side through the same wire, and a 3 s verdict on it re-opened the very
+        // "cannot reach a far side that is still serving" teardown this exists to end
+        return waitForServer(state.currentUrl + "/api/health", HEAL_PATIENT_MS, HEAL_PATIENT_REQUEST_MS);
+    }
+    // One heal tick: a failed poll is a QUESTION, not a verdict. It travels this
+    // client's own forward to the far host, so "no answer" can mean three very
+    // different things: the far server died, this client's forward died (a phone
+    // that froze in the background comes back to stale local ports while the far
+    // host never noticed), or the wire died. Only the first is answered by
+    // restarting the far server — and that restart pkills every session child
+    // with it, which over a merely stale forward killed runs in flight and left
+    // the run's own record saying "the host released this session while the run
+    // was in flight". So the far host is asked about ITSELF first, over the exec
+    // channel (a second path the failed forward does not share), and a far host
+    // that answers is never touched.
+    //
+    // `healOnce` awaits work on a wire that may already be gone, so it can REJECT
+    // (ssh2's exec throws 'Not connected' inside remoteExec's promise). Under a
+    // bare `setInterval` that rejection went nowhere: no teardown, no notification,
+    // and the window kept the dead session URL right up to its next "Failed to
+    // fetch". Whatever happens in here, the renderer is told.
+    //
+    // What it is NOT is a verdict on one bad round. A round that never suspected the
+    // far host ("the forward is the dead thing", or the exec channel faltering under
+    // a radio that just went away) is asked once more before anything is announced:
+    // a blip that is over a second later must not cost the user a teardown, a dialog
+    // and a whole reconnect. The wait is the FIRST step of the ladder the rest of the
+    // client redials on (js/conn-lost.js CONN_LOST_BACKOFF_MS[0] = 1s, the LLM client,
+    // the ssh hop), so the ends agree on what a first retry means. The second round
+    // is the last: whatever it says, the renderer is told.
+    const HEAL_RETRY_MS = 1000;
+    async function healOnce() {
+        if (!state.sshClient || !state.currentUrl)
+            return;
+        // ONE round at a time. A round is several questions over a wire that is
+        // already suspect, so it can easily outlive HEAL_INTERVAL_MS and the timer
+        // ticks into a round that is still asking. Two rounds then judge the same
+        // forward, both find it bad, both bounce it — and the loser tears down the hop
+        // the winner just repaired. The field log shows exactly that: duplicated
+        // "[heal] far side reports SERVING" 3 ms apart, duplicated ssh exec probes, and
+        // a teardown that reached a window whose streams were healthy.
+        if (state.healing) {
+            tunnelLog("[heal] a round is still asking; this tick is skipped");
+            return;
+        }
+        const ticket = { hop: state.sshClient };
+        state.healing = ticket;
+        try {
+            let round = await healRound();
+            if (round.why && !round.remoteTouched) {
+                tunnelLog(`[heal] ${round.why}; one more tick in ${HEAL_RETRY_MS}ms`);
+                await new Promise((r) => setTimeout(r, HEAL_RETRY_MS));
+                // the wait may have outlived the tunnel (a teardown, or a fresh connect that
+                // took over): there is nothing left to heal and nothing to announce
+                if (!state.sshClient || !state.currentUrl)
+                    return;
+                round = await healRound();
+            }
+            if (!round.why)
+                return;
+            // Whatever this round judged, it judged THIS hop. A different client here is
+            // a hop that was replaced while the round was asking (a teardown, a fresh
+            // connect): its verdict is about a wire nobody is using, and acting on it
+            // would tear down the connection the user just got back.
+            if (state.sshClient !== ticket.hop) {
+                tunnelLog("[heal] the hop changed while this round was asking; verdict dropped");
+                return;
+            }
+            tunnelLog("[heal] " + round.why + "; collecting diagnostics + tearing down");
+            await collectRemoteDiagnostics();
+            if (state.sshClient !== ticket.hop || !state.currentUrl)
+                return;
+            // notify: this teardown is not the renderer's own. stopTunnel nulls
+            // state.sshClient before end(), so the ssh 'end' handler is suppressed by its
+            // currency guard and would never tell anyone: without the flag the
+            // renderer keeps a dead session URL and its Stop button posts into it.
+            await stopTunnel(true); // onEnd -> renderer raises the reconnect dialog
+        }
+        finally {
+            if (state.healing === ticket)
+                state.healing = null;
         }
     }
-    state.sessionForwards = new Set();
-    // null the global before end() so a stale 'end' cannot clear a newer client
-    const cur = state.sshClient;
-    if (cur) {
-        state.sshClient = null;
-        cur.end();
-    }
-    state.target = null; // the hop's host dies with the hop
-    state.currentUrl = null;
-    if (state.sftpHandle) {
-        state.sftpHandle = null;
-    }
-    stopExecBridge();
-    // intentional disconnects are caller-managed; an unexpected death (the ssh
-    // 'end' event) and a teardown the caller flags both notify
-    if (notify)
-        notifyEnd();
-}
-function notifyEnd() {
-    if (state.wasDisconnected)
-        return; // both stopTunnel and the ssh 'end' event fire; emit once
-    state.wasDisconnected = true;
-    for (const cb of state.endListeners) {
+    // One round of the question above, with its own verdict: `why` is null when the
+    // session answers again through a forward that is up, and the sentence that says
+    // what was wrong when it does not. `remoteTouched` says whether this round ran the
+    // far server's OWN restart — the one move here that ends runs in flight, and
+    // therefore the one that is not worth repeating on a hunch (see healOnce).
+    async function healRound() {
+        let why = null;
+        let remoteTouched = false;
         try {
-            cb();
+            const ask = await probeServer(state.currentUrl + "/api/health", HEAL_PROBE_MS, HEAL_REQUEST_MS);
+            if (ask.up)
+                return { why: null, remoteTouched };
+            tunnelLog(`[heal] backend unreachable through the live tunnel (${ask.kind})`);
+            // the far host's own verdict about its port: DOWN (nobody), WEDGED (bound,
+            // silent), SERVING (answers) or UNMEASURABLE (no way to look) — asked
+            // over exec, never over the forward that just failed. Bounded: the far side
+            // may be unreachable precisely because the wire is, and an exec with no clock
+            // of its own held this round open for minutes.
+            const verdict = await remoteServingState(state.lastProbe || {}, HEAL_EXEC_MS);
+            tunnelLog(`[heal] far side reports ${verdict}`);
+            if (verdict === "SERVING" || verdict === "UNMEASURABLE") {
+                // answering (or unaskable — a far host whose answer we cannot hear is
+                // not a dead one, and only a proven-dead one justifies replacing): the
+                // forward is the dead thing
+                const ok = await reopenForward(ask);
+                if (ok) {
+                    tunnelLog("[heal] forward rebound; backend recovered");
+                    return { why: null, remoteTouched };
+                }
+                // the hop can no longer reach a far side that keeps serving — end the
+                // tunnel and let the re-connect re-claim the same remote sessions
+                why = "the tunnel cannot reach a far side that is still serving";
+            }
+            else {
+                // DOWN (nothing is listening) or WEDGED (bound, not answering): the far
+                // server itself is broken, and replacing it is the only way back
+                remoteTouched = true;
+                const ok = await restartRemoteServer();
+                if (ok) {
+                    tunnelLog("[heal] backend recovered");
+                    return { why: null, remoteTouched };
+                }
+                why = "the restart did not recover";
+            }
         }
         catch (e) {
-            /* listener errors are non-fatal */
+            why = "the tunnel could not be used (" + ((e && e.message) || e) + ")";
+        }
+        return { why, remoteTouched };
+    }
+    function startHealing() {
+        stopHealing();
+        // A new hop is a new question: a round still asking about the previous wire
+        // must not hold this hop's healing back for the length of its own clocks. Its
+        // verdict is dropped by healOnce's hop check, so abandoning it here is safe.
+        state.healing = null;
+        state.healTimer = setInterval(() => {
+            // the timer is the caller of last resort: a rejection here has no one else
+            healOnce().catch((e) => tunnelLog("[heal] tick failed: " + ((e && e.message) || e)));
+        }, HEAL_INTERVAL_MS);
+    }
+    function stopHealing() {
+        if (state.healTimer) {
+            clearInterval(state.healTimer);
+            state.healTimer = null;
         }
     }
-}
-function onTunnelEnd(cb) {
-    state.endListeners.add(cb);
-    return () => state.endListeners.delete(cb);
-}
-function tunnelStatus() {
     return {
-        active: Boolean(state.sshClient),
-        url: state.currentUrl,
-        // WHICH host the live hop is for. Without it the page can only ask "is
-        // anything up?", and a hop to another host answering that question is how a
-        // window ends up ticked as connected over somebody else's file system (see
-        // tunnel-connect's reuse gate). It is also what lets a connect that lost the
-        // wire to a concurrent attempt tell "that attempt landed for ME" from
-        // "something else is up".
-        target: state.target ? { host: state.target.host, user: state.target.user, port: state.target.port } : null,
-        // exec bridge URL for the local agent's SshTransport; null with no live tunnel
-        execBridge: state.sshClient && state.execBridgePort ? "http://127.0.0.1:" + state.execBridgePort : null,
+        stopTunnel,
+        notifyEnd,
+        onTunnelEnd,
+        tunnelStatus,
+        openSessionForward,
+        reopenForward,
+        restartRemoteServer,
+        healOnce,
+        startHealing,
+        stopHealing,
     };
 }
-// ---- per-window session forwards ----
-// Each window gets its own forward to its session child's port; all die with the tunnel.
-// A local listener whose connections are piped through the live ssh client to
-// ONE port on the far host. Both forwards this module owns are built from it:
-// the supervisor's API (establishForwardAndHealth, reopenForward) and each
-// window's session (below) — so "the forward died" and "the far side died"
-// are the same plumbing in both directions of the story.
-function forwardServer(remotePort) {
-    return net.createServer((sock) => {
-        if (!state.sshClient)
-            return sock.destroy();
-        // ssh2 throws synchronously on a client whose socket is already gone
-        // ("Not connected"); a request racing the teardown must fail its own
-        // socket, not escape this handler and hang until the browser gives up
-        try {
-            state.sshClient.forwardOut("127.0.0.1", 0, "127.0.0.1", remotePort, (err, stream) => {
-                if (err) {
-                    tunnelLog("[forward] forwardOut failed: " + (err && err.message));
-                    sock.destroy();
-                    return;
-                }
-                sock.pipe(stream).pipe(sock);
-            });
-        }
-        catch (e) {
-            tunnelLog("[forward] forwardOut threw: " + ((e && e.message) || e));
-            sock.destroy();
-        }
-    });
-}
-function openSessionForward(remotePort) {
-    return new Promise((resolve, reject) => {
-        freePort().then((localPort) => {
-            const srv = forwardServer(remotePort);
-            listen(srv, localPort).then(() => {
-                state.sessionForwards.add(srv);
-                tunnelLog(`[session] forward 127.0.0.1:${localPort} -> remote :${remotePort}`);
-                resolve({
-                    localPort,
-                    close: () => {
-                        state.sessionForwards.delete(srv);
-                        try {
-                            srv.close();
-                        }
-                        catch (e) {
-                            /* already closed */
-                        }
-                    },
-                });
-            }, reject);
-        }, reject);
-    });
-}
-// ---- dead-backend self-healing ----
-// Health-check the forward, restart the backend via the tunnel, else tear down.
-// The clocks of one heal round, all of them wider than the connect's, because
-// this is not a cold dial: it is a QUESTION to a far side that was serving until
-// a moment ago, on a wire that just failed to carry an answer. Measured through
-// the live forward, a healthy /api/health on the field's mobile link took 0.35 s
-// to 0.72 s — and one lost retransmission is seconds, not milliseconds. The old
-// 3 s deadline with a 2 s per-request timeout read such a wire as a dead far side
-// and closed the listener under it, which the window saw as "Connection lost".
-const HEAL_PROBE_MS = 5000;
-const HEAL_REQUEST_MS = 4000;
-// The re-ask that stands between a failed poll and a CLOSED listener. It is
-// deliberately longer than the poll that failed: everything that failed with
-// "timeout" is asked again with time to answer, and only a listener that is not
-// there at all (a refusal: nothing is bound) is re-opened without waiting.
-const HEAL_PATIENT_MS = 7000;
-const HEAL_PATIENT_REQUEST_MS = 5000;
-// The far side's own verdict travels over exec. It must not outlast the tick
-// that asked it: an exec on a dead wire used to sit on remoteExec's 60 s default
-// (two of them = the 2 minutes the field log shows between "backend unreachable"
-// and the teardown it caused).
-const HEAL_EXEC_MS = 12000;
-async function collectRemoteDiagnostics() {
-    try {
-        const r = await remoteExec("echo '--- server log ---'; tail -30 /tmp/clutch-server.log 2>/dev/null; " +
-            "echo '--- ps ---'; ps aux | grep -E '[a]gent' | head -5; " +
-            "echo '--- dmesg segfault ---'; (dmesg 2>/dev/null | grep -iE 'segfault|python3' | tail -3) || echo '(dmesg needs root)'");
-        tunnelLog("[heal] remote diagnostics:\n" + (r.stdout || "").slice(0, 1500));
-    }
-    catch (e) {
-        tunnelLog("[heal] diagnostics failed: " + e.message);
-    }
-}
-async function restartRemoteServer() {
-    if (!state.sshClient || !state.lastStrategy || !state.lastHome)
-        return false;
-    tunnelLog("[heal] restarting remote server");
-    // stopServer proves the port came free: a restart that only *tries* to kill
-    // the old process reports "recovered" against the survivor that made the
-    // heal necessary, since the survivor is what answers the health poll.
-    const stopped = await stopServer(state.lastProbe || {}, state.lastStrategy);
-    if (!stopped.ok) {
-        tunnelLog(`[heal] port ${REMOTE_API_PORT} still held after the stop:\n` + stopped.diag);
-        return false;
-    }
-    await remoteExec(startCommand(state.lastStrategy, state.lastHome));
-    const base = state.currentUrl;
-    if (!base)
-        return false;
-    return waitForServer(base + "/api/health", 20000);
-}
-// The health poll failed, but the far host reports its server SERVING (or
-// cannot be asked at all): the casualty is THIS client's own forward — a stale
-// local port after the phone froze in the background, a half-dead channel —
-// and the far host keeps running, its sessions' runs included. Bounce the
-// forward, on the SAME local port (state.currentUrl names it, and every window
-// claim names state.currentUrl), and never touch the far side: a restart there
-// is a pkill of every session child with it, which ends runs in flight.
-//
-// `ask` is the poll that got us here, and its KIND decides whether the listener
-// may be closed at all. Closing it is destructive in a way the old code took for
-// granted: every connection in flight (the window's event stream, its Stop
-// button, a fetch mid-reply) is speaking through this listener, and a rebind to
-// the same port is only safe because nothing alive is using it. So:
-//
-//   * "refused" — nothing is bound on this port. There is no listener to
-//     preserve and no connection to break: re-open at once.
-//   * anything else — a listener answered nothing, or the attempt failed some
-//     other way. That is a QUESTION, not a verdict on the listener: ask once
-//     more, patiently, and only close what is demonstrably not answering.
-async function reopenForward(ask) {
-    const m = /^http:\/\/127\.0\.0\.1:(\d+)$/.exec(state.currentUrl || "");
-    const localPort = m ? Number(m[1]) : 0;
-    if (!localPort || !state.sshClient)
-        return false;
-    if (!(ask && ask.kind === "refused")) {
-        if (await waitForServer(state.currentUrl + "/api/health", HEAL_PATIENT_MS, HEAL_PATIENT_REQUEST_MS)) {
-            tunnelLog("[heal] the forward answered a patient ask; nothing to rebind");
-            return true;
-        }
-    }
-    const old = state.localSrv;
-    state.localSrv = null;
-    if (old) {
-        try {
-            old.close();
-        }
-        catch (e) {
-            /* already closed */
-        }
-    }
-    try {
-        state.localSrv = forwardServer(REMOTE_API_PORT);
-        await listen(state.localSrv, localPort);
-    }
-    catch (e) {
-        tunnelLog("[heal] forward re-open failed: " + ((e && e.message) || e));
-        state.localSrv = null;
-        return false;
-    }
-    tunnelLog(`[phase] local forward rebound 127.0.0.1:${localPort} -> remote 127.0.0.1:${REMOTE_API_PORT}`);
-    // the same patience after the rebind: the fresh listener has to dial the far
-    // side through the same wire, and a 3 s verdict on it re-opened the very
-    // "cannot reach a far side that is still serving" teardown this exists to end
-    return waitForServer(state.currentUrl + "/api/health", HEAL_PATIENT_MS, HEAL_PATIENT_REQUEST_MS);
-}
-// One heal tick: a failed poll is a QUESTION, not a verdict. It travels this
-// client's own forward to the far host, so "no answer" can mean three very
-// different things: the far server died, this client's forward died (a phone
-// that froze in the background comes back to stale local ports while the far
-// host never noticed), or the wire died. Only the first is answered by
-// restarting the far server — and that restart pkills every session child
-// with it, which over a merely stale forward killed runs in flight and left
-// the run's own record saying "the host released this session while the run
-// was in flight". So the far host is asked about ITSELF first, over the exec
-// channel (a second path the failed forward does not share), and a far host
-// that answers is never touched.
-//
-// `healOnce` awaits work on a wire that may already be gone, so it can REJECT
-// (ssh2's exec throws 'Not connected' inside remoteExec's promise). Under a
-// bare `setInterval` that rejection went nowhere: no teardown, no notification,
-// and the window kept the dead session URL right up to its next "Failed to
-// fetch". Whatever happens in here, the renderer is told.
-//
-// What it is NOT is a verdict on one bad round. A round that never suspected the
-// far host ("the forward is the dead thing", or the exec channel faltering under
-// a radio that just went away) is asked once more before anything is announced:
-// a blip that is over a second later must not cost the user a teardown, a dialog
-// and a whole reconnect. The wait is the FIRST step of the ladder the rest of the
-// client redials on (js/conn-lost.js CONN_LOST_BACKOFF_MS[0] = 1s, the LLM client,
-// the ssh hop), so the ends agree on what a first retry means. The second round
-// is the last: whatever it says, the renderer is told.
-const HEAL_RETRY_MS = 1000;
-async function healOnce() {
-    if (!state.sshClient || !state.currentUrl)
-        return;
-    // ONE round at a time. A round is several questions over a wire that is
-    // already suspect, so it can easily outlive HEAL_INTERVAL_MS and the timer
-    // ticks into a round that is still asking. Two rounds then judge the same
-    // forward, both find it bad, both bounce it — and the loser tears down the hop
-    // the winner just repaired. The field log shows exactly that: duplicated
-    // "[heal] far side reports SERVING" 3 ms apart, duplicated ssh exec probes, and
-    // a teardown that reached a window whose streams were healthy.
-    if (state.healing) {
-        tunnelLog("[heal] a round is still asking; this tick is skipped");
-        return;
-    }
-    const ticket = { hop: state.sshClient };
-    state.healing = ticket;
-    try {
-        let round = await healRound();
-        if (round.why && !round.remoteTouched) {
-            tunnelLog(`[heal] ${round.why}; one more tick in ${HEAL_RETRY_MS}ms`);
-            await new Promise((r) => setTimeout(r, HEAL_RETRY_MS));
-            // the wait may have outlived the tunnel (a teardown, or a fresh connect that
-            // took over): there is nothing left to heal and nothing to announce
-            if (!state.sshClient || !state.currentUrl)
-                return;
-            round = await healRound();
-        }
-        if (!round.why)
-            return;
-        // Whatever this round judged, it judged THIS hop. A different client here is
-        // a hop that was replaced while the round was asking (a teardown, a fresh
-        // connect): its verdict is about a wire nobody is using, and acting on it
-        // would tear down the connection the user just got back.
-        if (state.sshClient !== ticket.hop) {
-            tunnelLog("[heal] the hop changed while this round was asking; verdict dropped");
-            return;
-        }
-        tunnelLog("[heal] " + round.why + "; collecting diagnostics + tearing down");
-        await collectRemoteDiagnostics();
-        if (state.sshClient !== ticket.hop || !state.currentUrl)
-            return;
-        // notify: this teardown is not the renderer's own. stopTunnel nulls
-        // state.sshClient before end(), so the ssh 'end' handler is suppressed by its
-        // currency guard and would never tell anyone: without the flag the
-        // renderer keeps a dead session URL and its Stop button posts into it.
-        await stopTunnel(true); // onEnd -> renderer raises the reconnect dialog
-    }
-    finally {
-        if (state.healing === ticket)
-            state.healing = null;
-    }
-}
-// One round of the question above, with its own verdict: `why` is null when the
-// session answers again through a forward that is up, and the sentence that says
-// what was wrong when it does not. `remoteTouched` says whether this round ran the
-// far server's OWN restart — the one move here that ends runs in flight, and
-// therefore the one that is not worth repeating on a hunch (see healOnce).
-async function healRound() {
-    let why = null;
-    let remoteTouched = false;
-    try {
-        const ask = await probeServer(state.currentUrl + "/api/health", HEAL_PROBE_MS, HEAL_REQUEST_MS);
-        if (ask.up)
-            return { why: null, remoteTouched };
-        tunnelLog(`[heal] backend unreachable through the live tunnel (${ask.kind})`);
-        // the far host's own verdict about its port: DOWN (nobody), WEDGED (bound,
-        // silent), SERVING (answers) or UNMEASURABLE (no way to look) — asked
-        // over exec, never over the forward that just failed. Bounded: the far side
-        // may be unreachable precisely because the wire is, and an exec with no clock
-        // of its own held this round open for minutes.
-        const verdict = await remoteServingState(state.lastProbe || {}, HEAL_EXEC_MS);
-        tunnelLog(`[heal] far side reports ${verdict}`);
-        if (verdict === "SERVING" || verdict === "UNMEASURABLE") {
-            // answering (or unaskable — a far host whose answer we cannot hear is
-            // not a dead one, and only a proven-dead one justifies replacing): the
-            // forward is the dead thing
-            const ok = await reopenForward(ask);
-            if (ok) {
-                tunnelLog("[heal] forward rebound; backend recovered");
-                return { why: null, remoteTouched };
-            }
-            // the hop can no longer reach a far side that keeps serving — end the
-            // tunnel and let the re-connect re-claim the same remote sessions
-            why = "the tunnel cannot reach a far side that is still serving";
-        }
-        else {
-            // DOWN (nothing is listening) or WEDGED (bound, not answering): the far
-            // server itself is broken, and replacing it is the only way back
-            remoteTouched = true;
-            const ok = await restartRemoteServer();
-            if (ok) {
-                tunnelLog("[heal] backend recovered");
-                return { why: null, remoteTouched };
-            }
-            why = "the restart did not recover";
-        }
-    }
-    catch (e) {
-        why = "the tunnel could not be used (" + ((e && e.message) || e) + ")";
-    }
-    return { why, remoteTouched };
-}
-function startHealing() {
-    stopHealing();
-    // A new hop is a new question: a round still asking about the previous wire
-    // must not hold this hop's healing back for the length of its own clocks. Its
-    // verdict is dropped by healOnce's hop check, so abandoning it here is safe.
-    state.healing = null;
-    state.healTimer = setInterval(() => {
-        // the timer is the caller of last resort: a rejection here has no one else
-        healOnce().catch((e) => tunnelLog("[heal] tick failed: " + ((e && e.message) || e)));
-    }, HEAL_INTERVAL_MS);
-}
-function stopHealing() {
-    if (state.healTimer) {
-        clearInterval(state.healTimer);
-        state.healTimer = null;
-    }
-}
-module.exports = {
-    stopTunnel,
-    notifyEnd,
-    onTunnelEnd,
-    tunnelStatus,
-    openSessionForward,
-    reopenForward,
-    restartRemoteServer,
-    healOnce,
-    startHealing,
-    stopHealing,
-};
+// The old direct-require names resolve against the primary tunnel; `attach` is
+// this module's own export (see tunnel-core's compatSurface).
+module.exports = require("./tunnel-core").compatSurface("lifecycle", [
+    "stopTunnel",
+    "notifyEnd",
+    "onTunnelEnd",
+    "tunnelStatus",
+    "openSessionForward",
+    "reopenForward",
+    "restartRemoteServer",
+    "healOnce",
+    "startHealing",
+    "stopHealing",
+], { attach });

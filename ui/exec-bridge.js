@@ -1,14 +1,40 @@
 // GENERATED FILE — do not edit; edit src/host/exec-bridge.ts and run `npm run build:host`.
-// source sha256: 04efd3564c9db37bcc9e24ad23e5caeaca1027a3a0f6bdab7e70d7e1fb52aaa7
+// source sha256: f52af487d4eeeff4735b5eceb671ebcaa13c47bf55ba0e93d6f185b43d3b338e
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-// Loopback HTTP bridge exposing the ssh2 tunnel's remoteExec to the local
-// Python agent (SshTransport). Lazy-require of ssh-tunnel breaks the cycle.
+// Loopback HTTP bridge exposing one tunnel's remoteExec to the local Python agent
+// (SshTransport): a POST /exec runs one command on the far side of THAT tunnel
+// and answers with its exit code and output.
+//
+// One bridge per tunnel, keyed by the tunnel's id. The port a session posts to
+// has to run its commands on the machine the session belongs to — with one
+// shared bridge, a window pinned to A would reach whichever hop happened to be
+// installed last. The bridge is handed the exec function it must call (its own
+// instance's remoteExec) instead of reaching back into the tunnel module, which
+// also removes the lazy require that used to exist only to break that cycle.
 const http = require("http");
-let server = null;
-function startExecBridge() {
-    server = http.createServer((req, res) => {
+// key -> { server, port, exec }. A key's row exists only while its server does;
+// stop removes it, so "is there a bridge" is one Map lookup.
+const bridges = new Map();
+function closeServer(entry) {
+    if (!entry || !entry.server)
+        return;
+    const srv = entry.server;
+    entry.server = null;
+    entry.port = null;
+    try {
+        srv.close();
+    }
+    catch (e) {
+        /* already closed */
+    }
+}
+function startExecBridge(key, exec) {
+    closeServer(bridges.get(key));
+    const entry = { server: null, port: null, exec };
+    bridges.set(key, entry);
+    entry.server = http.createServer((req, res) => {
         if (req.method !== "POST" || req.url !== "/exec") {
             res.writeHead(404).end("not found");
             return;
@@ -29,8 +55,7 @@ function startExecBridge() {
                 }
                 const timeoutMs = Number(body.timeout) || 60000;
                 const binary = !!body.binary;
-                const { remoteExec } = require("./ssh-tunnel");
-                const r = await remoteExec(command, timeoutMs, binary);
+                const r = await entry.exec(command, timeoutMs, binary);
                 if (binary) {
                     // base64 encoded CLIENT-side so the remote only needs an sshd shell
                     respond(200, { code: r.code, stdout_b64: r.stdout_b64 || "", stderr: r.stderr || "" });
@@ -46,13 +71,29 @@ function startExecBridge() {
         });
     });
     return new Promise((resolve) => {
-        server.listen(0, "127.0.0.1", () => resolve(server.address().port));
+        entry.server.listen(0, "127.0.0.1", () => {
+            entry.port = entry.server.address().port;
+            resolve(entry.port);
+        });
     });
 }
-function stopExecBridge() {
-    if (server) {
-        server.close();
-        server = null;
-    }
+function stopExecBridge(key) {
+    const entry = bridges.get(key);
+    if (!entry)
+        return;
+    bridges.delete(key);
+    closeServer(entry);
 }
-module.exports = { startExecBridge, stopExecBridge };
+// The bridge surface one bound tunnel works through, so a hop module calls
+// start()/stop() without knowing the key or the exec function.
+function execBridgeFor(key, exec) {
+    return {
+        start: () => startExecBridge(key, exec),
+        stop: () => stopExecBridge(key),
+        port: () => {
+            const entry = bridges.get(key);
+            return entry && entry.port != null ? entry.port : null;
+        },
+    };
+}
+module.exports = { startExecBridge, stopExecBridge, execBridgeFor };

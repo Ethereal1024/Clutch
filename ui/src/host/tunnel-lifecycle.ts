@@ -13,11 +13,22 @@
 // the end: the renderer must never keep posting into a port nobody serves.
 
 const net = require("net");
-const { state, tunnelLog, HEAL_INTERVAL_MS, REMOTE_API_PORT } = require("./tunnel-core");
+const { tunnelLog, HEAL_INTERVAL_MS, REMOTE_API_PORT } = require("./tunnel-core");
 const { freePort, listen, waitForServer, probeServer } = require("./tunnel-net");
-const { remoteExec } = require("./tunnel-remote");
-const { startCommand, stopServer, remoteServingState } = require("./tunnel-bootstrap");
-const { stopExecBridge } = require("./exec-bridge");
+
+// ---- the instance ----
+// One bound tunnel's teardown, session forwards and healing. The state, the wire
+// and the far side's bootstrap all come from `ctx`, and the exec bridge is this
+// hop's own row (exec-bridge keys it by tunnel id) — so a heal on one tunnel can
+// never touch another's server or another's port.
+function attach(ctx) {
+// (the body below keeps the module's own indentation: this move lifted it whole,
+// and re-indenting 300-800 lines would have rewritten a diff whose point is that
+// nothing in them changed)
+const state = ctx.st;
+const { remoteExec } = ctx.remote;
+const { startCommand, stopServer, remoteServingState } = ctx.bootstrap;
+const stopExecBridge = () => ctx.bridge.stop();
 
 // `notify` is for teardowns the RENDERER did not ask for. Its own disconnect
 // (the SSH picker, window close) is caller-managed: the renderer clears its
@@ -86,8 +97,11 @@ function tunnelStatus() {
     // wire to a concurrent attempt tell "that attempt landed for ME" from
     // "something else is up".
     target: state.target ? { host: state.target.host, user: state.target.user, port: state.target.port } : null,
-    // exec bridge URL for the local agent's SshTransport; null with no live tunnel
-    execBridge: state.sshClient && state.execBridgePort ? "http://127.0.0.1:" + state.execBridgePort : null,
+    // exec bridge URL for the local agent's SshTransport; null with no live tunnel.
+    // Asked of the bridge itself: it owns its port, and a rebind replaces the
+    // server rather than rewriting a field the status would have to remember to
+    // read.
+    execBridge: state.sshClient && ctx.bridge.port() ? "http://127.0.0.1:" + ctx.bridge.port() : null,
   };
 }
 
@@ -397,7 +411,7 @@ function stopHealing() {
   }
 }
 
-module.exports = {
+return {
   stopTunnel,
   notifyEnd,
   onTunnelEnd,
@@ -409,3 +423,23 @@ module.exports = {
   startHealing,
   stopHealing,
 };
+}
+
+// The old direct-require names resolve against the primary tunnel; `attach` is
+// this module's own export (see tunnel-core's compatSurface).
+module.exports = require("./tunnel-core").compatSurface(
+  "lifecycle",
+  [
+    "stopTunnel",
+    "notifyEnd",
+    "onTunnelEnd",
+    "tunnelStatus",
+    "openSessionForward",
+    "reopenForward",
+    "restartRemoteServer",
+    "healOnce",
+    "startHealing",
+    "stopHealing",
+  ],
+  { attach },
+);
