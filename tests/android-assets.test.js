@@ -75,6 +75,12 @@ function main() {
   check(unnamed.length === 0,
     "every useUI() name in android/host is in UI_NODE" + (unnamed.length ? `: missing ${unnamed.join(", ")}` : ""));
   check(named.has("components-view.js"), "the plugin tab's backend is one of the names the host resolves");
+  // the turn itself is loaded lazily (first clutchRun.start, not boot), but
+  // through the SAME resolver: that is what makes rule 1 above demand the loop's
+  // whole tree. Reached by any other route — a path built by hand, a require of
+  // a sibling — nothing here would notice it leaving the phone, and the phone
+  // answers every session with "the run loop is not available in this build".
+  check(named.has("run-session.js"), "the phone's run loop is resolved through useUI()");
 
   // 2. …and so is everything those modules require, transitively: the phone has
   //    no repo beside it to fall back on

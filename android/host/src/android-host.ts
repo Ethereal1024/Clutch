@@ -57,19 +57,20 @@ const {
 } = useUI("transport_defaults.json");
 // the composition root for one session's run loop (P1-4) is resolved lazily
 // so it is only loaded when the renderer calls clutchRun.start for the first
-// time. This keeps UI_NODE in sync-android-host.sh minimal: the run loop's
-// module tree (run.js / run-host.js / log-client.js / …) is added there when
-// the phone is ready to drive the loop (P1-6). Until then, a call to start()
-// before the modules are present returns {ok:false} with a clear message.
+// time — the loop's module tree (run.js / run-host.js / log-client.js / …) is
+// several files the host needs for nothing else, and loading them at boot would
+// pay for every one of them before the first turn.
 //
-// NOTE: intentionally NOT called through useUI() so tests/android-assets.test.js
-// does not demand run-session.js be in UI_NODE before the phone is ready for it.
+// It goes through useUI() like every other shared module, on purpose: the whole
+// tree therefore appears in tests/android-assets.test.js's useUI() walk, which
+// demands every file of it be in UI_NODE. That walk is what catches a tree that
+// ships to the desktop but not to the phone — the failure mode here is a phone
+// that boots, binds the bridge and answers EVERY turn with this module missing.
+// The catch stays: a build that somehow lacks the module answers start() with
+// the sentence below instead of a "Cannot find module" nobody can act on.
 function loadSessionModule() {
   try {
-    const local = path.join(__dirname, "ui", "run-session.js");
-    const fallback = path.join(__dirname, "..", "..", "ui", "run-session.js");
-    const resolved = require("fs").existsSync(local) ? local : fallback;
-    return require(resolved);
+    return useUI("run-session.js");
   } catch (e) {
     return null;
   }

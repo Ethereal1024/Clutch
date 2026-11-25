@@ -38,7 +38,16 @@ UI_ASSETS=$ASSETS/ui
 # the install does not — the page hands the path to the Kotlin shell instead. The
 # desktop-only installer (ui/update-install.js) is deliberately NOT copied: it
 # requires Electron-free nothing, but nothing on this side could run it either.
-UI_NODE="compaction.js components-view.js components.js components.mirrors.json context.js event-text.js exec-bridge.js host-core.js llm-proxy.js mirrors.js net-fetch.js plugin-child.js plugin-host.js plugin-link.js plugin-server.js plugin-worker.js procstat.js prompt.js server-bundle.js settings-mirror.js ssh-tunnel.js tunnel-core.js tunnel-net.js tunnel-remote.js tunnel-bootstrap.js tunnel-lifecycle.js tunnel-connect.js tunnel-ladder.js supervisor-client.js system-ca.js transport_defaults.json update-core.js update-service.js"
+#
+# run-session.js and the tree it requires (run.js, run-host.js, run-state.js,
+# log-client.js, tool-client.js, tool-decl.js, llm-client.js) are the turn itself:
+# the phone drives the loop in the app process (android/host/android-host.js's
+# clutchRun, resolved through useUI("run-session.js")), so a phone shipped without
+# them boots, binds the bridge, and answers EVERY session with "run failed: the
+# run loop is not available in this build" — the host's own sentence for a
+# module that is not there. tests/android-assets.test.js walks this list, so a
+# new require inside the loop has to be added here in the same commit.
+UI_NODE="compaction.js components-view.js components.js components.mirrors.json context.js event-text.js exec-bridge.js host-core.js llm-client.js llm-proxy.js log-client.js mirrors.js net-fetch.js plugin-child.js plugin-host.js plugin-link.js plugin-server.js plugin-worker.js procstat.js prompt.js run-host.js run-session.js run-state.js run.js server-bundle.js settings-mirror.js ssh-tunnel.js supervisor-client.js system-ca.js tool-client.js tool-decl.js transport_defaults.json tunnel-core.js tunnel-net.js tunnel-remote.js tunnel-bootstrap.js tunnel-lifecycle.js tunnel-connect.js tunnel-ladder.js update-core.js update-service.js"
 
 # 1. nodejs-project = android/host + ui/ subset + production node_modules
 rm -rf "$NODEJS_PROJECT"
