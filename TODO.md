@@ -765,6 +765,23 @@ CLUTCH_E2E_HOST=… CLUTCH_E2E_USER=… CLUTCH_E2E_PASS=… node tests/remote-bo
   - **`runs-on: ubuntu-22.04`，不是 `-latest`（实测，不是预防）**：`actions/setup-python@v5` 在
     `ubuntu-latest`（24.04）的工具缓存里**没有 3.8**，第一次跑这个 job 就死在 "Set up Python"，
     一个测试都没跑——起不来的 leg 不是地板门。22.04 是还带 3.8 的最新镜像。
+- **门自己在发版那一刻红了（`feature_version` 不是完整的 3.8 模拟器）**：tag `v0.2.2` 的 release run
+  `45565684722`，`verify` 死在 "Verify the declared python floor"——而**树是干净的，红的是门自己的夹具**。
+  实测根因：`ast.parse(..., feature_version=(3, 8))` 对括号式 `with (a as b, c as d):`，
+  在 3.10 上**按名字拒绝**（"parenthesized context managers"），在 **3.12.14 上直接接受**。
+  而 `verify` 跑的就是 runner 的 3.12 —— 于是"用 3.9+ 语法能过静态门"这个洞是**真开着**的，
+  只是恰好被夹具自己撞破了。这正是 `tests/server_test.py:191` 那种事故的形状，静态门必须能自己看见。
+  - 修法：新增 `parenthesized_with_problems()`，token 扫描 `with (` 且括号组里**顶层**有 `,` 或
+    `as` —— 那是"上下文管理器列表"（3.9+）而不是一个带括号的表达式（`with (a if b else c):` 合法，
+    不动）。解析器已经拒掉的文件跳过，免得一份错报两次。`check_syntax` = 语法扫描 + 这一步。
+  - 夹具那侧同时收紧了：`SYNTAX_FIXTURES` 现在走**文件真正走的那两个函数**（`syntax_problems` +
+    `parenthesized_with_problems`），并且写进真临时文件——之前只喂 `ast.parse`，于是"夹具绿、树红"。
+  - 第三个坑：在**3.8 本尊**上跑这个门，两条夹具只得到 `invalid syntax`（3.8 当然不知道该形状叫什么
+    名字），原来的"必须出现 `parenthesized`/`match` 字样"会误红。现在按解释器问问题：`at_floor`
+    （`sys.version_info[:2] <= FLOOR`）时"3.8 的解析器拒了"就是全部证据；在新解释器上才要求点名——
+    那儿的 `feature_version` 只是模拟，名字是"它看见了正确形状"的唯一凭据。
+  - 三个解释器（3.8.10 / 3.10.12 / 3.12.14）都绿。教训记下来：**地板门的夹具要在它实际运行的那个
+    解释器上测，也要在地板上测**——只在一侧绿的门不是门，是运气。
 - **真跑 3.8 抓出来的（静态门漏掉或只报了一部分的）**：`agent/tools/gates.py:39` 的 PEP 604 **别名**
   （运行时不求值，`GuardImpl = Foo | None` 在 3.8 直接 TypeError）；`agent/tools/settings.py:65` 与
   `tests/settings_test.py:136,194` 的 dict 合并 `|`（PEP 584）；`tests/server_test.py:191` 的括号式

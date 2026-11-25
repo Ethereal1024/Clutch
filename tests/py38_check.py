@@ -42,7 +42,9 @@ Checks (offline, stdlib only, and itself 3.8-clean — it runs on the floor as
 well as on a dev box):
   1. every shipped source parses under the floor's own grammar
      (`ast.parse(..., feature_version=FLOOR)`), which is what catches syntax
-     additions a newer interpreter accepts on both sides of the AST
+     additions a newer interpreter accepts on both sides of the AST — plus a
+     token scan for the one shape that `feature_version` stopped refusing on
+     3.12, a parenthesized `with (a, b):` (see the note below)
   2. nothing an IMPORT evaluates is newer than the floor: PEP 585/604 written in
      a signature of a module without `from __future__ import annotations`, and
      the same written in a module-level alias, which the future import never
@@ -66,14 +68,30 @@ module only claims the shapes PEP 604 is actually written in — `X | None`, or 
 builtin on one side. This module is the cheap net that also runs in `verify` on
 3.12; the authority is `verify-py38`.
 
+`feature_version` is an EMULATION, and it is not complete on every newer
+interpreter. Measured here: on 3.10, `ast.parse(source, feature_version=(3, 8))`
+refuses a parenthesized `with` by name; on 3.12.14 it ACCEPTS the same source.
+The `verify` job runs this module on the runner's 3.12, so the parse check alone
+went green on a shape 3.8 cannot read — the job failed on this module's own
+fixture while the tree was clean, which is the good way for a gate to be wrong
+and exactly how this hole was found. Hence `parenthesized_with_problems()`: a
+token scan for a `with (` whose group holds a top-level `,` or `as`, i.e. the
+parentheses are a context-manager LIST (3.9+) and not one grouped expression.
+Every other shape in `SYNTAX_FIXTURES` is still read by the parser, and
+`check_regression` demands the named phrase from it whenever the checker is not
+itself running on the floor.
+
 Run: python3 -m tests.py38_check
 """
 
 from __future__ import annotations
 
 import ast
+import io
 import re
 import sys
+import tempfile
+import tokenize
 from pathlib import Path
 
 from tests.testsupport import collecting_check
@@ -165,7 +183,14 @@ def sources() -> list[Path]:
 
 
 def rel(path: Path) -> str:
-    return str(path.relative_to(ROOT))
+    """The path a report talks in: relative to the tree, or as given.
+
+    A fixture lives in a temporary directory, and a report about it must not
+    raise instead of saying what it found."""
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
 
 
 def parse(path: Path) -> tuple[str, ast.Module]:
@@ -199,6 +224,68 @@ def syntax_problems(paths: list[Path]) -> list[str]:
             ast.parse(text, filename=str(path), feature_version=FLOOR)
         except SyntaxError as exc:
             out.append("%s:%s: %s" % (rel(path), exc.lineno, exc.msg))
+    return out
+
+
+def parenthesized_with_problems(paths: list[Path]) -> list[str]:
+    """A `with (` whose parentheses hold a LIST of context managers — 3.9+.
+
+    `feature_version` was believed to be enough for this, and on 3.10 it is: it
+    refuses the shape by name. It is NOT on 3.12, which accepts it (measured —
+    the `verify` job went red on this module's own fixture, not on the tree),
+    so on the interpreter the cheap gate actually runs under, the parse check
+    cannot see it. This is that half.
+
+    Two shapes reach 3.8 and both are wrong there:
+      * `with (a as b, c as d):` — a syntax error on 3.8 (`as` is not allowed
+        inside those parentheses), so 3.12-only code would slip in unnoticed
+      * `with (a, b):` — PARSES on 3.8 as ONE with-item whose expression is a
+        tuple, and dies at the first iteration with `AttributeError: __enter__`;
+        this is the shape that shipped in tests/server_test.py
+    Both put a top-level `,` or `as` inside the group, which is the test.
+    `with (a if b else c):` — one parenthesized expression — has neither, and is
+    legal on both sides, so it is left alone.
+
+    Files the parser already rejected are skipped: their own error is the report.
+    """
+    out: list[str] = []
+    for path in paths:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            ast.parse(text, filename=str(path), feature_version=FLOOR)
+        except SyntaxError:
+            continue                      # already named by syntax_problems
+        try:
+            tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+        except (tokenize.TokenError, IndentationError):
+            continue                      # a lexer verdict, not this scan's
+        flat = [t for t in tokens if t.type not in (tokenize.COMMENT, tokenize.NL,
+                                                    tokenize.ENCODING)]
+        for i, tok in enumerate(flat):
+            if tok.type != tokenize.NAME or tok.string != "with":
+                continue                  # `with` is a keyword; no other reading
+            j = i + 1
+            if j >= len(flat) or flat[j].string != "(":
+                continue
+            depth = 0
+            why = None
+            for t in flat[j:]:
+                if t.type == tokenize.OP and t.string in "([{":
+                    depth += 1
+                elif t.type == tokenize.OP and t.string in ")]}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                elif depth == 1:
+                    if t.type == tokenize.OP and t.string == ",":
+                        why = "a list of context managers"
+                        break
+                    if t.type == tokenize.NAME and t.string == "as":
+                        why = "an `as` inside the parentheses"
+                        break
+            if why:
+                out.append("%s:%s: a parenthesized `with` holding %s is 3.9+"
+                           % (rel(path), tok.start[0], why))
     return out
 
 
@@ -485,7 +572,7 @@ def needs_of(body: str) -> list[str]:
 def check_syntax() -> None:
     paths = sources()
     check(len(paths) > 100, "the scan found the tree's python (%d files)" % len(paths))
-    problems = syntax_problems(paths)
+    problems = syntax_problems(paths) + parenthesized_with_problems(paths)
     check(not problems,
           "every shipped source parses as %s%s" % (FLOOR_VERSION,
                                                    "" if not problems else ": " + "; ".join(problems)))
@@ -535,30 +622,47 @@ FIXTURES = (
     ("an unguarded tomllib import", "import tomllib\n", "tomllib"),
 )
 
-# Syntax the floor cannot parse at all. A newer interpreter has to refuse it BY
-# NAME (`feature_version` doing the work); ON the floor it simply does not parse,
-# and "invalid syntax" is that interpreter's whole verdict — which is also why
-# this module can run there at all.
+# Syntax the floor cannot parse at all, and the shapes a NEWER interpreter's
+# `feature_version` may or may not refuse for it. So each one is run through the
+# gate a file goes through (`syntax_problems` + `parenthesized_with_problems`),
+# never through `ast.parse` alone: the parenthesized `with` is exactly the shape
+# 3.12's parser accepts with feature_version=(3, 8), so an ast-only fixture was
+# green on the job that ships while the tree it guards was not.
 SYNTAX_FIXTURES = (
-    ("a parenthesized `with`", "with (open('a') as a, open('b') as b):\n    pass\n",
-     "Parenthesized context managers"),
+    ("a parenthesized `with`",
+     "with (open('a') as a, open('b') as b):\n    pass\n", "parenthesized"),
+    ("a parenthesized `with` holding a tuple",
+     "with (open('a'), open('b')):\n    pass\n", "parenthesized"),
     ("a match statement", "match 1:\n    case 1:\n        pass\n", "match"),
 )
 
 
 def check_regression() -> None:
     """The scan has to FAIL on the shapes it exists for: a scan that only ever
-    sees a good tree proves nothing (and every one of these shipped here once)."""
+    sees a good tree proves nothing (and every one of these shipped here once).
+
+    The verdict is asked in the shape the interpreter can give it. On the floor
+    itself the question is answered by the only authority there is: the floor's
+    parser says `invalid syntax`, and that is the whole proof — 3.8 cannot read
+    the file, which is what the gate exists to say. Asking that interpreter for
+    the WORD `parenthesized` would be demanding that 3.8.10 describe 3.12's
+    grammar; it has never heard of the shape. On a newer interpreter nothing is
+    being read by the authority, only emulated (`feature_version`), so there the
+    phrase is required: it is the evidence that the emulation saw the shape and
+    not something adjacent to it.
+    """
+    at_floor = sys.version_info[:2] <= FLOOR
     for what, source, phrase in SYNTAX_FIXTURES:
-        try:
-            ast.parse(source, feature_version=FLOOR)
-            message = ""
-        except SyntaxError as exc:
-            message = str(exc.msg)
-        at_floor = sys.version_info[:2] <= FLOOR
-        check(bool(message) and (at_floor or phrase in message),
+        with tempfile.TemporaryDirectory() as tdir:
+            fixture = Path(tdir) / "fixture.py"
+            fixture.write_text(source, encoding="utf-8")
+            reported = syntax_problems([fixture]) + parenthesized_with_problems([fixture])
+        named = [complaint for complaint in reported if phrase in complaint.lower()]
+        check(bool(named) or (at_floor and any("invalid syntax" in complaint.lower()
+                                              for complaint in reported)),
               "%s does not parse as %s (%s)"
-              % (what, FLOOR_VERSION, message or "accepted"))
+              % (what, FLOOR_VERSION,
+                 "; ".join(reported) if reported else "accepted"))
 
     for what, source, phrase in FIXTURES:
         tree = ast.parse(source)
