@@ -56,9 +56,11 @@ Run: python -m tests.exec_layer_test
 from __future__ import annotations
 
 import ast
+import os
 import sys
 import tempfile
 from collections.abc import Iterable
+from importlib.machinery import EXTENSION_SUFFIXES
 from pathlib import Path
 
 from tests.testsupport import collecting_check
@@ -330,25 +332,51 @@ def check_prompts(reached: dict[str, Path]) -> None:
     print("   tests/prompt.test.js holds that side of the split)")
 
 
+def _names_under(roots: list[str]) -> set[str]:
+    """The module names a directory scan finds under these roots.
+
+    A C extension module is not a `.py` file in the stdlib directory: on a build
+    that links its extensions dynamically it lives in `lib-dynload` as
+    `fcntl.cpython-38-x86_64-linux-gnu.so`, which is a module named `fcntl` to
+    the importer. Both roots have to be scanned, which is why this is a function
+    and not a loop inside `_stdlib_names()` — the miss can then be proved on a
+    fixture instead of on a release (see check_stdlib_enumeration).
+    """
+    import pkgutil
+
+    out = set(sys.builtin_module_names)
+    for root in roots:
+        if os.path.isdir(root):
+            out.update(module.name for module in pkgutil.iter_modules([root]))
+    return out
+
+
 def _stdlib_names() -> set[str]:
     """Every stdlib top-level module name, on any interpreter this suite runs on.
 
     `sys.stdlib_module_names` is 3.10. The suite also runs on the floor the
     package declares (3.8), where that attribute does not exist — so fall back
-    to the two sources that answer the same question there: the interpreter's
-    own builtins, and the directory its stdlib lives in (site-packages is a
-    sibling of it, not inside it, so a third-party module still shows up).
+    to the sources that answer the same question there: the interpreter's own
+    builtins, the directory its stdlib lives in, and `lib-dynload` beside it,
+    where a dynamically linked extension module is (site-packages is a sibling
+    of the stdlib, not inside it, so a third-party module still shows up).
+
+    The `lib-dynload` half is not a detail. Without it this fallback reported
+    `fcntl` and `select` as third-party imports of agent/ on verify-py38's
+    runner, because the 3.8 installed there keeps them in lib-dynload — while
+    the 3.8 this repo tests with locally links them statically (lib-dynload
+    empty, both names in sys.builtin_module_names), so the fallback looked
+    correct on every dev box and was wrong on the floor.
     """
     names = getattr(sys, "stdlib_module_names", None)
     if names is not None:
         return set(names)
-    import pkgutil
+
     import sysconfig
 
-    out = set(sys.builtin_module_names)
     paths = sysconfig.get_paths()
-    for key in ("stdlib", "platstdlib"):
-        out.update(m.name for m in pkgutil.iter_modules([paths[key]]))
+    stdlibs = [paths[key] for key in ("stdlib", "platstdlib")]
+    out = _names_under(stdlibs + [os.path.join(root, "lib-dynload") for root in stdlibs])
     # The stdlib modules of the OTHER platforms are not in this interpreter's
     # directory at all, and `sys.stdlib_module_names` was where they came from.
     # agent/ legitimately imports one of them behind an `os.name` guard
@@ -356,6 +384,33 @@ def _stdlib_names() -> set[str]:
     # an interpreter on another OS ships.
     out.update({"msvcrt", "nt", "ntpath", "winreg", "winsound", "_winapi", "_msi"})
     return out
+
+
+def check_stdlib_enumeration() -> None:
+    """The floor's stdlib fallback, on the shape that broke it.
+
+    verify-py38 failed on the runner with "agent/ imports nothing outside the
+    stdlib and itself (fcntl, select)" — the fallback scanned only the stdlib
+    DIRECTORY, and a built extension module is not a `.py` file in it. This is
+    the fixture for that: a fake stdlib with a `lib-dynload` holding an extension,
+    whose name no interpreter has built in, and the same scan without the second
+    root (the shape that shipped).
+    """
+    print("\nthe floor's stdlib enumeration:")
+    with tempfile.TemporaryDirectory() as tmp:
+        stdlib = Path(tmp)
+        dynload = stdlib / "lib-dynload"
+        dynload.mkdir()
+        for stem in ("fcntl", "zz_floor_ext"):
+            (dynload / (stem + EXTENSION_SUFFIXES[0])).write_bytes(b"")
+        found = _names_under([str(stdlib), str(dynload)])
+        shipped = _names_under([str(stdlib)])
+    check("fcntl" in found and "zz_floor_ext" in found,
+          "a C extension in lib-dynload is a module, not an import of agent/")
+    check("zz_floor_ext" not in shipped,
+          "…and the scan without that root is the miss the runner found")
+    check({"fcntl", "select"} <= _stdlib_names(),
+          "this interpreter knows its own fcntl and select as stdlib")
 
 
 def check_no_model_client() -> None:
@@ -422,6 +477,7 @@ def main() -> int:
     check_projector_absent(reached)
     check_prompts(reached)
     check_no_model_client()
+    check_stdlib_enumeration()
     check_wired(reached)
     check_no_stale_imports()
     check_walker()

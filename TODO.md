@@ -782,6 +782,25 @@ CLUTCH_E2E_HOST=… CLUTCH_E2E_USER=… CLUTCH_E2E_PASS=… node tests/remote-bo
     那儿的 `feature_version` 只是模拟，名字是"它看见了正确形状"的唯一凭据。
   - 三个解释器（3.8.10 / 3.10.12 / 3.12.14）都绿。教训记下来：**地板门的夹具要在它实际运行的那个
     解释器上测，也要在地板上测**——只在一侧绿的门不是门，是运气。
+- **`verify-py38` 真正的红：现场 3.8 与本地 3.8 不是同一个 3.8**。修好门之后重跑（run
+  `45568590512`），这次是**真实的失败**，而且第一次就看清了原因——因为上面那条把失败原因写进了
+  annotation：`tests.exec_layer_test` → `FAIL: agent/ imports nothing outside the stdlib and
+  itself (fcntl, select)`。
+  - 根因在 `_stdlib_names()` 的 3.8 回退路径：`sys.stdlib_module_names` 是 3.10 才有的，3.8 上只能
+    扫"标准库目录 + `sys.builtin_module_names`"。但**动态链接的 C 扩展模块不是标准库目录里的 .py**
+    ——它是 `lib/python3.8/lib-dynload/fcntl.cpython-38-x86_64-linux-gnu.so`，扫目录扫不到。
+  - 为什么本地三次全绿：本机 uv 的 3.8 是**静态链接** `fcntl`/`select` 的（`lib-dynload` 空目录、
+    两个名字都在 `sys.builtin_module_names` 里）。runner 上 setup-python 的 3.8 是动态的。同一份代码，
+    两个 3.8，一个说"stdlib"、一个说"agent/ 引入了第三方"。**这正是"只声明地板、不在地板上跑"的
+    代价，只不过这次错的是测试自己的枚举，不是 agent/**。
+  - 修法：拆出 `_names_under(roots)`，`_stdlib_names()` 的 3.8 回退把 `lib-dynload`（stdlib 与
+    platstdlib 各一个）也当根。新夹具 `check_stdlib_enumeration()` 用一个假 stdlib + 假 `lib-dynload`
+    里的扩展模块（含一个任何解释器都不会内建的 `zz_floor_ext`）同时证明两件事：带 `lib-dynload` 能看见、
+    不带就看不见——后者就是发出去过的那版形状。
+  - `tmp/sim_floor_stdlib.py` 是更强的复现：把 `sys.stdlib_module_names` 删掉、
+    `sysconfig.get_paths()` 指向"只有 lib-dynload"的假标准库、`sys.builtin_module_names` 清空，
+    然后**新旧两版逻辑跑同一形状**：旧版 `fcntl known = False`（与 runner 一字不差）、新版 True。
+    3.10 与 3.8 两个解释器上都验过。
 - **真跑 3.8 抓出来的（静态门漏掉或只报了一部分的）**：`agent/tools/gates.py:39` 的 PEP 604 **别名**
   （运行时不求值，`GuardImpl = Foo | None` 在 3.8 直接 TypeError）；`agent/tools/settings.py:65` 与
   `tests/settings_test.py:136,194` 的 dict 合并 `|`（PEP 584）；`tests/server_test.py:191` 的括号式
