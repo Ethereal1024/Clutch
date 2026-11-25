@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: f3f8e694ea6613a580b0e818c6f33b96e08ad48b4f2880be8f275286f68a57a3
+// sources sha256: 9aa0e8ab4df8b35e1ea5c2b28c7fd7f40595f75c9a53149bc461e46472301101
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -855,17 +855,8 @@
     await pinSlot(tab.id, { kind: "executor", target: m });
     return "";
   }
-  async function noteTabMachine(tab) {
-    if (!(window.clutchApi && window.clutchApi.slotStatus)) return;
-    let st;
-    try {
-      st = await window.clutchApi.slotStatus(tab.id);
-    } catch (e) {
-      return;
-    }
-    if (!st || !st.claimed) return;
-    const next = st.remote ? asMachine(st.target) ?? void 0 : null;
-    if (sameMachine(tab.machine, next)) return;
+  function recordTabMachine(tab, next) {
+    if (sameMachine(tab.machine, next)) return false;
     tab.machine = next;
     announceTabState();
     if (persistTabs) {
@@ -874,6 +865,20 @@
       } catch (e) {
       }
     }
+    return true;
+  }
+  async function noteTabMachine(tab, base) {
+    if (!(window.clutchApi && window.clutchApi.slotStatus)) return;
+    let st;
+    try {
+      st = await window.clutchApi.slotStatus(tab.id);
+    } catch (e) {
+      return;
+    }
+    if (!st || !st.claimed) return;
+    if (base && st.url && String(st.url).replace(/\/+$/, "") !== String(base).replace(/\/+$/, "")) return;
+    const next = st.remote ? asMachine(st.target) ?? void 0 : null;
+    recordTabMachine(tab, next);
   }
   var persistTabs = null;
   function onTabsPersist(cb) {
@@ -4053,30 +4058,43 @@
     const dismiss = document.getElementById("tab-blocked-dismiss");
     if (dismiss) dismiss.addEventListener("click", () => dismissBlocked());
   })();
-  async function machineMismatch(tab) {
-    if (tab.machine !== void 0) return null;
-    if (!(window.clutchApi && window.clutchApi.slotStatus)) return null;
-    let st;
+  async function liveMachines() {
+    if (!(window.clutchTunnel && window.clutchTunnel.list)) return [];
+    let rows;
     try {
-      st = await window.clutchApi.slotStatus(tab.id);
+      rows = await window.clutchTunnel.list();
     } catch (e) {
-      return null;
+      return [];
     }
-    if (!st || !st.claimed || st.remote) return null;
-    if (await hereHasIt(tab)) return null;
-    return rememberedMachine();
+    const out = [];
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const machine = asMachine(row && row.target);
+      if (!machine || !row.url) continue;
+      out.push({ machine, base: String(row.url).replace(/\/+$/, "") });
+    }
+    return out;
   }
-  async function hereHasIt(tab) {
-    const dir = dirOf(tab.path);
-    if (!dir) return true;
+  async function holdsFile(c, path) {
     try {
-      const r = await apiFetch("/api/fs/stat?path=" + encodeURIComponent(dir), {
-        base: tab.base || state.apiBase
+      const st = await apiFetch("/api/fs/stat?path=" + encodeURIComponent(path), {
+        base: c.base,
+        timeout: 1e4
       });
-      return !(r && r.type === "none");
+      return !!(st && st.type === "file");
     } catch (e) {
-      return true;
+      return false;
     }
+  }
+  async function machineWithFile(tab) {
+    const path = tab && tab.path;
+    if (!path || !/\.clc$/i.test(String(path))) return null;
+    const live = await liveMachines();
+    if (!live.length) return null;
+    const held = await Promise.all(live.map((c) => holdsFile(c, path)));
+    for (let i = 0; i < live.length; i++) {
+      if (held[i] && !sameMachine(live[i].machine, tab.machine)) return live[i];
+    }
+    return null;
   }
   function apply(next) {
     if (next.view !== "tab") clearStream();
@@ -4098,7 +4116,7 @@
     apply(paneLoad(id, label, where));
   }
   onPaneChange((pane2) => setOlderOwner(pane2.view === "tab"));
-  async function openInTab(tab, base, readOnly2 = false, seq = openSeq) {
+  async function openInTab(tab, base, readOnly2 = false, seq = openSeq, retried = false) {
     const path = tab.path;
     try {
       if (!base) throw noBackend();
@@ -4180,29 +4198,29 @@
       if (started) paneReplayProgress("typeset", 1);
       apply(paneTab(tab.id));
       placeRestored(tab.id);
-      if (started) await noteTabMachine(tab);
+      if (started) await noteTabMachine(tab, base);
       if (isStale(seq)) return null;
       finishOpen();
       return null;
     } catch (e) {
       if (isStale(seq, e)) return null;
-      if (e && /not a \.clc/i.test(String(e.message || ""))) {
-        const far = await machineMismatch(tab);
+      if (!retried && e && /not a \.clc/i.test(String(e.message || ""))) {
+        const there = await machineWithFile(tab);
         if (isStale(seq)) return null;
-        if (far) {
-          tab.machine = far;
+        if (there) {
+          recordTabMachine(tab, there.machine);
           const moved = await claimTab(tab);
           if (isStale(seq)) return null;
           if (moved) {
             adoptBase(moved);
             clearStream();
-            return await openInTab(tab, moved, readOnly2, seq);
+            return await openInTab(tab, moved, readOnly2, seq, true);
           }
           clearStream();
           return paneBlocked(
             tab.id,
-            tab.unreachable || `${tab.name || tab.path} lives on ${machineLabel(far)}`,
-            far
+            tab.unreachable || `${tab.name || tab.path} lives on ${machineLabel(there.machine)}`,
+            there.machine
           );
         }
       }

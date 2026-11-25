@@ -327,38 +327,46 @@ function twoTabs(ctx) {
   check(!/noteTabMachine/.test(slotsFn("claimTab")),
     "a claim records no machine by itself — until the host has RESOLVED the path, 'local' is a guess, " +
     "and recording it would disarm the diagnosis below");
-  check(/if \(started\) await noteTabMachine\(tab\);/.test(projectFn("openInTab")),
-    "the machine is recorded by the open that proved it (project.ts), from the host's own slot status");
+  check(/if \(started\) await noteTabMachine\(tab, base\);/.test(projectFn("openInTab")),
+    "the machine is recorded by the open that proved it (project.ts), from the host's own slot status — " +
+    "and against the BASE it ran on, so a slot re-bound mid-open records nothing");
   const note = slotsFn("noteTabMachine");
   check(/st\.remote \? asMachine\(st\.target\)/.test(note) && /window\.clutchApi\.slotStatus/.test(note),
     "that answer comes from the host's own slot status (a remote claim names its machine; a local one is " +
     "this machine), not from a URL's shape");
-  check(/persistTabs\(\)/.test(note) && /onTabsPersist\(saveTabs\)/.test(tabBar),
-    "a machine learned this way is persisted with the working set, so the NEXT boot knows it");
+  check(/recordTabMachine\(tab, next\)/.test(note) &&
+        /persistTabs\(\)/.test(slotsFn("recordTabMachine")) && /onTabsPersist\(saveTabs\)/.test(tabBar),
+    "a machine learned this way is persisted with the working set (recordTabMachine is the one writer), " +
+    "so the NEXT boot knows it");
 
-  const mismatch = projectFn("machineMismatch");
-  check(/if \(tab\.machine !== undefined\) return null;/.test(mismatch),
-    "the one-time migration only fires for a tab that has never recorded a machine");
-  check(/!st\.claimed \|\| st\.remote/.test(mismatch) && !/standingRemoteIntent/.test(mismatch),
-    "and only when the claim landed HERE — the standing intent is no longer the gate: it is " +
-    "cleared by a plain restart, which is exactly the state the reported blank tab was in");
-  check(/if \(await hereHasIt\(tab\)\) return null;/.test(mismatch),
-    "the fact that decides is on the ground: a directory this machine HAS makes it a wrong " +
-    "path, not a wrong machine");
-  const probe = projectFn("hereHasIt");
-  check(/\/api\/fs\/stat\?path=/.test(probe) && /encodeURIComponent\(dir\)/.test(probe) &&
-        /r\.type === "none"/.test(probe),
-    "and that fact is ASKED of the host that answered (a workspace-relative /api/fs/stat), not guessed");
-  check(/catch \(e\) \{[\s\S]{0,80}return true;/.test(probe),
-    "an unanswerable probe reads as 'here': a real bad path must never turn into a dial to a remembered host");
+  // The diagnosis is project.ts's, and it ASKS the machines instead of remembering
+  // one: the reported tennis.clc was stamped with the machine the OTHER tab was on
+  // (the picker's most recently dialled host) and then asked that host forever.
+  const withFile = projectFn("machineWithFile");
+  check(/window\.clutchTunnel\.list/.test(projectFn("liveMachines")),
+    "the candidate machines are the window's LIVE hops, not its connection history");
+  check(/!\/\\\.clc\$\/i\.test\(String\(path\)\)/.test(withFile),
+    "a path that is not a .clc is the host's other message: no machine can heal it, so nothing is asked");
+  check(/sameMachine\(live\[i\]\.machine, tab\.machine\)/.test(withFile),
+    "and the machine the open already failed on is not an answer — a second try there repeats the refusal");
+  check(!/rememberedMachine|localStorage/.test(withFile),
+    "nothing is remembered or guessed: the answer is a host's own /api/fs/stat");
+  const probe = projectFn("holdsFile");
+  check(/\/api\/fs\/stat\?path=/.test(probe) && /encodeURIComponent\(path\)/.test(probe) &&
+        /st\.type === "file"/.test(probe),
+    "each live machine is asked whether this exact FILE is there (a workspace-relative /api/fs/stat), " +
+    "not whether some directory exists");
+  check(/catch \(e\) \{[\s\S]{0,80}return false;/.test(probe),
+    "and a machine that will not answer is not a holder: silence must never become a machine");
 
   const open = projectFn("openInTab");
-  check(/not a \\\.clc/i.test(open) && /const far = await machineMismatch\(tab\);/.test(open),
-    "a local host refusing the path as 'not a .clc' is what starts that diagnosis");
-  check(/tab\.machine = far;[\s\S]{0,320}await openInTab\(tab, moved, readOnly, seq\);/.test(open),
-    "the tab learns the machine, re-claims there and tries the open once more");
-  check(!/machineMismatch\(tab\)[\s\S]{0,80}machineMismatch\(tab\)/.test(open),
-    "and it cannot recurse: the second attempt has a machine, which is the guard");
+  check(/if \(!retried && e && \/not a \\\.clc\/i\.test/.test(open),
+    "a host refusing the path as 'not a .clc' is what starts that diagnosis — once per open");
+  check(/const there = await machineWithFile\(tab\);/.test(open),
+    "and what decides is which live machine has the file, asked after the refusal");
+  check(/recordTabMachine\(tab, there\.machine\);[\s\S]{0,400}await openInTab\(tab, moved, readOnly, seq, true\)/.test(open),
+    "the tab records that machine, re-claims there and tries the open once more — flagged as retried, so " +
+    "a second refusal is final and cannot loop");
   check(/return paneBlocked\(\s*tab\.id,\s*tab\.unreachable \|\|/.test(open) &&
         !/tab\.unreachable = null;\s*return;/.test(open),
     "a refused claim keeps its reason on the pane, not in a toast that hides itself in 8 s");
@@ -651,8 +659,9 @@ function machineWorld(opts) {
   const fake = { tunnel: null, endpoints: new Map(), dialOk: opts.dialOk !== false };
   const machineKeyOf = (c) => `${c.user}@${c.host}:${Number(c.port) || 22}`;
   const pins = new Map(); // slotId -> the pin the host holds for it (the real slotTargets)
-  // the directories the machine that answers the claim HAS: the probe (hereHasIt)
-  // asks for the tab's own directory, and "none" is the wrong-machine answer
+  // the directories the machine that answers the claim HAS: the claim's own probe
+  // (slots.ts localClaimHasNoFile) asks for the tab's directory, and "none" is the
+  // wrong-machine answer
   const here = new Set(opts.localDirs || []);
   if (opts.intent) store.setItem("clutch_ssh_connected", "1");
   if (opts.remembered) store.setItem("clutch_ssh_connections", JSON.stringify([opts.remembered]));
@@ -722,7 +731,9 @@ function machineWorld(opts) {
           // this fake holds (one tab, one machine in these cases)
           const hop = fake.tunnel || [...fake.endpoints.values()][0] || null;
           const remote = !pinnedLocal && Boolean(hop);
-          return { claimed: true, remote, url: "x", target: remote ? hop : null };
+          // the base the renderer was handed for the claim (a real slotStatus
+          // answers the wb.url it holds); a scenario may move it under an open
+          return { claimed: true, remote, url: opts.claimUrl || "x", target: remote ? hop : null };
         },
         releaseSession: async (id) => {
           calls.releases.push(id);
@@ -745,12 +756,15 @@ function machineWorld(opts) {
   ]) {
     vm.runInContext(runnableSnippet(slotsFn(fn)), ctx);
   }
-  // the diagnosis itself is project.ts's (it is the module that sees the 400),
-  // and the probe it now decides with: a directory the answering machine has or
-  // does not have, asked over the workspace API
+  // the diagnosis itself is project.ts's (it is the module that sees the 400) and
+  // lives in tests/machine-of-file-test.js: it asks the live hops. What this world
+  // needs is the claim's own probe — a directory the answering machine has or does
+  // not have (localClaimHasNoFile) — and the ONE writer of a recorded machine,
+  // which the base guard in noteTabMachine goes through
   vm.runInContext(runnableSnippet(projectFn("dirOf")), ctx);
-  vm.runInContext(runnableSnippet(projectFn("hereHasIt")), ctx);
-  vm.runInContext(runnableSnippet(projectFn("machineMismatch")), ctx);
+  // the writer both ways of learning a machine share: the open that proved it, and
+  // the diagnosis that asked the machines which one holds the file
+  vm.runInContext(runnableSnippet(slotsFn("recordTabMachine")), ctx);
   // the module-level cells the slices read (they are per-context: a runner's
   // scenario must not leak into the next), plus the DOM repaint a learned
   // machine asks for — this runner is about the store, not the strip
@@ -922,65 +936,39 @@ function machineWorld(opts) {
 }
 
 {
-  // THE REPORTED BUG, end to end: a tab from before machine tracking. Quit and
-  // relaunch leaves the host's slot table empty, so this tab claims the LOCAL
-  // session for a path only the remote has, and the local host answers "not a
-  // .clc project file". That refusal is the one moment where the machine is
-  // knowable: the window's standing intent says it was on a remote, so the tab
-  // takes that machine, re-claims there, and opens for real.
-  const { ctx, calls } = machineWorld({ intent: true, remembered: FAR });
+  // A record names the machine the OPEN ran on. The host can re-bind a slot while
+  // the open is still streaming (a hop dies, another tab's move re-claims it), and
+  // the claim it holds then is a DIFFERENT base: recording that one's machine would
+  // be the old lie in a new place — a tab sent to a host that never served the
+  // file — so nothing is recorded at all.
+  const { ctx } = machineWorld({ endpoint: { ...FAR, port: 6001 }, claimUrl: "http://127.0.0.1:9000" });
   const tab = farTab(undefined);
-  const first = await ctx.claimTab(tab);
-  check(first === "http://127.0.0.1:9000" && calls.dials.length === 0 && tab.machine === undefined,
-    "a pre-machine tab claims locally first — and is still 'unknown' when the local host refuses the path");
-  const far = await ctx.machineMismatch(tab);
-  check(far && far.host === FAR.host && tagPort(far) === "6001",
-    "the refusal is read as a wrong MACHINE, not a wrong path, and the diagnosis names the remembered machine (" +
-    JSON.stringify(far) + ")");
-  tab.machine = far;
-  const moved = await ctx.claimTab(tab);
-  check(moved === "http://127.0.0.1:9000" && calls.dials.length === 1 && calls.dials[0].host === FAR.host,
-    "so the tab is re-claimed through a hop to that machine (one dial, no prompt)");
-  await ctx.noteTabMachine(tab); // the open there succeeded: that is the proof
+  const base = await ctx.claimTab(tab);
+  await ctx.noteTabMachine(tab, "http://127.0.0.1:4321"); // a claim that has since moved
+  check(tab.machine === undefined,
+    "a claim that is not the base this open ran on records NOTHING: the machine that served the file is " +
+    "the only one worth remembering");
+  await ctx.noteTabMachine(tab, base);
   check(tab.machine && tab.machine.host === FAR.host,
-    "and the machine is recorded once the project has opened there — the migration happens exactly once");
-  check((await ctx.machineMismatch(tab)) === null,
-    "it cannot fire again for this tab: the diagnosis only ever speaks for a tab that has no machine");
+    "the claim the open really used records the machine the host names for it (" +
+    JSON.stringify(tab.machine) + ")");
 }
 
 {
-  // ...and it stays quiet for a genuinely wrong path on the RIGHT machine: the
-  // directory IS on this machine, so the path is bad, not the machine — whatever
-  // the standing intent says.
-  const { ctx, calls } = machineWorld({ intent: true, remembered: FAR, localDirs: ["/w"] });
+  // ONE writer for a recorded machine: the open that proved it and the diagnosis
+  // that asked the machines (project.ts machineWithFile) leave the tab — and the
+  // store — in the same state, and an unchanged record does not churn either.
+  const { ctx } = machineWorld({});
   const tab = farTab(undefined);
-  await ctx.claimTab(tab);
-  check((await ctx.machineMismatch(tab)) === null,
-    "a refusal for a directory this machine HAS is a bad path on the right machine — no dial, no invented machine");
-  check(calls.stats.length === 1 && /\/api\/fs\/stat\?path=%2Fw$/.test(calls.stats[0]),
-    "the probe asked the host that answered, for the tab's own directory (" + calls.stats[0] + ")");
-}
-
-{
-  // THE REPORTED BLANK PANE: the standing intent is GONE (a plain restart of the
-  // app clears it), the file's directory is not here, and the old diagnosis went
-  // quiet on the intent alone — the tab stayed undiagnosed and the pane blank.
-  const { ctx } = machineWorld({ intent: false, remembered: FAR });
-  const tab = farTab(undefined);
-  await ctx.claimTab(tab);
-  const far = await ctx.machineMismatch(tab);
-  check(far && far.host === FAR.host && tagPort(far) === "6001" && tab.machine === undefined,
-    "no standing intent is not a reason to give up: a directory that is NOT here is still a wrong machine");
-}
-
-{
-  // the probe cannot be answered (an older host, a dead forward): a real bad path
-  // must stay one
-  const { ctx } = machineWorld({ intent: false, remembered: FAR, statFails: true });
-  const tab = farTab(undefined);
-  await ctx.claimTab(tab);
-  check((await ctx.machineMismatch(tab)) === null,
-    "a host that cannot answer the probe invents no machine — the open's own failure is the honest answer");
+  vm.runInContext("let saves = 0; persistTabs = () => { saves++; };", ctx);
+  check(ctx.recordTabMachine(tab, { ...FAR }) === true && tab.machine.host === FAR.host,
+    "recording a machine the tab did not have writes it on the tab");
+  check(vm.runInContext("saves", ctx) === 1,
+    "and saves the working set once, so the NEXT boot knows where the file is before it claims anything");
+  check(ctx.recordTabMachine(tab, { ...FAR }) === false && vm.runInContext("saves", ctx) === 1,
+    "the same machine again is not a change: no repaint of the strip, no write");
+  check(ctx.recordTabMachine(tab, null) === true && tab.machine === null && vm.runInContext("saves", ctx) === 2,
+    "and 'this machine' (null) is a record like any other — unknown, here and there are three answers");
 }
 
 {

@@ -312,28 +312,14 @@ async function prepareTabMachine(tab: Tab): Promise<string> {
   return "";
 }
 
-// What the HOST actually claimed — never a guess from the path. A claim on this
-// machine records null; a remote claim NAMES the machine it runs on
-// (slotStatus().target, the endpoint's own record), which is the fact the tab has
-// to remember. Asking the live hop instead was a guess: with more than one
-// device it is the wrong one as soon as two are known.
-//
-// Called once the project has OPENED on that claim (project.ts openInTab), not
-// when the slot is claimed: a claim is only a guess about where a path lives
-// until the host has resolved it, and recording "local" for a tab whose file is
-// on a remote machine is exactly what would disarm the one-time diagnosis
-// (project.ts machineMismatch) that repairs such a tab.
-export async function noteTabMachine(tab: Tab): Promise<void> {
-  if (!(window.clutchApi && window.clutchApi.slotStatus)) return;
-  let st: any;
-  try {
-    st = await window.clutchApi.slotStatus(tab.id);
-  } catch (e) {
-    return;
-  }
-  if (!st || !st.claimed) return;
-  const next: Machine | null | undefined = st.remote ? asMachine(st.target) ?? undefined : null;
-  if (sameMachine(tab.machine, next)) return;
+// Record the machine a tab's file lives on — a fact, once it is one — and save the
+// working set with it. This is the ONE writer of tab.machine that persists, so both
+// ways a fact can arrive leave the tab in the same state: the open that ran there
+// (noteTabMachine, below) and the diagnosis that asked the machines which one holds
+// the file (project.ts machineWithFile). `sameMachine` first: a cheap repaint of the
+// strip per reopen is not worth it, and an unchanged record must not churn the store.
+export function recordTabMachine(tab: Tab, next: Machine | null | undefined): boolean {
+  if (sameMachine(tab.machine, next)) return false;
   tab.machine = next;
   // the machine is part of the working set: tab-bar.ts saved it (onTabsPersist)
   // so the NEXT boot knows where this tab's file is before it claims anything
@@ -345,6 +331,37 @@ export async function noteTabMachine(tab: Tab): Promise<void> {
       /* storage is a convenience: this life still knows the machine */
     }
   }
+  return true;
+}
+
+// What the HOST actually claimed — never a guess from the path. A claim on this
+// machine records null; a remote claim NAMES the machine it runs on
+// (slotStatus().target, the endpoint's own record), which is the fact the tab has
+// to remember. Asking the live hop instead was a guess: with more than one
+// device it is the wrong one as soon as two are known.
+//
+// Called once the project has OPENED on that claim (project.ts openInTab), not
+// when the slot is claimed: a claim is only a guess about where a path lives
+// until the host has resolved it, and recording "local" for a tab whose file is
+// on a remote machine is exactly what would disarm the diagnosis (project.ts
+// machineWithFile) that repairs such a tab.
+//
+// `base` is the base the open actually ran on. The claim the host holds now can be
+// a DIFFERENT one — a hop that died mid-open, a re-claim made by another tab's
+// move — and recording its machine would be the old lie in a new place: the record
+// must only ever name the machine that served this file.
+export async function noteTabMachine(tab: Tab, base?: string | null): Promise<void> {
+  if (!(window.clutchApi && window.clutchApi.slotStatus)) return;
+  let st: any;
+  try {
+    st = await window.clutchApi.slotStatus(tab.id);
+  } catch (e) {
+    return;
+  }
+  if (!st || !st.claimed) return;
+  if (base && st.url && String(st.url).replace(/\/+$/, "") !== String(base).replace(/\/+$/, "")) return;
+  const next: Machine | null | undefined = st.remote ? asMachine(st.target) ?? undefined : null;
+  recordTabMachine(tab, next);
 }
 
 // tab-bar.ts owns the `clutch_tabs` store; it registers its save here so a
@@ -358,9 +375,9 @@ export function onTabsPersist(cb: () => void) {
 
 // The one answer that cannot be acted on: a session on THIS machine opening a
 // file that lives on another one. agent/api/project.py answers it "not a .clc
-// project file", which names neither the machine nor the way out — and because
-// the tab already records its machine, project.ts machineMismatch (which repairs
-// tabs that never learned one) cannot help. So the claim is what refuses.
+// project file", which names neither the machine nor the way out — and for a tab
+// that already records its machine there is no other hint to repair from, so the
+// claim itself is what refuses.
 function noSessionThere(tab: Tab): string {
   return (
     `${tab.name || tab.path} lives on ${machineLabel(tab.machine)} — ` +

@@ -27,7 +27,7 @@ import {
 import { endSend, resumeTurn } from "./render-events";
 import { notice } from "./settings";
 import { closeSSE, reconnectSSE } from "./sse-stream";
-import { state } from "./state";
+import { state, type Machine } from "./state";
 import { addEvent, dropOrphanLive, settleCatchUp } from "./stream-events";
 import { endCatchUp, nearBottom, setClaimed, setJumpVisible, setReadOnly, setStatus } from "./stream-view";
 import { eventsEl, stream } from "./els";
@@ -36,6 +36,7 @@ import { enterWorkspace, refreshTree } from "./workspace-panel";
 import {
   activeTab,
   adoptBase,
+  asMachine,
   claimTab,
   ensureTab,
   findTabByPath,
@@ -43,9 +44,10 @@ import {
   machineLabel,
   mementoOf,
   noteTabMachine,
-  rememberedMachine,
+  recordTabMachine,
   releaseTab,
   restoreMemento,
+  sameMachine,
   saveMemento,
   saveDomCache,
   restoreDomCache,
@@ -572,52 +574,88 @@ export async function retryTab(tab) {
 
 // ---- a tab on the wrong machine ----------------------------------------------
 //
-// A tab store written before tabs recorded their machine (state.ts `machine`)
-// names only a path. After a quit the host's slot table is empty, so the claim
-// goes wherever the window's default is — usually a LOCAL session — and the host
-// answers "not a .clc project file" for a path that only exists on the machine
-// this window was working on. That is not a wrong path; it is a wrong machine.
+// agent/api/project.py answers "not a .clc project file" for a path that is not a
+// .clc, and — on the machine whose session ran the open — for one that is not
+// there. The second half is a fact about ONE machine and nothing more: it does not
+// say the path is bad, and it does not say where the file is.
 //
-// The standing intent (clutch_ssh_connected) is not a gate here any more: it is
-// cleared by a plain restart of the app in some flows, and a diagnosis that
-// needs it left the reported tab undiagnosed — the pane blank, the reason gone.
-// What decides is the fact on the ground: the tab has never recorded a machine,
-// the host claimed this one LOCALLY, and the file's directory is not on this
-// machine — asked, not assumed. When the directory IS here (or the host will not
-// answer), it is a genuine bad path on the right machine: no dial, no invented
-// machine. The tab's own claim does the rest: slots.ts prepareTabMachine dials the
-// machine the tab names and reports the attempt into this pane's loading bar.
-async function machineMismatch(tab): Promise<any | null> {
-  if (tab.machine !== undefined) return null; // the tab knows its machine already
-  if (!(window.clutchApi && window.clutchApi.slotStatus)) return null;
-  let st;
+// This used to be answered by GUESSING. A tab that had never recorded a machine
+// (state.ts `machine`) was handed `rememberedMachine()` — the picker's most
+// recently dialled host — which is a different fact entirely ("where the user last
+// connected"), and it was written into the tab and persisted with the working set.
+// With two projects on two machines that guess is simply the other one: the
+// reported tennis.clc lived on hero@192.168.31.237, its tab was stamped
+// root@region-46.seetacloud.com:31943 (the machine the OTHER tab was on), and
+// because the old diagnosis only spoke for tabs with NO machine, while slots.ts
+// prepareTabMachine pins every claim to the machine a tab names, that tab asked the
+// wrong host for a hero path for the rest of its life — across restarts.
+//
+// So nothing here is remembered or guessed. The machines this window can reach
+// RIGHT NOW are asked, one /api/fs/stat each, for the tab's own file; the one that
+// answers "file" is the machine the open must run on. When no live machine holds it
+// (a genuinely bad path, or the file's machine is not connected) no record is
+// invented: the refusal stands as the honest answer, and the panel says so.
+//
+// A machine this window is not on cannot be asked, and that is deliberate: "who
+// has this file" must be an answer a host produced, never a dial into whichever
+// host the user happened to touch last.
+
+// Every machine this window can ask right now, with the base to ask it on: one
+// entry per live hop (the shell's row is {url, target}, i.e. tunnel-core's bound
+// instance per endpoint). A row with no address or no target cannot be asked and
+// is left out — reading a machine off a URL's shape is the bug above.
+async function liveMachines(): Promise<Array<{ machine: Machine; base: string }>> {
+  if (!(window.clutchTunnel && window.clutchTunnel.list)) return [];
+  let rows;
   try {
-    st = await window.clutchApi.slotStatus(tab.id);
+    rows = await window.clutchTunnel.list();
   } catch (e) {
-    return null;
+    return [];
   }
-  // a remote claim that 400s is the right machine with a wrong path: no dial
-  if (!st || !st.claimed || st.remote) return null;
-  if (await hereHasIt(tab)) return null; // the path is bad, not the machine
-  return rememberedMachine();
+  const out: Array<{ machine: Machine; base: string }> = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const machine = asMachine(row && row.target);
+    if (!machine || !row.url) continue;
+    out.push({ machine, base: String(row.url).replace(/\/+$/, "") });
+  }
+  return out;
 }
 
-// Does the machine this tab is claimed on have the tab's file (its directory)?
-// `dir`/`file` are its answer, `none` is the mismatch; anything unanswerable —
-// no path, no backend, a host that does not know the endpoint — reads as "here",
-// because a real bad path must stay one instead of turning into a dial to
-// whatever host this window last used.
-async function hereHasIt(tab): Promise<boolean> {
-  const dir = dirOf(tab.path);
-  if (!dir) return true;
+// Does THIS machine hold the tab's file? Exact, not "its directory exists":
+// /api/fs/stat answers "file" for a regular file and "none" for anything else
+// (nothing there, a directory, a broken link — agent/browsing.py stat_payload), and
+// a machine that will not answer is not a holder. The deadline is short because
+// this runs while a failed open is on screen: a dead forward must cost a moment,
+// not the whole diagnosis.
+async function holdsFile(c: { machine: Machine; base: string }, path: string): Promise<boolean> {
   try {
-    const r = await apiFetch("/api/fs/stat?path=" + encodeURIComponent(dir), {
-      base: tab.base || state.apiBase,
+    const st = await apiFetch("/api/fs/stat?path=" + encodeURIComponent(path), {
+      base: c.base,
+      timeout: 10000,
     });
-    return !(r && r.type === "none");
+    return !!(st && st.type === "file");
   } catch (e) {
-    return true;
+    return false;
   }
+}
+
+// The machine that HAS this tab's file, other than the one the open just ran on:
+// the answer the refusal could not give. null when the path is not a .clc at all
+// (the other half of the host's one message, which no machine can heal) or when no
+// live machine holds it — the caller then invents nothing.
+async function machineWithFile(tab): Promise<{ machine: Machine; base: string } | null> {
+  const path = tab && tab.path;
+  if (!path || !/\.clc$/i.test(String(path))) return null;
+  const live = await liveMachines();
+  if (!live.length) return null;
+  // asked together: N hops are one wait, not a queue of timeouts
+  const held = await Promise.all(live.map((c) => holdsFile(c, path)));
+  for (let i = 0; i < live.length; i++) {
+    // the machine the open already failed on is not an answer: a second try there
+    // would only repeat the same refusal
+    if (held[i] && !sameMachine(live[i].machine, tab.machine)) return live[i];
+  }
+  return null;
 }
 
 // ---- the pane's transitions -------------------------------------------------
@@ -680,7 +718,7 @@ onPaneChange((pane) => setOlderOwner(pane.view === "tab"));
 // did: the transcript is the pane's now), so an opener decides and `apply`
 // paints — no failure path can leave a load card standing over an open that is
 // over, which used to be a `finally` re-check.
-async function openInTab(tab, base, readOnly = false, seq = openSeq): Promise<PaneState | null> {
+async function openInTab(tab, base, readOnly = false, seq = openSeq, retried = false): Promise<PaneState | null> {
   const path = tab.path;
   try {
     // NOT apiFetch: this endpoint streams NDJSON (meta/progress/event/done), so
@@ -784,7 +822,7 @@ async function openInTab(tab, base, readOnly = false, seq = openSeq): Promise<Pa
     // from this store's pre-machine past diagnosable: a claim that lands local
     // for a file that lives elsewhere must stay unproven until the open proves
     // it one way or the other.
-    if (started) await noteTabMachine(tab);
+    if (started) await noteTabMachine(tab, base);
     if (isStale(seq)) return null;
     finishOpen();
     return null; // it opened: the pane is this tab's, and nothing else to show
@@ -794,29 +832,31 @@ async function openInTab(tab, base, readOnly = false, seq = openSeq): Promise<Pa
     // load card for an open that is still going (a reclaim that worked re-opens on
     // it), the panel for one that is over. The caller applies it, so no path here
     // can leave the card standing over an open that has finished.
-    // A tab from a store that predates machine tracking claimed a LOCAL session
-    // for a file that lives on another machine: the diagnosis above says which
-    // machine, and the tab learns it — the claim that follows dials that machine
-    // (slots.ts prepareTabMachine) and the open is tried once more, there.
-    if (e && /not a \.clc/i.test(String(e.message || ""))) {
-      const far = await machineMismatch(tab);
+    // A "not a .clc" refusal is a fact about the machine that RAN the open: it
+    // could not see the file. Which machine can is asked, not remembered
+    // (machineWithFile), and the tab learns it — the claim that follows pins that
+    // machine (slots.ts prepareTabMachine) and the open is tried once more, there.
+    // `retried` makes a second refusal final: one probe per open, so a machine that
+    // answers "file" and then refuses anyway cannot loop either.
+    if (!retried && e && /not a \.clc/i.test(String(e.message || ""))) {
+      const there = await machineWithFile(tab);
       if (isStale(seq)) return null;
-      if (far) {
-        tab.machine = far;
+      if (there) {
+        recordTabMachine(tab, there.machine);
         const moved = await claimTab(tab);
         if (isStale(seq)) return null;
         if (moved) {
           adoptBase(moved);
           clearStream();
-          return await openInTab(tab, moved, readOnly, seq);
+          return await openInTab(tab, moved, readOnly, seq, true);
         }
         clearStream();
         // the claim refused and said why (slots.ts): that is the honest message,
         // and it stays on the pane with the door that fixes it
         return paneBlocked(
           tab.id,
-          tab.unreachable || `${tab.name || tab.path} lives on ${machineLabel(far)}`,
-          far
+          tab.unreachable || `${tab.name || tab.path} lives on ${machineLabel(there.machine)}`,
+          there.machine
         );
       }
     }
