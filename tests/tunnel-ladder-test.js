@@ -444,24 +444,44 @@ async function main() {
     const host = fs.readFileSync(path.join(ROOT, "android", "host", "android-host.js"), "utf8");
     const main = fs.readFileSync(path.join(ROOT, "ui", "main.js"), "utf8");
 
-    for (const [what, src, connectCall] of [
-      ["the phone's host", host, "connect: (cfg, onProgress) => tunnel.connectTunnel(cfg, onProgress)"],
-      ["the desktop shell", main, "connect: (cfg, onProgress) => tunnel.connectTunnel(cfg, onProgress)"],
+    // Each shell builds the ladder over ITS OWN connect seam, and arms the ladder
+    // OF THE HOP THAT ENDED. The phone holds one tunnel, so its seam is the flat
+    // call. The desktop has one bound instance per endpoint (tunnel-core), so its
+    // seam picks the instance by the ladder's own id: a redial driven by B's loss
+    // must dial B, never "the" tunnel — and the end of B must not arm A's intent.
+    for (const [what, src, seam, arm] of [
+      [
+        "the phone's host",
+        host,
+        "connect: (cfg, onProgress) => tunnel.connectTunnel(cfg, onProgress)",
+        String.raw`ladder\.hopLost\(\);`,
+      ],
+      [
+        "the desktop shell",
+        main,
+        "connect: (cfg, onProgress) => key ? tunnel.connectTunnelOn(key, cfg, onProgress) : tunnel.connectTunnel(cfg, onProgress)",
+        String.raw`ladderFor\(endedId\)\.hopLost\(\);`,
+      ],
     ]) {
       check(src.includes('require("./tunnel-ladder")') || src.includes('useUI("tunnel-ladder.js")'),
         `${what} loads the ladder`);
-      check(src.includes("createTunnelLadder({") && src.includes(connectCall),
+      check(src.includes("createTunnelLadder({") && src.includes(seam),
         `${what} builds the ladder over its own connectTunnel`);
       check(/secretFor: \(host, user, port\) => getSshSecret\(host, user, port\)/.test(src) &&
         src.includes("getSshSecret"),
         `${what} feeds it the same credential cache connectTunnel reads`);
-      check(/ladder\.userConnect\(/.test(src), `${what} routes the user's own connect through the ladder`);
-      check(/ladder\.noteUserLeft\(\)/.test(src),
+      // `ladderFor(<id>).userConnect` on the desktop: the ladder is chosen by the
+      // endpoint, and the picker's own tunnel is the one keyed by nothing
+      check(/(?:ladder|ladderFor\([^)]*\))\.userConnect\(/.test(src),
+        `${what} routes the user's own connect through the ladder`);
+      check(/(?:ladder|ladderFor\([^)]*\))\.noteUserLeft\(\)/.test(src),
         `${what} disarms on the user's own exit (Disconnect and the outage's Cancel)`);
       // the order is the contract: the dead forwards go first, the redial is
       // armed second, the page is told last — a redial that raced the release
-      // would open its forward against the hop it just lost
-      check(/releaseTunnelBackends\(\);[\s\S]{0,600}ladder\.hopLost\(\);[\s\S]{0,400}tunnel:ended/.test(src),
+      // would open its forward against the hop it just lost. The budget is the
+      // release statement's own length on the desktop, where it is a three-way
+      // choice (this hop's forwards / the window's own / none).
+      check(new RegExp(String.raw`releaseTunnelBackends\([^)]*\);?[\s\S]{0,1200}` + arm + String.raw`[\s\S]{0,400}tunnel:ended`).test(src),
         `${what} arms the redial on the hop's own end — after the release, before the page hears about it`);
     }
 

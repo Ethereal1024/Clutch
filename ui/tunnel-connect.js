@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-connect.ts and run `npm run build:host`.
-// source sha256: 349a5fcfb269b839035dfb57289f80ac3abebe018db0c0751a51e0f1ac0b9cfc
+// source sha256: 112a945110f3f2ff530c53b8cb784ad87a281a13cb0f8429cfc15aee878ebb4f
 
 "use strict";
 // one connect attempt — auth, the forwards, the health gate
@@ -15,7 +15,7 @@ const os = require("os");
 const path = require("path");
 const fs = require("fs");
 const { Client } = require("ssh2");
-const { tunnelLog, tunnelId, REMOTE_API_PORT, CONNECT_TIMEOUT_MS, channelFor } = require("./tunnel-core");
+const { tunnelLog, tunnelId, held, name, REMOTE_API_PORT, CONNECT_TIMEOUT_MS, channelFor } = require("./tunnel-core");
 const { freePort, listen, waitForServer, probeServer, probeSupervisorShape } = require("./tunnel-net");
 const { getSshSecret, saveSshSecret, forgetSshSecret } = require("./settings-mirror");
 // ---- the instance ----
@@ -148,10 +148,43 @@ function attach(ctx) {
         // renderer's own switch does, and its failure cannot be papered over with the
         // tunnel it left behind.
         const target = { host, user, port: Number(port) || 22 };
-        // The hop's KEY, assigned together with the target: from here on this state is
-        // "the tunnel to user@host:port", and stateFor(that id) hands back this object
-        // instead of a second, empty one. Nothing parses it — it is a name.
-        state.id = tunnelId(target.host, target.user, target.port);
+        // The hop's KEY: `user@host:port`, and the name stateFor/tunnelFor answer for.
+        // Nothing parses it — it is a name.
+        const wantId = tunnelId(target.host, target.user, target.port);
+        // A PINNED instance is the hop to the endpoint it was made for. Naming another
+        // endpoint from here is not a move: the old single tunnel moved, and that took
+        // every other tab's forward with it. A caller that needs another host dials
+        // that endpoint as its OWN tunnel (main.js derives the id; ui/ssh-tunnel bind).
+        if (state.pinned && state.id !== wantId) {
+            const error = `this tunnel is the hop to ${state.id}; ${target.user}@${target.host}:${target.port} ` +
+                "is a different endpoint — dial it as its own tunnel";
+            tunnelLog("[connect] refused: " + error);
+            return { ok: false, error };
+        }
+        // Somebody else may already hold this host: a tab dialled it as its own
+        // endpoint, and that instance's client is the one the executor table hands
+        // sessions to (tunnelFor(id) → that state). A second client to one host is a
+        // second exec bridge and a second supervisor for one machine, so a live hop
+        // that answers is reused as it is. One that does not is left alone — its own
+        // healing owns it — and this dial opens the wire this request needs. Asked
+        // BEFORE the name below, which is what makes the key name this state.
+        if (!state.pinned && !state.sshClient) {
+            const other = held(wantId);
+            if (other && other !== state && other.sshClient && other.currentUrl) {
+                const ask = await probeServer(other.currentUrl + "/api/health", REUSE_PROBE_MS, REUSE_REQUEST_MS);
+                if (ask.up) {
+                    tunnelLog(`[connect] reusing the hop another bound tunnel already holds for ${wantId}`);
+                    return { ok: true, url: other.currentUrl };
+                }
+                tunnelLog(`[connect] the hop another bound tunnel holds for ${wantId} did not answer (${ask.kind}); opening this request's own`);
+            }
+        }
+        // The window's own tunnel is NAMED by this dial (the picker has one host), and
+        // a key it held before goes with it: tunnelFor() must answer with the state
+        // that really serves that host. A pinned instance was already named by
+        // stateFor(id) and is refused above if the id differs.
+        if (!state.pinned)
+            name(state, wantId);
         if (state.sshClient) {
             const current = state.target;
             const same = current &&
@@ -363,6 +396,11 @@ function attach(ctx) {
                 // the wire died on its own: a dial still building on it must say so rather
                 // than report a stop (see this file's catch, and the upload's watchdog)
                 state.wireLost = cause ? `${why} (${cause})` : why;
+                // which tunnel and which URL this is, captured BEFORE the teardown clears
+                // them: with more than one tunnel bound, an end notification that cannot
+                // name its own hop makes every other hop's windows drop their claims
+                const endedId = state.id;
+                const endedUrl = state.currentUrl;
                 state.sshClient = null;
                 state.target = null; // the host this hop belonged to went with it
                 state.currentUrl = null;
@@ -371,7 +409,7 @@ function attach(ctx) {
                     state.localSrv = null;
                 }
                 stopExecBridge();
-                notifyEnd();
+                notifyEnd(endedId, endedUrl);
             };
             // runtime handlers (once per connection). Guard mutations of state.sshClient: a
             // stale tunnel's 'end' may fire after a reconnect and must not clobber it.

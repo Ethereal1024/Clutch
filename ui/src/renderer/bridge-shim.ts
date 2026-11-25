@@ -188,8 +188,12 @@
 
   expose("clutchTunnel", {
     connect: (cfg) => call("clutchTunnel", "connect", [cfg]),
-    status: () => call("clutchTunnel", "status"),
-    disconnect: () => call("clutchTunnel", "disconnect"),
+    // `where` is a {host,user,port} MACHINE — the hop a tab's session runs on —
+    // and never a tunnel key: the page knows its hosts, not this process's ids.
+    // Omitted means the window's own tunnel. `argsOf` drops a trailing
+    // undefined, so the no-machine call goes over the wire exactly as before.
+    status: (where) => call("clutchTunnel", "status", [where]),
+    disconnect: (where) => call("clutchTunnel", "disconnect", [where]),
     // the devices this host knows (connected or recently connected), for the
     // picker that parks a tab on one of them
     list: () => call("clutchTunnel", "list"),

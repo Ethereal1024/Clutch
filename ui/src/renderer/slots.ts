@@ -111,10 +111,16 @@ function tunnelTarget(ts: any): Machine | null {
   return { host: String(t.host), user: String(t.user || ""), port: String(t.port || 22) };
 }
 
-async function tunnelNow(): Promise<{ active: boolean; target: Machine | null }> {
+// The host's answer about a hop: the window's own when no machine is named, or
+// the hop bound to THAT machine (tunnel-core's id, derived by the shell from the
+// triple — the page never builds or sees an id). A named machine this process is
+// not on answers `{active:false}`; the shell does not invent a hop to answer.
+async function tunnelNow(m: Machine | null = null): Promise<{ active: boolean; target: Machine | null }> {
   if (!(window.clutchTunnel && window.clutchTunnel.status)) return { active: false, target: null };
   try {
-    const s = await window.clutchTunnel.status();
+    const s = await window.clutchTunnel.status(
+      m ? { host: m.host, user: m.user, port: Number(m.port) || 22 } : undefined
+    );
     return { active: !!(s && s.active), target: tunnelTarget(s) };
   } catch (e) {
     return { active: false, target: null }; // an unanswerable question is not a live hop
@@ -208,6 +214,9 @@ export async function dialMachine(m: Machine | null): Promise<boolean> {
       host: m.host,
       user: m.user,
       port: Number(m.port) || 22,
+      // a tab's own machine is its own hop: the shell names it (tunnel-core), so
+      // this dial cannot take the window's own tunnel away from another tab
+      endpoint: true,
     });
     return !!(res && res.ok);
   } catch (e) {
@@ -232,9 +241,9 @@ export function onTabAutoConnect(fn) {
 
 // One attempt per machine at a time: two tabs of the same host claimed together
 // (a double click, a boot restoring both) are ONE dial — the second joins the
-// first instead of being refused because the wire is busy. A different machine
-// is not joined: the tunnel carries one host at a time and prepareTabMachine has
-// already refused that case.
+// first instead of being refused because the wire is busy. A DIFFERENT machine is
+// its own dial, because it is its own hop (tunnel-core: one bound instance per
+// endpoint), so two tabs on two hosts can be restored together.
 let autoDial: { m: Machine; p: Promise<string> } | null = null;
 
 // "" when the hop is up, or the sentence to show on the tab (why it is not).
@@ -264,7 +273,12 @@ async function prepareTabMachine(tab: Tab): Promise<string> {
     return "";
   }
   if (!m) return ""; // unknown (a store from before the field): claim normally
-  const now = await tunnelNow();
+  // The hop for THIS tab's machine — not "the" hop. With one bound instance per
+  // endpoint the window's own tunnel can be up and pointed at another host, and
+  // reading its target would refuse a tab whose own machine is perfectly
+  // reachable. A named machine answers for itself (the shell derives the id from
+  // the triple); a machine nobody is on yet answers inactive.
+  const now = await tunnelNow(m);
   if (now.active && sameMachine(now.target, m)) {
     // the hop IS this machine, and the pin SAYS so: host-core takes a pin naming
     // a machine as "this slot's file lives there", so a hop that stops serving
@@ -275,25 +289,21 @@ async function prepareTabMachine(tab: Tab): Promise<string> {
     return "";
   }
   const name = tab.name || tab.path;
-  if (now.active) {
-    // one tunnel at a time: moving it would take every OTHER remote tab's
-    // session with it, so this is the user's decision, not a side effect
-    return (
-      `${name} lives on ${machineLabel(m)}, but this window is on ` +
-      `${now.target ? machineLabel(now.target) : "another machine"} — ` +
-      `connect to ${machineLabel(m)} in the file picker to open it`
-    );
-  }
-  // The tab's OWN record is the intent, and it is the strong one: it names a file
-  // on a machine, the file cannot open anywhere else, and the connect that put it
-  // there cached the secret it needed (settings mirror ssh_secrets). The
-  // window-wide flag (clutch_ssh_connected) is deliberately NOT a gate: it is
+  // Nothing is up for this machine, so the tab dials it. This used to be refused
+  // whenever ANY hop was live ("one tunnel at a time: moving it would take every
+  // OTHER remote tab's session with it") — but the dial that follows is this
+  // machine's OWN hop (connectTabMachine's `endpoint: true`), so it moves nothing:
+  // the window's own tunnel, and every other tab's hop, keep serving what they
+  // were serving. The tab's OWN record is the intent, and it is the strong one: it
+  // names a file on a machine, the file cannot open anywhere else, and the connect
+  // that put it there cached the secret it needed (settings mirror ssh_secrets).
+  // The window-wide flag (clutch_ssh_connected) is deliberately NOT a gate: it is
   // cleared by a move to another host and by a Disconnect, and gating on it left a
   // tab the user had just asked for waiting for a Connect press somewhere else —
   // the reported "a cached tab was already connected, why must I connect again".
-  // None of this is behind the user's back any more either: the attempt reports
-  // into the tab's own loading bar (conn-flow connectTabMachine), which is what
-  // makes the hop a STEP of opening the tab.
+  // None of this is behind the user's back either: the attempt reports into the
+  // tab's own loading bar (conn-flow connectTabMachine), which is what makes the
+  // hop a STEP of opening the tab.
   const why = await autoConnect(m);
   if (why) return `${name} lives on ${machineLabel(m)} — ${why}`;
   // same promise as above, now that the hop is up: the file is on that machine,

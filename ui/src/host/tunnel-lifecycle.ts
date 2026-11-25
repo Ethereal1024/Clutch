@@ -39,6 +39,12 @@ const stopExecBridge = () => ctx.bridge.stop();
 // remote session keeps running -- unreachable, and unable to be stopped.
 async function stopTunnel(notify = false) {
   tunnelLog("[disconnect] stopTunnel");
+  // WHICH hop this is, and which URL it was serving, read BEFORE the teardown
+  // clears them: an end notification that cannot name its own tunnel makes every
+  // other tunnel's windows drop a claim that is still serving (main.js releases
+  // the forwards whose `tunnelUrl` is this one).
+  const endedId = state.id;
+  const endedUrl = state.currentUrl;
   stopHealing();
   if (state.localSrv) {
     state.localSrv.close();
@@ -66,15 +72,15 @@ async function stopTunnel(notify = false) {
   stopExecBridge();
   // intentional disconnects are caller-managed; an unexpected death (the ssh
   // 'end' event) and a teardown the caller flags both notify
-  if (notify) notifyEnd();
+  if (notify) notifyEnd(endedId, endedUrl);
 }
 
-function notifyEnd() {
+function notifyEnd(id = state.id, url = null) {
   if (state.wasDisconnected) return; // both stopTunnel and the ssh 'end' event fire; emit once
   state.wasDisconnected = true;
   for (const cb of state.endListeners) {
     try {
-      cb();
+      cb(id, url);
     } catch (e) {
       /* listener errors are non-fatal */
     }

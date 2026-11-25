@@ -372,7 +372,10 @@ export async function hopLandedFor(host, user, port, budgetMs = 5000) {
   for (;;) {
     let s = null;
     try {
-      s = await st();
+      // ask about THIS machine, not "the tunnel": with a hop per endpoint the
+      // window's own hop may well be up and pointed somewhere else, and reading
+      // its target would answer somebody else's question
+      s = await st({ host: String(host), user: String(user), port: wantPort });
     } catch (e) {
       return false; // an unanswerable question is not a live hop
     }
@@ -522,14 +525,17 @@ export async function connectTabMachine(machine): Promise<string> {
   setFsConnecting(host, null, "load");
   let up = false;
   try {
-    let res = await window.clutchTunnel.connect({ host, user, port });
+    // `endpoint: true` — the shell names this hop after the machine, so a tab on
+    // a second host gets the hop for THAT host instead of renaming the window's
+    // own (tunnel-core: a pinned, named hop never renames — it is refused)
+    let res = await window.clutchTunnel.connect({ host, user, port, endpoint: true });
     if (!res.ok && res.error && /authentication/i.test(res.error)) {
       // the cached secret did not authenticate (changed password, or none was ever
       // cached for this host): ask HERE, once, and let the host cache what wins so
       // the next boot needs no dialog at all
       const pw = await showPasswordPrompt("Password / key passphrase for " + user + "@" + host);
       if (!pw) return "connection cancelled";
-      res = await window.clutchTunnel.connect({ host, user, port, password: pw });
+      res = await window.clutchTunnel.connect({ host, user, port, password: pw, endpoint: true });
     }
     // the loser of a concurrent dial is not a failed connect (hopLandedFor)
     if (!res.ok && (await hopLandedFor(host, user, port))) res = { ok: true, url: null };

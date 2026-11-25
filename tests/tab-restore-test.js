@@ -296,11 +296,15 @@ function twoTabs(ctx) {
     "a tab that lives HERE pins its claim to this machine's endpoint: a tunnel another tab opened " +
     "must not route it away");
   check(/if \(now\.active && sameMachine\(now\.target, m\)\)/.test(prepare),
-    "a tab that lives THERE claims through the hop only when the live hop IS its machine");
-  check(/if \(now\.active\) \{[\s\S]{0,400}in the file picker to open it/.test(prepare),
-    "a hop to ANOTHER machine refuses instead of moving the tunnel under every other remote tab");
+    "a tab that lives THERE claims through the hop only when the hop FOR ITS MACHINE is live — asked by " +
+    "machine, so the window's own hop to another host cannot answer for it");
+  check(!/in the file picker to open it/.test(prepare),
+    "and a live hop to ANOTHER machine no longer refuses the tab: it dials its own machine's hop, and the " +
+    "hop somebody else is on is left exactly where it was (tunnel-core: one bound instance per endpoint)");
+  check(/const now = await tunnelNow\(m\);/.test(prepare) && !/await tunnelNow\(\);/.test(prepare),
+    "the question is asked about the tab's machine, never about 'the' tunnel");
   check(/const why = await autoConnect\(m\);/.test(prepare),
-    "once no hop is up, the tab's own machine is redialled through the injected attempt — " +
+    "with no hop for its machine, the tab dials it through the injected attempt — " +
     "a reconnect, not a new connection, and the tab does not wait for a Connect press elsewhere");
   check(!/standingRemoteIntent/.test(slots),
     "and the window-wide clutch_ssh_connected flag is NOT a gate any more: a move or a Disconnect " +
@@ -536,9 +540,12 @@ const farTab = (machine) => ({ id: "tab-fix", path: "/w/fix-train.clc", name: "f
   const src = flowFn("connectTabMachine");
   const paneSrc = read("ui/src/renderer/pane.ts");
 
-  check(/let res = await window\.clutchTunnel\.connect\(\{ host, user, port \}\)/.test(src),
+  check(/let res = await window\.clutchTunnel\.connect\(\{ host, user, port, endpoint: true \}\)/.test(src),
     "the reconnect dials with NO password first: the host authenticates with the secret settings.json " +
     "cached when this machine last connected");
+  check(/endpoint: true/.test(src) && /password: pw, endpoint: true/.test(src),
+    "and both dials are the tab's OWN endpoint: a tab's hop is named for its machine, so two tabs on two " +
+    "machines hold two hops instead of renaming one");
   check(/if \(!res\.ok && res\.error && \/authentication\/i\.test\(res\.error\)\)[\s\S]{0,600}showPasswordPrompt\(/.test(src),
     "only a REFUSED secret asks the user, once — and the host caches what wins, so the next boot is silent");
   check(!/switchBackendResolved|refreshPicker/.test(src),
@@ -629,14 +636,20 @@ const farTab = (machine) => ({ id: "tab-fix", path: "/w/fix-train.clc", name: "f
 // ---- 5) the claim's decision table, driven for real ---------------------------
 //
 // The contracts above say the shape; this runs it. The functions are sliced out
-// of slots.ts and executed against a fake host bridge, so the four answers a
-// restored tab can get — claim here, redial there, refuse and name the host,
-// or refuse because the hop belongs to another machine — are checked as
-// behaviour, not as source text.
+// of slots.ts and executed against a fake host bridge, so the answers a restored
+// tab can get — claim here, redial there, refuse and name the host, claim through
+// the hop that already serves its machine — are checked as behaviour, not as
+// source text. The bridge keeps one hop per MACHINE (tunnel-core's bound
+// instances), so "which hop" is a question the fake can answer honestly.
 function machineWorld(opts) {
   const calls = { pins: [], dials: [], claims: [], stats: [], releases: [] };
   const store = storage();
-  const fake = { tunnel: null, dialOk: opts.dialOk !== false };
+  // `tunnel` is the WINDOW's own hop (the picker's: what a page asks about with
+  // no machine), `endpoints` the hops bound to machines — one per endpoint, the
+  // way tunnel-core holds them. A page that asks about a machine gets THAT hop
+  // and nothing else, which is the whole point of the per-endpoint layer.
+  const fake = { tunnel: null, endpoints: new Map(), dialOk: opts.dialOk !== false };
+  const machineKeyOf = (c) => `${c.user}@${c.host}:${Number(c.port) || 22}`;
   const pins = new Map(); // slotId -> the pin the host holds for it (the real slotTargets)
   // the directories the machine that answers the claim HAS: the probe (hereHasIt)
   // asks for the tab's own directory, and "none" is the wrong-machine answer
@@ -644,6 +657,7 @@ function machineWorld(opts) {
   if (opts.intent) store.setItem("clutch_ssh_connected", "1");
   if (opts.remembered) store.setItem("clutch_ssh_connections", JSON.stringify([opts.remembered]));
   if (opts.tunnel) fake.tunnel = opts.tunnel;
+  if (opts.endpoint) fake.endpoints.set(machineKeyOf(opts.endpoint), opts.endpoint);
   // what a GET to a claimed host answers here: the directory the machine has, or
   // "none" — the same answer apiFetch and a plain fetch both unwrap
   const statAnswer = (url) => {
@@ -669,14 +683,23 @@ function machineWorld(opts) {
     state: { apiBase: "http://127.0.0.1:9000" },
     window: {
       clutchTunnel: {
-        status: async () =>
-          fake.tunnel
-            ? { active: true, url: "http://127.0.0.1:7000", target: fake.tunnel }
-            : { active: false, url: null, target: null },
+        // asked BY MACHINE by the modules that care about a tab's own hop
+        // (slots.ts tunnelNow(m), conn-flow hopLandedFor): answer with that
+        // machine's hop, or with the window's own when nothing is named
+        status: async (where) => {
+          const row = where ? fake.endpoints.get(machineKeyOf(where)) : fake.tunnel;
+          return row
+            ? { active: true, url: "http://127.0.0.1:7000", target: row }
+            : { active: false, url: null, target: null };
+        },
         connect: async (cfg) => {
           calls.dials.push(cfg);
           if (!fake.dialOk) return { ok: false, error: "authentication failed" };
-          fake.tunnel = { host: cfg.host, user: cfg.user, port: cfg.port };
+          const row = { host: cfg.host, user: cfg.user, port: cfg.port };
+          // `endpoint: true`: the tab's OWN machine, named by the shell. The hop
+          // lands under that machine — the window's own tunnel is not touched.
+          if (cfg.endpoint) fake.endpoints.set(machineKeyOf(cfg), row);
+          else fake.tunnel = row;
           return { ok: true };
         },
       },
@@ -695,8 +718,11 @@ function machineWorld(opts) {
             return { claimed: true, remote: opts.claimRemote, url: "x", target: FAR };
           const pin = pins.get(id);
           const pinnedLocal = Boolean(pin && pin.id === "local");
-          const remote = !pinnedLocal && Boolean(fake.tunnel);
-          return { claimed: true, remote, url: "x", target: remote ? fake.tunnel : null };
+          // the hop that carries a claim: the window's own, else the endpoint hop
+          // this fake holds (one tab, one machine in these cases)
+          const hop = fake.tunnel || [...fake.endpoints.values()][0] || null;
+          const remote = !pinnedLocal && Boolean(hop);
+          return { claimed: true, remote, url: "x", target: remote ? hop : null };
         },
         releaseSession: async (id) => {
           calls.releases.push(id);
@@ -791,21 +817,32 @@ function machineWorld(opts) {
 }
 
 {
-  // a hop is up, but for another machine: moving it would take every other
-  // remote tab's session with it, so the tab refuses and names both
-  const { ctx, calls } = machineWorld({ intent: true, tunnel: { host: "10.0.0.9", user: "root", port: 22 } });
+  // A hop is up — but it is the WINDOW's own, for another machine. This used to be
+  // a refusal ("one tunnel at a time: moving it would take every OTHER remote
+  // tab's session with it"), and the refusal was honest while there was one
+  // tunnel. There are now N bound instances (tunnel-core), so the tab dials its
+  // OWN machine's hop and the window's own is not moved, stopped, or read.
+  const { ctx, calls, fake } = machineWorld({
+    intent: true,
+    tunnel: { host: "10.0.0.9", user: "root", port: 22 },
+  });
   const tab = farTab({ ...FAR });
   const base = await ctx.claimTab(tab);
-  check(base === null && calls.claims.length === 0,
-    "a hop to ANOTHER machine is not used for this tab's file — nothing is claimed");
-  check(/10\.0\.0\.9|root@10\.0\.0\.9:22/.test(tab.unreachable || "") && /fanshu@124\.220\.181\.209:6001/.test(tab.unreachable || ""),
-    "the refusal names both machines, so the user knows what to disconnect (" + tab.unreachable + ")");
-  check(calls.dials.length === 0, "and it does not yank the live hop to another host");
+  check(base === "http://127.0.0.1:9000" && calls.claims.length === 1,
+    "a tab whose machine is not the window's own hop dials its own and claims there");
+  check(calls.dials.length === 1 && calls.dials[0].host === FAR.host && calls.dials[0].endpoint === true,
+    "the dial is the tab's OWN endpoint (endpoint: true), not a rename of the window's tunnel");
+  check(!tab.unreachable, "nothing to refuse: the file is on a machine this tab can reach (" + tab.unreachable + ")");
+  check(fake.tunnel && fake.tunnel.host === "10.0.0.9",
+    "and the live hop to another host is left exactly where it was — nobody's session was yanked");
+  check(calls.pins.some(([id, t]) => id === "tab-fix" && t && t.kind === "executor" && t.target &&
+        t.target.host === FAR.host),
+    "the pin says the file lives on the tab's machine, so the claim cannot land on the other hop");
 }
 
 {
-  // the hop IS the tab's machine: claim through it
-  const { ctx, calls } = machineWorld({ tunnel: { ...FAR, port: 6001 } });
+  // the hop FOR THE TAB'S MACHINE is up: claim through it, no second connect
+  const { ctx, calls } = machineWorld({ endpoint: { ...FAR, port: 6001 } });
   const tab = farTab({ ...FAR });
   const base = await ctx.claimTab(tab);
   check(base === "http://127.0.0.1:9000" && calls.dials.length === 0,

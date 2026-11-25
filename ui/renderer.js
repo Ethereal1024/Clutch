@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 84a2c69553b9f0cb1c66721628ad9ec2c6705eb8c50a8e9ef3f399f5e546a87c
+// sources sha256: c53f7fe511567e0ee2c836964a9737840d2be176fefd56ffba4d4a615512cb2f
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -136,8 +136,12 @@
     });
     expose("clutchTunnel", {
       connect: (cfg) => call("clutchTunnel", "connect", [cfg]),
-      status: () => call("clutchTunnel", "status"),
-      disconnect: () => call("clutchTunnel", "disconnect"),
+      // `where` is a {host,user,port} MACHINE — the hop a tab's session runs on —
+      // and never a tunnel key: the page knows its hosts, not this process's ids.
+      // Omitted means the window's own tunnel. `argsOf` drops a trailing
+      // undefined, so the no-machine call goes over the wire exactly as before.
+      status: (where) => call("clutchTunnel", "status", [where]),
+      disconnect: (where) => call("clutchTunnel", "disconnect", [where]),
       // the devices this host knows (connected or recently connected), for the
       // picker that parks a tab on one of them
       list: () => call("clutchTunnel", "list"),
@@ -743,10 +747,12 @@
     if (!t || !t.host) return null;
     return { host: String(t.host), user: String(t.user || ""), port: String(t.port || 22) };
   }
-  async function tunnelNow() {
+  async function tunnelNow(m = null) {
     if (!(window.clutchTunnel && window.clutchTunnel.status)) return { active: false, target: null };
     try {
-      const s = await window.clutchTunnel.status();
+      const s = await window.clutchTunnel.status(
+        m ? { host: m.host, user: m.user, port: Number(m.port) || 22 } : void 0
+      );
       return { active: !!(s && s.active), target: tunnelTarget(s) };
     } catch (e) {
       return { active: false, target: null };
@@ -798,7 +804,10 @@
       const res = await window.clutchTunnel.connect({
         host: m.host,
         user: m.user,
-        port: Number(m.port) || 22
+        port: Number(m.port) || 22,
+        // a tab's own machine is its own hop: the shell names it (tunnel-core), so
+        // this dial cannot take the window's own tunnel away from another tab
+        endpoint: true
       });
       return !!(res && res.ok);
     } catch (e) {
@@ -832,15 +841,12 @@
       return "";
     }
     if (!m) return "";
-    const now = await tunnelNow();
+    const now = await tunnelNow(m);
     if (now.active && sameMachine(now.target, m)) {
       await pinSlot(tab.id, { kind: "executor", target: m });
       return "";
     }
     const name = tab.name || tab.path;
-    if (now.active) {
-      return `${name} lives on ${machineLabel(m)}, but this window is on ${now.target ? machineLabel(now.target) : "another machine"} \u2014 connect to ${machineLabel(m)} in the file picker to open it`;
-    }
     const why = await autoConnect(m);
     if (why) return `${name} lives on ${machineLabel(m)} \u2014 ${why}`;
     await pinSlot(tab.id, { kind: "executor", target: m });
@@ -5932,7 +5938,7 @@
     for (; ; ) {
       let s = null;
       try {
-        s = await st();
+        s = await st({ host: String(host), user: String(user), port: wantPort });
       } catch (e) {
         return false;
       }
@@ -6022,11 +6028,11 @@
     setFsConnecting(host, null, "load");
     let up = false;
     try {
-      let res = await window.clutchTunnel.connect({ host, user, port });
+      let res = await window.clutchTunnel.connect({ host, user, port, endpoint: true });
       if (!res.ok && res.error && /authentication/i.test(res.error)) {
         const pw = await showPasswordPrompt("Password / key passphrase for " + user + "@" + host);
         if (!pw) return "connection cancelled";
-        res = await window.clutchTunnel.connect({ host, user, port, password: pw });
+        res = await window.clutchTunnel.connect({ host, user, port, password: pw, endpoint: true });
       }
       if (!res.ok && await hopLandedFor(host, user, port)) res = { ok: true, url: null };
       if (res.ok) {

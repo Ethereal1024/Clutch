@@ -110,6 +110,21 @@ async function main() {
   assert.strictEqual(fakes.fetches.at(-1).url, BRIDGE + "api/clutchSettings/save");
   assert.strictEqual(fakes.fetches.at(-1).opts.body, '[{"api_key":"k"}]', "args arrive as an array");
 
+  // 3b. tunnel status/disconnect name a MACHINE, never a tunnel key: a page knows
+  //     the host its tab runs on, not this process's ids. Omitting it keeps the
+  //     old body (the window's own tunnel), so nothing on the wire changed for a
+  //     caller that does not pass one.
+  fakes.next = { json: async () => ({ ok: true, result: { active: false, url: null } }) };
+  await globalThis.clutchTunnel.status({ host: "h", user: "u", port: 22 });
+  assert.strictEqual(fakes.fetches.at(-1).url, BRIDGE + "api/clutchTunnel/status");
+  assert.strictEqual(fakes.fetches.at(-1).opts.body, '[{"host":"h","user":"u","port":22}]',
+    "status carries the machine it is about");
+  fakes.next = { json: async () => ({ ok: true, result: { ok: true } }) };
+  await globalThis.clutchTunnel.disconnect();
+  assert.strictEqual(fakes.fetches.at(-1).url, BRIDGE + "api/clutchTunnel/disconnect");
+  assert.strictEqual(fakes.fetches.at(-1).opts.body, "[]",
+    "no machine -> the window's own tunnel, the same empty body as before");
+
   // 4. {ok:false,error} rejects, like ipcRenderer.invoke when a handler throws
   fakes.next = { json: async () => ({ ok: false, error: "tunnel failed: bad host" }) };
   await assert.rejects(

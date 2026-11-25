@@ -20,7 +20,10 @@
 // The fix, in four pieces — each has a section below:
 //   1. the host answers PER WINDOW: releaseTunnelBackends() returns the window ids
 //      the hop actually owned, and the shells put that verdict in the message
-//      (`{ lost }`, ui/main.js / android/host/android-host.js);
+//      (`{ lost }`, ui/main.js / android/host/android-host.js). The desktop shell
+//      scopes it further, to the hop named in the notification: with a bound
+//      instance per endpoint (tunnel-core) a tab on ANOTHER machine is working
+//      fine, and its forward must survive somebody else's outage;
 //   2. the renderer's tunnel-end handler reads it (js/backend-lifecycle.js): a
 //      window the hop never owned keeps its session, its stream and its work;
 //   3. leaving an outage releases THIS window's claim and stops the shared tunnel
@@ -52,9 +55,14 @@ const LIBS = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "backend-l
 
 // ---- 1. the host answers per window, and says so in the message ----
 const sendAt = MAIN.indexOf('tunnel.onTunnelEnd');
-const sendEnd = MAIN.indexOf("// the main process re-established", sendAt);
-const notify = sendAt < 0 ? "" : MAIN.slice(sendAt, sendEnd < sendAt ? sendAt + 2000 : sendEnd);
-check(/const affected = await hostCore\.releaseTunnelBackends\(\);/.test(notify) &&
+// the handler's own end: `createWindow()` is the next statement in start(). A
+// fixed character budget was a test that broke whenever the handler was
+// explained better, and this handler earned two more comments with named hops.
+const sendEnd = sendAt < 0 ? -1 : MAIN.indexOf("createWindow();", sendAt);
+const notify = sendAt < 0 ? "" : MAIN.slice(sendAt, sendEnd < sendAt ? sendAt + 4000 : sendEnd);
+check(/const affected = url\s*\?\s*await hostCore\.releaseTunnelBackends\(url\)/.test(notify) &&
+  /endedId == null\s*\?\s*await hostCore\.releaseTunnelBackends\(\)/.test(notify) &&
+  /ladderFor\(endedId\)\.hopLost\(\)/.test(notify) &&
   /send\("tunnel:ended", \{ lost: lost\.has\(id\), slots \}\)/.test(notify),
   "the desktop shell tells every window about the hop — each one with its OWN verdict, computed from the slots the hop owned");
 check(!/send\("tunnel:ended"\)/.test(MAIN) && !/broadcast\("tunnel:ended"\)/.test(HOST),
@@ -73,7 +81,10 @@ check(/if \(!hostCore\.anyTunnelWindow\(\)\) \{[\s\S]{0,400}await tunnel\.stopTu
   "and the shared hop is stopped only when no window is left on it: one window's Cancel is not another window's shutdown");
 check(/if \(!hostCore\.anyTunnelWindow\(\)\) \{[\s\S]{0,200}ladder\.noteUserLeft\(\)/.test(releaseHandler),
   "…and that exit disarms the standing reconnect intent too (ui/tunnel-ladder.js): nothing may redial a host the user is done with");
-check(/ipcMain\.handle\("tunnel:disconnect"[\s\S]{0,1200}releaseAllBackends\(\{ leaving: true \}\)/.test(MAIN),
+// the handler got longer with named hops — its one-endpoint branch comes first —
+// so the budget is the whole handler up to `session:release`, no further: a
+// releaseAllBackends that MOVED into session:release must still fail this
+check(/ipcMain\.handle\("tunnel:disconnect"[\s\S]{0,2000}releaseAllBackends\(\{ leaving: true \}\)/.test(MAIN),
   "releasing EVERY window's claim stays where it belongs: the picker's own Disconnect, which is the user leaving the machine");
 check(/releaseSession: async \(slotId\) => \{[\s\S]{0,500}hostCore\.releaseSlot\(window\.id, slotId\)/.test(HOST) &&
   /releaseSession: async \(slotId\) => \{[\s\S]{0,700}hostCore\.releaseWindowBackends\(window\.id\)/.test(HOST) &&

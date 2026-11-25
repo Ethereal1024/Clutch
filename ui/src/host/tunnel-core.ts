@@ -20,7 +20,7 @@ const fs = require("fs");
 // Create an independent tunnel state object. Multiple tunnels (to different hosts)
 // each have their own state. The global `state` below is created once for
 // backward compatibility with existing code.
-function createTunnelState(id = null) {
+function createTunnelState(id = null, pinned = false) {
   return {
     // The tunnel's KEY: `user@host:port`, or null on a state no dial has
     // answered for yet. It is the connection record's own name — the same triple
@@ -32,6 +32,12 @@ function createTunnelState(id = null) {
     // are both 127.0.0.1:8890), and the same address under two users is two
     // execution contexts with different homes and locks.
     id,
+    // Whether this instance IS the hop its id names (stateFor(id) created it for
+    // that key) or the window's own tunnel, which a picker dial may MOVE to
+    // another host. A pinned instance never renames: a connect for another
+    // endpoint is a DIFFERENT tunnel, and tunnel-connect refuses it instead of
+    // moving a wire other tabs are working through.
+    pinned,
     sshClient: null,
     // The host THIS hop belongs to: { host, user, port }, or null with no hop.
     // One tunnel carries one host, and connectTunnel may only ever hand it back
@@ -92,6 +98,37 @@ const PRIMARY_KEY = "__primary__";
 const tunnelRegistry = new Map();
 tunnelRegistry.set(PRIMARY_KEY, state);
 
+// Put a state under the id it answers for. Called when stateFor makes a pinned
+// instance, and by tunnel-connect when the window's own tunnel is NAMED by a
+// dial: the key must then name the state that really speaks for that host, or
+// tunnelFor(id) hands back an empty placeholder while the live client sits on
+// another object — two answers to one question.
+//
+// A previous holder that is an empty placeholder (no wire, no host recorded) is
+// dropped rather than left beside it: listTunnels() names a host ONCE. A LIVE
+// previous holder is never dropped here — its client may be serving windows —
+// and the caller has to have seen it before it dialled (tunnel-connect's reuse
+// gate). The old key of a state that is being REnamed is dropped by name().
+function register(st) {
+  if (!st || !st.id) return st;
+  const previous = tunnelRegistry.get(st.id);
+  if (previous && previous !== st && !previous.sshClient && !previous.target) {
+    tunnelRegistry.delete(st.id);
+  }
+  tunnelRegistry.set(st.id, st);
+  return st;
+}
+
+// Name the window's own tunnel after the host a dial is for. The old key goes
+// when it named THIS state (a moved tunnel would otherwise be listed twice, and
+// by a host it is no longer on); a pinned instance is never renamed.
+function name(st, id) {
+  if (!st || st.pinned || !id) return st;
+  if (st.id && st.id !== id && tunnelRegistry.get(st.id) === st) tunnelRegistry.delete(st.id);
+  st.id = id;
+  return register(st);
+}
+
 // The state for `id`: the primary for null/undefined (the un-named tunnel), the
 // primary again once a dial has named it with this id, the registered one for a
 // key this process already holds, and a fresh registered state for a key it does
@@ -101,13 +138,22 @@ function stateFor(id) {
   if (state.id === id) return state;
   const known = tunnelRegistry.get(id);
   if (known) return known;
-  const fresh = createTunnelState(id);
-  tunnelRegistry.set(id, fresh);
+  const fresh = createTunnelState(id, true);
+  register(fresh);
   return fresh;
 }
 
 function primary() {
   return state;
+}
+
+// The state this process already holds for `id`, or null. Never creates one:
+// it answers "is somebody serving that host right now?" without making an
+// endpoint out of the question (tunnel-connect's reuse gate).
+function held(id) {
+  if (id == null) return state;
+  if (state.id === id) return state;
+  return tunnelRegistry.get(id) || null;
 }
 
 // Every state a dial has named, primary included if it has one. This is what
@@ -340,7 +386,10 @@ module.exports = {
   tunnelId,
   PRIMARY_KEY,
   stateFor,
+  register,
+  name,
   primary,
+  held,
   tunnels,
   compatSurface,
 };

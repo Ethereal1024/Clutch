@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/preload.ts and run `npm run build:host`.
-// source sha256: c1a2d222de22bcd4658ec501f9b9f000403abd465b979730dfa7a409f37f95ad
+// source sha256: d1769fac65a39b3a0b39a44b7a2639998bf562cb3fc1d9ab7aa1b4dec20d9b63
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -84,9 +84,16 @@ contextBridge.exposeInMainWorld("clutchUpdate", {
     },
 });
 contextBridge.exposeInMainWorld("clutchTunnel", {
+    // `cfg.endpoint === true` says "this dial is for a TAB's own machine", and the
+    // shell names it (a host/user/port triple). Every other dial is the window's
+    // own tunnel — the picker's — which the shell names by the host it ends up on.
+    // A page never sends an id: ids are the shell's bookkeeping, and a page that
+    // could name one could address a hop it is not on.
     connect: (cfg) => ipcRenderer.invoke("tunnel:connect", cfg),
-    status: () => ipcRenderer.invoke("tunnel:status"),
-    disconnect: () => ipcRenderer.invoke("tunnel:disconnect"),
+    // `where` is that same machine ({host,user,port}) — or nothing, for the
+    // window's own tunnel. Never a key.
+    status: (where) => ipcRenderer.invoke("tunnel:status", where),
+    disconnect: (where) => ipcRenderer.invoke("tunnel:disconnect", where),
     // list active/recently-active tunnels for the backend picker
     list: () => ipcRenderer.invoke("tunnel:list"),
     onEnd: (cb) => {

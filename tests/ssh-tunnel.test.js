@@ -185,7 +185,9 @@ async function main() {
   const stopBody = fnBody("stopTunnel");
   check(/function stopTunnel\(notify = false\)/.test(stopBody),
     "stopTunnel takes the notify flag (default: the caller manages its own disconnect)");
-  check(stopBody.indexOf("if (notify) notifyEnd();") > stopBody.indexOf("stopExecBridge();"),
+  // `notifyEnd` is given WHICH hop and URL this is: an end that cannot name its
+  // own tunnel makes every other tunnel's forwards look dead (main.js)
+  check(stopBody.indexOf("if (notify) notifyEnd(endedId, endedUrl);") > stopBody.indexOf("stopExecBridge();"),
     "the announcement follows the port teardown, not the reverse");
   check(/await stopTunnel\(true\)/.test(fnBody("healOnce")),
     "the healer announces the teardown of its last resort");
