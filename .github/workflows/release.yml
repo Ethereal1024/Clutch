@@ -187,12 +187,27 @@ jobs:
       - name: Every suite, on the floor
         run: |
           # selfcheck is the end-to-end runner and is not named *_test.py
-          python -m tests.selfcheck
-          python -m tests.lazy_check
+          fail=0
+          # One module's verdict, and — when it is red — the reason, said in a
+          # place a reader can reach. A failed step's LOG needs a GitHub login to
+          # open; an annotation does not, and the run page shows it as-is. So the
+          # last lines of the module that broke are repeated as one annotation
+          # (a step may add ten, hence one per module and not one per line).
+          # The loop also does not stop at the first failure: a floor broken in
+          # three places should say three things in one run, not over three runs.
+          suite() {
+            python -m "$1" > "/tmp/floor-$1.log" 2>&1 || {
+              echo "::error title=$1::$(tail -n 40 "/tmp/floor-$1.log" | tr '\n' ' ' | tr -d '\r' | sed 's/%/%25/g')"
+              fail=1
+            }
+          }
+          suite tests.selfcheck
+          suite tests.lazy_check
           for file in tests/*_test.py; do
             echo "--- $file"
-            python -m "tests.$(basename "$file" .py)"
+            suite "tests.$(basename "$file" .py)"
           done
+          exit "$fail"
 
   deb:
     runs-on: ubuntu-latest
