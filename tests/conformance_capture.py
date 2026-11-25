@@ -497,7 +497,8 @@ def _dump(obj) -> str:
 def write(files: dict[str, str]) -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     for name, text in files.items():
-        (OUT / name).write_text(text, encoding="utf-8", newline="\n")
+        with open((OUT / name), "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
 
 
 def verify(files: dict[str, str]) -> int:

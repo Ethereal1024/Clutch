@@ -150,7 +150,8 @@ def create_route(base: str) -> None:
     tmp = Path(tempfile.mkdtemp())
     kept = tmp / "kept.clc"
     original = "# clutch project v1\nname: kept\n---\n"
-    kept.write_text(original, encoding="utf-8", newline="\n")
+    with open(kept, "w", encoding="utf-8", newline="\n") as f:
+        f.write(original)
 
     st, got = _post(base, "/api/project/new", {"dir": str(tmp), "name": "kept"})
     check(st == 409, f"an existing .clc is a 409 (got {st}: {got})")

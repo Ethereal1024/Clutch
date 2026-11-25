@@ -88,6 +88,21 @@ def posix_scratch_tail(token: str) -> str | None:
     return None
 
 
+def _is_relative_to(p: PurePath, other: PurePath) -> bool:
+    """``PurePath.is_relative_to`` without its 3.9 floor.
+
+    That method IS this try/``relative_to`` (3.8 already has ``relative_to``),
+    so the verdict is the same and cannot drift. Named separately so the two
+    guards that must agree (``Workspace.resolve`` and ``escape_path``) both go
+    through one definition.
+    """
+    try:
+        p.relative_to(other)
+    except ValueError:
+        return False
+    return True
+
+
 def _inside_or_scratch(p: PurePath, root: PurePath, scratches: tuple[PurePath, ...]) -> bool:
     """SINGLE containment verdict: ``p`` is inside the workspace ``root``, or
     inside one of the workspace's harmless scratch dirs (test logs, /dev/null)
@@ -96,10 +111,10 @@ def _inside_or_scratch(p: PurePath, root: PurePath, scratches: tuple[PurePath, .
     (real-path guard) and ``Workspace.escape_path`` (permission gate), so the
     two can never disagree. ``p``, ``root`` and ``scratches`` must share one
     path flavor — mixing PurePosixPath with a host WindowsPath raises."""
-    if p.is_relative_to(root):
+    if _is_relative_to(p, root):
         return True
     for scratch in scratches:
-        if p.is_relative_to(scratch) and not root.is_relative_to(scratch):
+        if _is_relative_to(p, scratch) and not _is_relative_to(root, scratch):
             return True
     return False
 
@@ -469,7 +484,10 @@ class LocalWorkspace(Workspace):
         # byte-addressed (offsets + in-place header updates), and the SSH bridge
         # writes LF, so the local backend must not let Windows text mode expand
         # every \n into \r\n (that desynchronizes every stored offset).
-        p.write_text(content, encoding="utf-8", newline="\n")
+        # open(), not write_text(newline=…): that keyword is 3.10+ and these are
+        # the same bytes without it, so the declared 3.8 floor holds here too.
+        with open(p, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
 
     def list(self, path: str) -> list[str]:
         p = self.resolve(path)

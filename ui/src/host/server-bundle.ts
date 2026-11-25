@@ -203,36 +203,25 @@ async function defaultEnsureBundle() {
   return { server: out, supervisor: supOut, version };
 }
 
-// Pin the venv's LLM-stack versions into the cache key: a pip upgrade must
-// invalidate cached tars even when agent/ sources did not change.
-function venvPin() {
-  const venvPy =
-    process.platform === "win32"
-      ? path.join(REPO, ".venv", "Scripts", "python.exe")
-      : path.join(REPO, ".venv", "bin", "python");
-  if (!fs.existsSync(venvPy)) return "novenv";
-  const r = spawnSync(
-    venvPy,
-    ["-c", "import importlib.metadata as m;print(m.version('openai'),m.version('httpx2'))"],
-    { encoding: "utf8" }
-  );
-  return r.status === 0 ? r.stdout.trim().replace(/\s+/g, "-") : "unknown";
-}
-
-// Download exact wheels for the remote platform, package agent + site-packages
-// into a tar cached under a content-derived key: the script builds
-// byte-deterministic tars, so key hit == the exact artifact the remote's
-// VERSION gate expects and the rebuild (pip download: tens of seconds) is
-// skipped entirely on reconnect.
+// Package agent + an empty site-packages into a tar cached under a
+// content-derived key: the script builds byte-deterministic tars, so key hit ==
+// the exact artifact the remote's VERSION gate expects. The key used to carry
+// the venv's LLM-stack versions (a pip upgrade had to invalidate cached tars
+// without an agent/ change) and then the target interpreter's version; there is
+// no LLM stack and nothing compiled on the Python side any more
+// (pyproject.toml), so the target's PLATFORM plus the sources are the whole
+// input. Two remotes that differ only in python3 version therefore share one
+// cache entry — which is the point of a declared 3.8 floor: 3.8 and 3.12 are the
+// same artifact, not two.
 function defaultEnsurePyLibsTar(target) {
-  const key = `${target.os}-${target.arch}-${target.libc}-${target.pyver}-${venvPin()}-${sourceFingerprint().slice(0, 16)}`;
+  const key = `${target.os}-${target.arch}-${target.libc}-${sourceFingerprint().slice(0, 16)}`;
   fs.mkdirSync(CACHE, { recursive: true });
   const out = path.join(CACHE, `agent-pylibs-${key}.tar.gz`);
   if (fs.existsSync(out)) return { path: out, version: fileHash(out).slice(0, 16) };
   const tmp = path.join(CACHE, `.pylibs-${key}-${process.pid}.tar.gz`);
   const r = spawnSync(
     resolveBash(),
-    [path.join(REPO, "scripts", "build-pylibs-tar.sh"), key, tmp, target.os, target.arch, target.libc, target.pyver],
+    [path.join(REPO, "scripts", "build-pylibs-tar.sh"), tmp, target.os, target.arch, target.libc],
     { cwd: REPO, stdio: "inherit" }
   );
   if (r.status !== 0) {

@@ -86,7 +86,8 @@ def build_clc(path: Path, recent: int = 9) -> dict:
     # newline="\n": the .clc is BYTE-addressed (offsets above are counted in LF
     # bytes) — Windows text mode would write CRLF and shift every offset by one
     # byte per line, so the fixture must match what the product writes.
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
     return {
         "total": len(events),
         "comp_off": comp_off,
@@ -105,10 +106,11 @@ def main() -> None:
     # a tiny history opens through the same lazy path (no compaction → cpr_start 0)
     with tempfile.TemporaryDirectory() as d:
         p3 = Path(d) / "tiny.clc"
-        p3.write_text("\n".join([
-            "# clutch project v1", "name: tiny", "model: fake-model", "---",
-            event_to_json(UserMessageEvent(content="hi")),
-        ]) + "\n", encoding="utf-8", newline="\n")
+        with open(p3, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join([
+                "# clutch project v1", "name: tiny", "model: fake-model", "---",
+                event_to_json(UserMessageEvent(content="hi")),
+            ]) + "\n")
         proj = open_project_lazy(p3, workspace=None)
         check(isinstance(proj.log, LazyEventLog), "tiny history opens through the lazy path")
         check([e.content for e in proj.events()] == ["hi"], "tiny history events intact")
@@ -208,7 +210,8 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
         text2 = p2.read_text(encoding="utf-8").replace(
             f"cpr_start={b2['comp_off']:010d}", "cpr_start=9999999999"
         )
-        p2.write_text(text2, encoding="utf-8", newline="\n")
+        with open(p2, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text2)
         proj = open_project_lazy(p2, workspace=None)
         check(proj.log.cpr_start() == 0, "out-of-range cpr_start clamps to 0 (full window)")
         check(len(proj.log.items()) == b2["total"], "clamped file materializes everything")
@@ -218,15 +221,12 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
     with tempfile.TemporaryDirectory() as d:
         p3 = Path(d) / "legacy.clc"
         evs = [UserMessageEvent(content="task"), AssistantMessageEvent(content="work")]
-        p3.write_text(
-            "\n".join(
-                ["# clutch project v1", "name: old", "model: fake-model", "---"]
-                + [event_to_json(e) for e in evs]
-            )
-            + "\n",
-            encoding="utf-8",
-            newline="\n",
-        )
+        with open(p3, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(
+                    ["# clutch project v1", "name: old", "model: fake-model", "---"]
+                    + [event_to_json(e) for e in evs]
+                )
+                + "\n")
         before = p3.read_bytes()
         proj = open_project_lazy(p3, workspace=None)
         check(proj.log.cpr_start() == 0, "legacy .clc opens with cpr_start 0 (full window)")
@@ -234,12 +234,9 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
         check(p3.read_bytes() == before, "writable open never migrates the file (script's job)")
         # read-only open: same behavior, file untouched
         ro = Path(d) / "ro.clc"
-        ro.write_text(
-            "# clutch project v1\nname: ro\nmodel: m\n---\n"
-            + event_to_json(UserMessageEvent(content="hi")) + "\n",
-            encoding="utf-8",
-            newline="\n",
-        )
+        with open(ro, "w", encoding="utf-8", newline="\n") as f:
+            f.write("# clutch project v1\nname: ro\nmodel: m\n---\n"
+                + event_to_json(UserMessageEvent(content="hi")) + "\n")
         before = ro.read_bytes()
         proj_ro = open_project_lazy(ro, workspace=None, read_only=True)
         check(proj_ro.log.cpr_start() == 0, "read-only legacy open: full window, no migration")
@@ -253,15 +250,12 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
             CompactionEvent(summary="old summarized"),
             AssistantMessageEvent(content="recent work"),
         ]
-        l2.write_text(
-            "\n".join(
-                ["# clutch project v1", "name: oldc", "model: fake-model", "---"]
-                + [event_to_json(e) for e in evs2]
-            )
-            + "\n",
-            encoding="utf-8",
-            newline="\n",
-        )
+        with open(l2, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(
+                    ["# clutch project v1", "name: oldc", "model: fake-model", "---"]
+                    + [event_to_json(e) for e in evs2]
+                )
+                + "\n")
         proj2 = open_project_lazy(l2, workspace=None)
         check(proj2.log.cpr_start() > 0, "legacy file with a compaction derives the boundary")
         check(
@@ -349,7 +343,8 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
         header = "\n".join(
             ["# clutch project v1", "name: align-test", "model: fake-model", "---"]
         ) + "\n"
-        p9.write_text(header + "\n".join(body) + "\n", encoding="utf-8", newline="\n")
+        with open(p9, "w", encoding="utf-8", newline="\n") as f:
+            f.write(header + "\n".join(body) + "\n")
         alg = open_project_lazy(p9, workspace=None).log
         task1, task2 = offs[0], offs[13]
         check(task1 == 0 and task2 > 0,

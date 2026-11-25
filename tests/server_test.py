@@ -188,10 +188,10 @@ def main() -> int:
         def fake_save(data: dict) -> None:
             fake_settings.write_text(json.dumps(data))
 
-        with (
-            mock.patch.object(server_mod, "load_settings", fake_load),
-            mock.patch.object(server_mod, "save_settings", fake_save),
-        ):
+        # no parentheses around the list: 3.8 parses `with (a, b):` as ONE
+        # tuple expression and dies with `AttributeError: __enter__`.
+        with mock.patch.object(server_mod, "load_settings", fake_load), \
+                mock.patch.object(server_mod, "save_settings", fake_save):
             _run_server_test()
 
 
@@ -437,7 +437,8 @@ def _lazy_open_and_history(base_url, sdir) -> tuple[Path, int]:
     for ev in levents:
         lazy_lines.append(event_to_json(ev))
     # newline="\n": byte-addressed .clc — CRLF would shift every offset
-    lclc.write_text("\n".join(lazy_lines) + "\n", encoding="utf-8", newline="\n")
+    with open(lclc, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lazy_lines) + "\n")
 
     # every open is lazy now (one code path)
     st, body = http_post(f"{base_url}/api/project/open", {"path": str(lclc)})

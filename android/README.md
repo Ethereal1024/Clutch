@@ -315,6 +315,10 @@ port 0"，第 7 节新增源码断言：connect 里不再有 `await installRever
 
 **根因（三层，都在远端）**：
 
+**（2026-11-25 补注）** 第 2 层现在已作废：tar 不再带任何 wheel（`agent/` 只 import 标准库），所以
+"pydantic 版本随构建日漂移"这个源头不存在了。第 1 层（覆盖式安装）与第 3 层（会话起不来只剩 "no backend"）
+是与 wheel 无关的真问题，仍按下面的修法保持。本段所有 `SystemError` 现场保留为当时的记录。
+
 1. **pylibs 安装是"覆盖"，不是"替换"**。`ui/tunnel-bootstrap.js:303-311` 的 pylibs 分支把 tar 上传后直接
    `python3 -c "import tarfile;tarfile.open('${dir}/pylibs.tar.gz').extractall('${dir}')"` —— 解压到**正在使用的**
    `site-packages` 上，不删旧树、不落 `.new` 再原子换名（对照同一文件 `:280-302` 的 bundle 分支：
@@ -399,6 +403,12 @@ port 0"，第 7 节新增源码断言：connect 里不再有 `await installRever
    "两代叠出互不兼容的一对"在源头不再产生。可用性不是猜的：`pydantic_core` 在发布矩阵的每一条腿
    （`manylinux2014`/`musllinux_1_1` × `x86_64`/`aarch64` × `cp310`–`cp313`）都有 wheel，`pydantic` 则是
    pure-python wheel。
+   **（2026-11-25 补注：这一整条已作废——不是被修好，而是不需要了）** `agent/` 的 Python 侧只 import
+   标准库（模型调用在宿主 `ui/src/host/llm.js`），`pyproject.toml` 现在 `dependencies = []`，
+   `scripts/build-pylibs-tar.sh` 只打 `agent/` + 一个**空**的 `site-packages/`：没有 `PINS`、没有 venv
+   pip、没有 `pip download`。于是 tar 与 target 无关——矩阵 16 格的产物逐字节相同，`linux-aarch64-glibc-py3.8`
+   与 `linux-x86_64-glibc-py3.12` 的 sha256 一样（`tests/android-pylibs-path-test.js` 断言的就是这条），
+   3.9/3.10 那个由这 5 个 wheel 带来的解释器地板也随之消失。下面这段是当时的现场与修法，留作历史。
 
 **验证与回归（全绿）**：
 
@@ -408,9 +418,11 @@ port 0"，第 7 节新增源码断言：connect 里不再有 `await installRever
   `pkg_core-1.0.0.dist-info` 各只剩一代，A 独有文件（`pkg_a/only_in_a.py`、`agent/old_only.py`）消失，agent 树
   被整体替换，不留 `.old`/stage；缺 `agent/` 的 tar 与坏 tar 都**非零退出**、live 树 sha256 **逐字节不变**、
   stage 被清掉。同文件用真 `TREE_PROBE_CMD`（HOME 指向 scratch）产出 `NONE`/`OK`/`DUP:pydantic_core`/
-  `IMPORT:SystemError`，PATH 置空 → `NOPY`，并断言 `PROBE_CMD` 内含它、与其余段落解析互不干扰。
+  `IMPORT:ImportError`/`IMPORT:SyntaxError`（补注：`IMPORT:SystemError` 这个词已随 wheel 集一起消失），
+  PATH 置空 → `NOPY`，并断言 `PROBE_CMD` 内含它、与其余段落解析互不干扰。
 - `tests/tunnel-reconnect.test.js` 新增三节：5b（`pylibsTree` 缺失/`""`/`NOPY`/`OK` → 不装；`DUP:`/
-  `IMPORT:SystemError`/`NONE` → 装，且日志含 `the VERSION file matches but its tree does not (<verdict>)`）、
+  `IMPORT:`（`ImportError` 与 `SyntaxError`）/`NONE` → 装，且日志含
+  `the VERSION file matches but its tree does not (<verdict>)`）、
   5c（上传成功但解包失败 → `ok:false`、`VERSION` 未变、supervisor 未起）、6d（假 client 记顺序：`unforward:`
   在 `end` **之前**、端口仍被记住；`modelPath` 不属于本条 hop 时**不** cancel；`unforwardIn` 抛
   `Not connected` 时 teardown 仍走完）。
@@ -419,7 +431,8 @@ port 0"，第 7 节新增源码断言：connect 里不再有 `await installRever
   它自己的**编号、**没有**碰 8892；安静退出的那条**一条都不发**。
 - `node tests/android-pylibs-path-test.js`（两次真构建）：新增断言 tar 里 `openai`/`httpx2`/`pydantic`/
   `pydantic_core` 各只有一代，且版本分别等于客户端 venv 自己的版本；两次构建 sha256 仍然相同（`VERSION` 门槛与
-  `~/.clutch/bundles` 缓存的前提不变）。
+  `~/.clutch/bundles` 缓存的前提不变）。（补注：这条断言已换成"tar 里 `.dist-info` **为零**、`site-packages/`
+  为空"，并新增"py3.8/aarch64 与 py3.12/x86_64 同 hash"——同一件事，反过来的方向。）
 
 **仍未做（不在本次范围）**：真机端到端（桌面与手机两端都要人工操作）；对端 sshd 的 `ClientAliveInterval 60` /
 `ClientAliveCountMax 3`（系统级改动，待确认）——没有它，对端 sshd 默认 `ClientAliveInterval 0`，半死会话仍能占到
@@ -935,10 +948,11 @@ Release 索引下载。四处改动：
    原始 indexUrl 为键、缓存里存的 `url` 字段与错误文案也仍是原始 URL——盖章 tag 必须继续
    和磁盘上那份对上，镜像今天有明天没有都不该让缓存失效，也不该让别的 release 的索引被
    认领。手机上的 node 18 没有 Chromium 那层栈，代理仍不通（只有直连或镜像）。
-3. **CI**：`.github/workflows/release.yml` 增 `pylibs-matrix`（py3.10–3.13 ×
-   x86_64/aarch64 × glibc/musl = 16 格，`pip download --platform` 纯下载，无需
-   submodules/QEMU）+ `pylibs-index`（聚合校验：文件名哈希==内容哈希，生成
-   `pylibs-index.json` 附到 Release）。
+3. **CI**：`.github/workflows/release.yml` 增 `pylibs-matrix`（**现在是**
+   x86_64/aarch64 × glibc/musl = 4 格：键里没有解释器，tar 的字节也不依赖它——
+   当初是 py3.10–3.13 × arch × libc = 16 格、`pip download --platform`，那 16 个
+   tar 逐字节相同，见「py 侧清空 5 个钉死 wheel」）+ `pylibs-index`（聚合校验：
+   文件名哈希==内容哈希，生成 `pylibs-index.json` 附到 Release）。
 4. **确定性修复**：`scripts/build-pylibs-tar.sh` 原会把本机 venv 编译的 `.pyc`
    （cp310，远端 python3.12 根本不加载）连同仓库 `agent/__pycache__` 一起打进 tar，
    且 pyc 内嵌安装时刻 mtime → **两次构建字节不同**，缓存/VERSION 门全失效。已改
@@ -1026,9 +1040,13 @@ python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
     `[bootstrap] … the VERSION file matches but its tree does not (DUP:pydantic_core) — installing
     over it`，随后重装完成；连上后远端 `ls ~/.clutch-server/site-packages | grep dist-info` 里
     `pydantic*` 各只剩一代，`~/.clutch-server/{VERSION,STRATEGY}` 已更新。反向的一半同样可验：
-    tar 传坏（上传成功、解包失败）时界面报的是 `the remote could not unpack the wheels (exit N…).
+    tar 传坏（上传成功、解包失败）时界面报的是 `the remote could not unpack the artifact (exit N…).
     Nothing was replaced …`，且**远端 `VERSION` 没变**（`ssh` 上机复核）——这是"失败不再留下半棵树
     的证据"，也是下一次连接会重试的前提。
+    - **（2026-11-25 补注）** 两代 `pydantic*` 只可能来自**旧版本留下的树**：当前 tar 里没有 wheel，
+      `site-packages/` 是空的，新装的远端那一条 `ls` 什么都不打。所以这一项现在的用途是"从老树升上来"
+      的回归，不是常态；常态树不自洽时给的是 `IMPORT:ImportError` / `IMPORT:SyntaxError`（探针导入
+      `agent.server`，不再导入 `pydantic`）。
 12. 反向转发只归还自己的编号：断开后停一两秒，在远端 `ss -ltnp | grep 127.0.0.1` 里，那条会话
     （以及它自己那条 `sshd: ubuntu@notty`）留下的监听不该还在——**监听不残留**是这条唯一的判据
     （客户端不会替对端去收回什么，也收不了：一条连接只能 cancel 被它自己授予的 forward）。
@@ -1153,20 +1171,21 @@ job 已把这条路线整个自动化**——此处仅供本机自建 APK 时手
 **B. 局域网快路（迭代最快，不依赖 CI）**——在 PC 上现构建、现供出，命名逐字对齐 CI：
 
 ```bash
-.venv/bin/python -m pip --version || uv pip install pip   # 前置
-ssh <远端> python3 --version                               # 先确认远端 pyver，例如 3.12
+ssh <远端> python3 --version                               # 只要 >= 3.8；版本不进 tar 的名字
 mkdir -p /tmp/pylibs-srv && cd /tmp/pylibs-srv
-bash <仓库>/scripts/build-pylibs-tar.sh k t.tar.gz Linux x86_64 glibc 3.12
+bash <仓库>/scripts/build-pylibs-tar.sh t.tar.gz Linux x86_64 glibc
 H=$(sha256sum t.tar.gz | cut -d' ' -f1)
-mv t.tar.gz "agent-pylibs-linux-x86_64-glibc-py3.12-${H:0:16}.tar.gz"
-printf '{"linux-x86_64-glibc-py3.12":{"file":"agent-pylibs-linux-x86_64-glibc-py3.12-%s.tar.gz","sha256":"%s","version":"%s"}}\n' \
+mv t.tar.gz "agent-pylibs-linux-x86_64-glibc-${H:0:16}.tar.gz"
+printf '{"linux-x86_64-glibc":{"file":"agent-pylibs-linux-x86_64-glibc-%s.tar.gz","sha256":"%s","version":"%s"}}\n' \
   "${H:0:16}" "$H" "${H:0:16}" > pylibs-index.json
 python3 -m http.server 8000        # 供出；aarch64 远端同法换 arch 再建一条
 ```
 
 然后 `echo "http://<PC局域网IP>:8000/pylibs-index.json" > android/host/pylibs-index-url.txt`
-→ sync → 重新出 APK。手机与 PC 同一 Wi-Fi 即可。构建脚本用 `pip download
---platform` 纯下载，x86 的 PC 也能直接构建 aarch64 的 tar，无需 QEMU。
+→ sync → 重新出 APK。手机与 PC 同一 Wi-Fi 即可。构建脚本不打 wheel：只拷 `agent/` 与空的
+`site-packages/`，所以 x86 的 PC 也能直接构建 aarch64 的 tar，无需 QEMU；tar 的字节与 target 无关
+（`tests/android-pylibs-path-test.js` 钉着这条）。索引键里**没有解释器版本**——一台 py3.8 远端和一台
+py3.12 远端拿的是同一个 artifact，解释器地板（`PY_FLOOR = [3, 8]`）是 host 侧对探针结果的一句话判断。
 
 ### 第 3 步 · 真机验收（M1+M2 判据）
 

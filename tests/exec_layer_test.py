@@ -330,12 +330,41 @@ def check_prompts(reached: dict[str, Path]) -> None:
     print("   tests/prompt.test.js holds that side of the split)")
 
 
+def _stdlib_names() -> set[str]:
+    """Every stdlib top-level module name, on any interpreter this suite runs on.
+
+    `sys.stdlib_module_names` is 3.10. The suite also runs on the floor the
+    package declares (3.8), where that attribute does not exist — so fall back
+    to the two sources that answer the same question there: the interpreter's
+    own builtins, and the directory its stdlib lives in (site-packages is a
+    sibling of it, not inside it, so a third-party module still shows up).
+    """
+    names = getattr(sys, "stdlib_module_names", None)
+    if names is not None:
+        return set(names)
+    import pkgutil
+    import sysconfig
+
+    out = set(sys.builtin_module_names)
+    paths = sysconfig.get_paths()
+    for key in ("stdlib", "platstdlib"):
+        out.update(m.name for m in pkgutil.iter_modules([paths[key]]))
+    # The stdlib modules of the OTHER platforms are not in this interpreter's
+    # directory at all, and `sys.stdlib_module_names` was where they came from.
+    # agent/ legitimately imports one of them behind an `os.name` guard
+    # (procmgr's Windows console control), so the fallback has to know the names
+    # an interpreter on another OS ships.
+    out.update({"msvcrt", "nt", "ntpath", "winreg", "winsound", "_winapi", "_msi"})
+    return out
+
+
 def check_no_model_client() -> None:
+    stdlib = _stdlib_names()
     third = sorted({
         root.split(".")[0]
         for _, dep in import_names(python_files(AGENT))
         for root in [dep]
-        if root.split(".")[0] not in sys.stdlib_module_names and root.split(".")[0] != "agent"
+        if root.split(".")[0] not in stdlib and root.split(".")[0] != "agent"
     })
     check(not third,
           f"agent/ imports nothing outside the stdlib and itself ({', '.join(third) or 'none'})")

@@ -409,17 +409,14 @@ def check_project_file(config: Config) -> None:
         evs.append(CompactionEvent(summary="sum"))
         for i in range(61, 70):
             evs.append(AssistantMessageEvent(content=f"r{i}"))
-        legacy.write_text(
-            "\n".join(
-                ["# clutch project v1", "name: legacy", "model: fake-model", "memory_index=0000000000,ZZ", "---"]
-                + [event_to_json(e) for e in evs]
-                + ["[memories]", '{"title": "m1", "content": "one", "updated": 0}']
-                + [event_to_json(AssistantMessageEvent(content=f"after{i}")) for i in range(70, 75)]
-            )
-            + "\n",
-            encoding="utf-8",
-            newline="\n",  # .clc is BYTE-addressed: text mode CRLF would shift offsets
-        )
+        with open(legacy, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(
+                    ["# clutch project v1", "name: legacy", "model: fake-model", "memory_index=0000000000,ZZ", "---"]
+                    + [event_to_json(e) for e in evs]
+                    + ["[memories]", '{"title": "m1", "content": "one", "updated": 0}']
+                    + [event_to_json(AssistantMessageEvent(content=f"after{i}")) for i in range(70, 75)]
+                )
+                + "\n")
         legacy_before = legacy.read_bytes()
         mig = open_project_lazy(legacy)
         check(legacy.read_bytes() == legacy_before, "a writable open never rewrites a legacy file")
@@ -442,13 +439,10 @@ def check_project_file(config: Config) -> None:
 
         # read-only open: same reader, and the file is still untouched
         ro = Path(ptmp) / "ro.clc"
-        ro.write_text(
-            "# clutch project v1\nname: ro\nmodel: m\n---\n"
-            + event_to_json(UserMessageEvent(content="task")) + "\n"
-            + "[memories]\n" + '{"title": "ro1", "content": "readonly", "updated": 0}\n',
-            encoding="utf-8",
-            newline="\n",  # .clc is BYTE-addressed (offsets), never CRLF
-        )
+        with open(ro, "w", encoding="utf-8", newline="\n") as f:
+            f.write("# clutch project v1\nname: ro\nmodel: m\n---\n"
+                + event_to_json(UserMessageEvent(content="task")) + "\n"
+                + "[memories]\n" + '{"title": "ro1", "content": "readonly", "updated": 0}\n')
         before = ro.read_bytes()
         roproj = open_project_lazy(ro, read_only=True)
         r = ToolRegistry(build_tools(config, log=roproj.log), log=roproj.log).execute(
@@ -484,7 +478,8 @@ def check_windowed_clc(config: Config) -> None:
         lines.append(event_to_json(CompactionEvent(summary="old work summarized")))
         for i in range(101, 121):
             lines.append(event_to_json(AssistantMessageEvent(content=f"recent {i}")))
-        p.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+        with open(p, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(lines) + "\n")
 
         proj = open_project_lazy(p, workspace=None)
         log = proj.log
@@ -519,17 +514,14 @@ def check_windowed_clc(config: Config) -> None:
 
         # no cpr_start line: full window; open never migrates it
         legacy = Path(ptmp) / "legacy.clc"
-        legacy.write_text(
-            "\n".join(
-                ["# clutch project v1", "name: old", "model: fake-model", "---"]
-                + [event_to_json(ev) for ev in events]
-                + [event_to_json(CompactionEvent(summary="old work summarized"))]
-                + [event_to_json(AssistantMessageEvent(content=f"recent {i}")) for i in range(101, 121)]
-            )
-            + "\n",
-            encoding="utf-8",
-            newline="\n",  # .clc is BYTE-addressed (offsets), never CRLF
-        )
+        with open(legacy, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(
+                    ["# clutch project v1", "name: old", "model: fake-model", "---"]
+                    + [event_to_json(ev) for ev in events]
+                    + [event_to_json(CompactionEvent(summary="old work summarized"))]
+                    + [event_to_json(AssistantMessageEvent(content=f"recent {i}")) for i in range(101, 121)]
+                )
+                + "\n")
         legacy_before = legacy.read_bytes()
         up = open_project_lazy(legacy, workspace=None)
         check(isinstance(up.log, LazyEventLog) and up.log.cpr_start() > 0,
@@ -573,7 +565,8 @@ def check_lazy_open_legacy_notes(config: Config) -> None:
         lines.append("[memories]")
         lines.append('{"title": "a durable fact", "content": "the detail", "updated": 0}')
         lines.append(event_to_json(AssistantMessageEvent(content="after memory")))
-        p.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+        with open(p, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(lines) + "\n")
 
         proj = open_project_lazy(p, workspace=None)
         check(

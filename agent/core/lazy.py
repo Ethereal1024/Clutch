@@ -339,9 +339,25 @@ class LazyEventLog:
         """All materialized durable events, in file order (the window)."""
         return list(self._events)
 
+    def _pairs(self) -> list[tuple[int, Event]]:
+        """(relative_byte_offset, event) in file order.
+
+        The two lists are appended together on every materialize, so a length
+        mismatch is a broken invariant rather than a caller error: it is said
+        here, once, instead of by every reader. ``zip(..., strict=True)`` said
+        the same thing and raised the same ValueError — it is just 3.10+, and
+        this side runs on the declared floor of 3.8.
+        """
+        if len(self._offsets) != len(self._events):
+            raise ValueError(
+                f"{len(self._offsets)} offsets but {len(self._events)} events: "
+                "the materialized log's two halves fell out of lockstep"
+            )
+        return list(zip(self._offsets, self._events))
+
     def items(self) -> list[tuple[int, Event]]:
         """Materialized (relative_byte_offset, event) pairs, in file order."""
-        return list(zip(self._offsets, self._events, strict=True))
+        return self._pairs()
 
     # ------------------------------------------------------------- the window
 
@@ -474,7 +490,7 @@ class LazyEventLog:
         started after the newest compaction) costs nothing at all: the answer is
         already resident.
         """
-        items = list(zip(self._offsets, self._events, strict=True))
+        items = self._pairs()
         for i in range(len(items) - 1, -1, -1):
             if items[i][1].type == "final":
                 # the turn opens right after that final — or there is no open

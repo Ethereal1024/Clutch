@@ -28,7 +28,7 @@ function serveArtifacts(tars) {
   // per request so the test can tamper with entries between calls.
   const index = {};
   for (const [file, buf] of tars) {
-    // CI naming: agent-pylibs-<os>-<arch>-<libc>-py<ver>-<hash>.tar.gz
+    // CI naming: agent-pylibs-<os>-<arch>-<libc>-<hash>.tar.gz
     const m = file.match(/^agent-pylibs-(.+)-([0-9a-f]{16})\.tar\.gz$/);
     if (!m) throw new Error("bad fixture name: " + file);
     index[m[1]] = { file, sha256: sha256(buf), version: m[2] };
@@ -124,8 +124,8 @@ async function main() {
   const badHash16 = sha256(bad).slice(0, 16);
   const srv = await serveArtifacts(
     new Map([
-      [`agent-pylibs-linux-x86_64-glibc-py3.12-${goodHash16}.tar.gz`, good],
-      [`agent-pylibs-linux-aarch64-musl-py3.13-${badHash16}.tar.gz`, bad],
+      [`agent-pylibs-linux-x86_64-glibc-${goodHash16}.tar.gz`, good],
+      [`agent-pylibs-linux-aarch64-musl-${badHash16}.tar.gz`, bad],
     ])
   );
   const tarFetches = () => srv.fetches.filter((u) => u.endsWith(".tar.gz")).length;
@@ -142,13 +142,13 @@ async function main() {
   // 2. a probe result the CI matrix never published: reject, do not guess —
   // and say so to the gate as well as to the upload
   await assert.rejects(
-    () => provider.ensurePyLibsTar({ os: "sunos", arch: "riscv64", libc: "glibc", pyver: "3.12" }),
-    /no prebuilt pylibs artifact for sunos-riscv64-glibc-py3\.12/,
+    () => provider.ensurePyLibsTar({ os: "sunos", arch: "riscv64", libc: "glibc" }),
+    /no prebuilt pylibs artifact for sunos-riscv64-glibc:/,
     "missing index key rejects"
   );
   await assert.rejects(
-    () => provider.resolvePyLibsVersion({ os: "sunos", arch: "riscv64", libc: "glibc", pyver: "3.12" }),
-    /no prebuilt pylibs artifact for sunos-riscv64-glibc-py3\.12/,
+    () => provider.resolvePyLibsVersion({ os: "sunos", arch: "riscv64", libc: "glibc" }),
+    /no prebuilt pylibs artifact for sunos-riscv64-glibc:/,
     "missing index key rejects for the gate's question too"
   );
 
@@ -159,7 +159,7 @@ async function main() {
   // the check, install never reached, and the phone could not connect at all.
   assert.strictEqual(tarFetches(), 0, "nothing has been downloaded yet");
   assert.strictEqual(
-    await provider.resolvePyLibsVersion({ os: "Linux", arch: "x86_64", libc: "glibc", pyver: "3.12" }),
+    await provider.resolvePyLibsVersion({ os: "Linux", arch: "x86_64", libc: "glibc" }),
     goodHash16,
     "the gate value is the index entry's version (uname -s 'Linux' maps onto the lowercase key)"
   );
@@ -170,13 +170,13 @@ async function main() {
   // kept self-consistent — sha256 and version agree on a hash the served bytes
   // do not have — because an entry that contradicted itself would be refused
   // before any download (next check).
-  srv.index["linux-aarch64-musl-py3.13"] = {
-    file: `agent-pylibs-linux-aarch64-musl-py3.13-${badHash16}.tar.gz`,
+  srv.index["linux-aarch64-musl"] = {
+    file: `agent-pylibs-linux-aarch64-musl-${badHash16}.tar.gz`,
     sha256: sha256(good), // the lie: this file holds `bad`, not `good`
     version: goodHash16,
   };
   await assert.rejects(
-    () => provider.ensurePyLibsTar({ os: "linux", arch: "aarch64", libc: "musl", pyver: "3.13" }),
+    () => provider.ensurePyLibsTar({ os: "linux", arch: "aarch64", libc: "musl" }),
     /failed sha256/,
     "tampered manifest is caught by the recomputed hash"
   );
@@ -191,19 +191,19 @@ async function main() {
   // install on every reconnect. It is refused before any download, and the
   // gate's question is refused with the same verdict — a version string is not
   // worth guessing from half an entry.
-  srv.index["linux-aarch64-musl-py3.13"] = {
-    file: `agent-pylibs-linux-aarch64-musl-py3.13-${badHash16}.tar.gz`,
+  srv.index["linux-aarch64-musl"] = {
+    file: `agent-pylibs-linux-aarch64-musl-${badHash16}.tar.gz`,
     sha256: sha256(bad),
     version: goodHash16, // ≠ sha256.slice(0,16)
   };
   const downloadsBeforeDrift = tarFetches();
   await assert.rejects(
-    () => provider.ensurePyLibsTar({ os: "linux", arch: "aarch64", libc: "musl", pyver: "3.13" }),
+    () => provider.ensurePyLibsTar({ os: "linux", arch: "aarch64", libc: "musl" }),
     /disagrees with itself/,
     "an index entry that contradicts its own sha256 is refused"
   );
   await assert.rejects(
-    () => provider.resolvePyLibsVersion({ os: "linux", arch: "aarch64", libc: "musl", pyver: "3.13" }),
+    () => provider.resolvePyLibsVersion({ os: "linux", arch: "aarch64", libc: "musl" }),
     /disagrees with itself/,
     "…and the gate is never handed that version"
   );
@@ -214,7 +214,6 @@ async function main() {
     os: "linux",
     arch: "x86_64",
     libc: "glibc",
-    pyver: "3.12",
   });
   assert.strictEqual(
     path.dirname(p),
@@ -223,7 +222,7 @@ async function main() {
   );
   assert.strictEqual(
     path.basename(p),
-    `agent-pylibs-linux-x86_64-glibc-py3.12-${goodHash16}.tar.gz`,
+    `agent-pylibs-linux-x86_64-glibc-${goodHash16}.tar.gz`,
     "kept the CI artifact name"
   );
   assert(fs.readFileSync(p).equals(good), "on-disk bytes are byte-identical to the artifact");
@@ -247,7 +246,6 @@ async function main() {
     os: "linux",
     arch: "x86_64",
     libc: "glibc",
-    pyver: "3.12",
   });
   assert.strictEqual(again.path, p, "cache hit returns the same path");
   assert.strictEqual(again.version, goodHash16, "cache hit still recomputes the gate value");
@@ -271,7 +269,6 @@ async function main() {
     os: "linux",
     arch: "x86_64",
     libc: "glibc",
-    pyver: "3.12",
   });
   assert.strictEqual(offlineHit.version, goodHash16, "offline: the gate value is unchanged");
   assert.strictEqual(offlineHit.path, p, "offline: the cached tar is the artifact");
@@ -280,7 +277,7 @@ async function main() {
   // so an offline gate still recognises a remote that already runs our artifact
   // — that recognition is what keeps the tar transfer out of a reconnect
   assert.strictEqual(
-    await offline.resolvePyLibsVersion({ os: "linux", arch: "x86_64", libc: "glibc", pyver: "3.12" }),
+    await offline.resolvePyLibsVersion({ os: "linux", arch: "x86_64", libc: "glibc" }),
     goodHash16,
     "offline: the cached catalogue answers the gate"
   );
@@ -288,7 +285,7 @@ async function main() {
   // ...but only for an artifact that is really here: a target whose tar was
   // never downloaded still reports the network failure rather than guessing
   await assert.rejects(
-    () => offline.ensurePyLibsTar({ os: "linux", arch: "aarch64", libc: "musl", pyver: "3.13" }),
+    () => offline.ensurePyLibsTar({ os: "linux", arch: "aarch64", libc: "musl" }),
     /ENOTFOUND/,
     "offline + no cached tar for this target: the fetch error still surfaces"
   );
@@ -301,7 +298,7 @@ async function main() {
       createAndroidArtifactProvider({
         indexUrl: srv.url + "?tag=v9.9.9",
         fetchIndex: () => Promise.reject(new Error("offline")),
-      }).ensurePyLibsTar({ os: "linux", arch: "x86_64", libc: "glibc", pyver: "3.12" }),
+      }).ensurePyLibsTar({ os: "linux", arch: "x86_64", libc: "glibc" }),
     /offline/,
     "a cached index for another release URL is not reused"
   );
@@ -321,16 +318,16 @@ async function main() {
   // server that answers under /m/ alone.
   const mirrorTar = Buffer.from([0x1f, 0x8b, 0x07, 0x42]);
   const mirrorHash16 = sha256(mirrorTar).slice(0, 16);
-  const mirrorFile = `agent-pylibs-linux-riscv64-glibc-py3.12-${mirrorHash16}.tar.gz`;
+  const mirrorFile = `agent-pylibs-linux-riscv64-glibc-${mirrorHash16}.tar.gz`;
   // a second artifact, for the run that has to prove the SETTINGS FILE is a door
   // too (10b): a cached tar would prove nothing, so this one is fresh
   const fileTar = Buffer.from([0x1f, 0x8b, 0x07, 0x43]);
   const fileHash16 = sha256(fileTar).slice(0, 16);
-  const fileArtifact = `agent-pylibs-linux-riscv64-musl-py3.13-${fileHash16}.tar.gz`;
+  const fileArtifact = `agent-pylibs-linux-riscv64-musl-${fileHash16}.tar.gz`;
   const mirror = await serveMirror(
     {
-      "linux-riscv64-glibc-py3.12": { file: mirrorFile, sha256: sha256(mirrorTar), version: mirrorHash16 },
-      "linux-riscv64-musl-py3.13": { file: fileArtifact, sha256: sha256(fileTar), version: fileHash16 },
+      "linux-riscv64-glibc": { file: mirrorFile, sha256: sha256(mirrorTar), version: mirrorHash16 },
+      "linux-riscv64-musl": { file: fileArtifact, sha256: sha256(fileTar), version: fileHash16 },
     },
     new Map([
       [mirrorFile, mirrorTar],
@@ -345,7 +342,6 @@ async function main() {
       os: "linux",
       arch: "riscv64",
       libc: "glibc",
-      pyver: "3.12",
     });
     assert.strictEqual(reached.version, mirrorHash16, "the mirrored release supplies the gate value");
     assert(fs.readFileSync(reached.path).equals(mirrorTar), "…and its bytes, sha256-verified as always");
@@ -386,7 +382,6 @@ async function main() {
       os: "linux",
       arch: "riscv64",
       libc: "musl",
-      pyver: "3.13",
     });
     assert.strictEqual(byFile.version, fileHash16, "a mirror in the settings file supplies the gate value");
     assert(fs.readFileSync(byFile.path).equals(fileTar), "…and its bytes, sha256-verified as always");
@@ -411,7 +406,7 @@ async function main() {
       fetchIndex: () => Promise.reject(new Error("offline")),
     });
     assert.strictEqual(
-      await offlineOriginal.resolvePyLibsVersion({ os: "linux", arch: "riscv64", libc: "glibc", pyver: "3.12" }),
+      await offlineOriginal.resolvePyLibsVersion({ os: "linux", arch: "riscv64", libc: "glibc" }),
       mirrorHash16,
       "with the mirror off, the catalogue the mirrored run cached for the ORIGINAL url still answers"
     );
@@ -428,14 +423,14 @@ async function main() {
   // ANSWER, and a mirror serving the same path would say the same thing.
   const ladderTar = Buffer.from([0x1f, 0x8b, 0x07, 0x45]);
   const ladderHash16 = sha256(ladderTar).slice(0, 16);
-  const ladderFile = `agent-pylibs-linux-armv7l-musl-py3.11-${ladderHash16}.tar.gz`;
+  const ladderFile = `agent-pylibs-linux-armv7l-musl-${ladderHash16}.tar.gz`;
   const ladder = await serveMirror(
-    { "linux-armv7l-musl-py3.11": { file: ladderFile, sha256: sha256(ladderTar), version: ladderHash16 } },
+    { "linux-armv7l-musl": { file: ladderFile, sha256: sha256(ladderTar), version: ladderHash16 } },
     new Map([[ladderFile, ladderTar]])
   );
   // nothing listens on the discard port: a release host refused at once
   const DEAD_INDEX = "http://127.0.0.1:9/pylibs-index.json";
-  const ladderTarget = { os: "linux", arch: "armv7l", libc: "musl", pyver: "3.11" };
+  const ladderTarget = { os: "linux", arch: "armv7l", libc: "musl" };
   const laddered = createAndroidArtifactProvider({ indexUrl: DEAD_INDEX, mirrorList: [ladder.base] });
   assert.strictEqual(
     await laddered.resolvePyLibsVersion(ladderTarget),
@@ -468,9 +463,9 @@ async function main() {
   // and the mismatch ends the ladder: it is a fact about the bytes, not the path
   const wrong = Buffer.from([0x1f, 0x8b, 0x07, 0x46]);
   const wrongHash16 = sha256(wrong).slice(0, 16);
-  const wrongFile = `agent-pylibs-linux-armv7l-glibc-py3.11-${wrongHash16}.tar.gz`;
+  const wrongFile = `agent-pylibs-linux-armv7l-glibc-${wrongHash16}.tar.gz`;
   const liar = await serveMirror(
-    { "linux-armv7l-glibc-py3.11": { file: wrongFile, sha256: wrongHash16, version: wrongHash16 } },
+    { "linux-armv7l-glibc": { file: wrongFile, sha256: wrongHash16, version: wrongHash16 } },
     new Map([[wrongFile, ladderTar]]) // the entry's hash names bytes these are not
   );
   await assert.rejects(
@@ -479,7 +474,6 @@ async function main() {
         os: "linux",
         arch: "armv7l",
         libc: "glibc",
-        pyver: "3.11",
       }),
     /failed sha256/,
     "a mirror's bytes are weighed against the catalogue's sha256"

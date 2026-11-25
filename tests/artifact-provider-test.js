@@ -38,7 +38,7 @@ async function main() {
   const b = await ensureBundle();
   assert.deepStrictEqual(b, { server: "s", supervisor: "v", version: "abc" }, "ensureBundle routes to the provider");
 
-  const target = { os: "Linux", arch: "aarch64", libc: "musl", pyver: "3.12" };
+  const target = { os: "Linux", arch: "aarch64", libc: "musl" };
   assert.strictEqual(await resolvePyLibsVersion(target), "deadbeef", "resolvePyLibsVersion routes to the provider");
   assert.deepStrictEqual(calls[1], ["version", target], "the remote probe target passes through untouched");
 

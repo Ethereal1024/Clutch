@@ -341,12 +341,15 @@ async function main() {
   // ---- 5b. the VERSION file is a claim; the tree is the evidence ----
   //
   // The field's "no backend": a site-packages that had been installed OVER (a
-  // merge of three releases) held pydantic 2.13.5 beside pydantic_core 2.50.1
-  // and raised SystemError at import — under a VERSION file that matched the
+  // merge of three releases) held two generations of pydantic/pydantic_core and
+  // raised SystemError at import — under a VERSION file that matched the
   // release being connected to exactly. So the gate said "already installed" on
   // every reconnect, the install was skipped, and the far side's server died at
   // import with nothing on this side to show for it. The gate now asks the tree
-  // as well, and a marker over a tree that cannot import is an install.
+  // as well, and a marker over a tree that cannot import is an install. The
+  // wheels are gone (the agent is stdlib-only); the mechanism is not — the tree
+  // still has to import its own code, and leftover metadata from an older
+  // release is still the shape a merge leaves.
   uploads = 0;
   tarFetches = 0;
   remote.reset({ bound: true, serving: true, version: VERSION });
@@ -358,7 +361,7 @@ async function main() {
   for (const [tree, what] of [
     ["", "an answer that came back empty"],
     ["NOPY", "a remote with no python3 to ask with"],
-    ["OK", "a tree that imports its wheels and has one generation of each"],
+    ["OK", "a tree that imports the far side's own code and carries one generation of metadata"],
   ]) {
     uploads = 0;
     tarFetches = 0;
@@ -369,7 +372,7 @@ async function main() {
       `a matching VERSION over ${what} is not an install (${tree || "no answer"})`
     );
   }
-  for (const tree of ["DUP:pydantic_core", "IMPORT:SystemError", "NONE"]) {
+  for (const tree of ["DUP:pydantic_core", "IMPORT:ImportError", "IMPORT:SyntaxError", "NONE"]) {
     uploads = 0;
     tarFetches = 0;
     remote.reset({ bound: true, serving: true, version: VERSION });
@@ -398,7 +401,7 @@ async function main() {
     const failed = await installServer(probeFor({ pylibsTree: "OK" }), { force: "pylibs", progress: () => {} });
     check(failed.ok === false, "a pylibs install that fails on the far side fails the connect");
     check(
-      /could not unpack the wheels/.test(failed.error || "") && /not a gzip file/.test(failed.error || ""),
+      /could not unpack the artifact/.test(failed.error || "") && /not a gzip file/.test(failed.error || ""),
       "…naming what went wrong on the far side: " + (failed.error || "")
     );
     check(remote.version === "bbbbbbbbbbbbbbbb", "…and the VERSION marker is NOT written over a tree that did not land");

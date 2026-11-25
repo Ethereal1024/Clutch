@@ -205,7 +205,7 @@ flowchart TD
   - 已落地第三步（组合根）：`ui/run-host.js` 的 `createRunHost({log, llm, tools, session, contextWindowBytes, onEvent?, warn?})` → `{start, stop, step, drive, state}`（就是 `ui/run.js` 自己那五个答案，没有第二套状态机）。它把 `createRun` + `createDerive` + `createCompactor` + `prompt.say` 接在一起，并负责唯一一件事：**两套事件词表的对译**。`model` 端口每次都问 `tools.schemas()`（组件的启用/禁用在同一轮的两步之间也是真的），把 `llm-client` 的 `text`/`reasoning`/`tool_call_start`/`tool_call_delta` 译成页面既有的 `text_delta{content}`/`reasoning_delta{content}`/`tool_call_delta{tool_call_id,name,delta,ui}`，`retry` 译成 `llm_retry{attempt,max_retries,discard,message}`，`finish` 不译（答案由循环落盘）；返回的 `toolCalls` 每条按 `tools.ui(name)` / `tools.pathArg(name)` 盖上声明。`observe` 译成 `state_update{key:"execution_status",value}`：`idle` / `final` 且 `status==="error"` → `error`、`final` 的其它 → `finished`、其余 → `running`；host 自己的 `step`/`drive` 在抛出前再补一条 `error`（永远转圈的 spinner 不是错误信息）。
   - **发现并修掉的接线错**：`log.read()` 只有一种形状——压缩器的 `{items, windowBytes, cprStart, lastCompaction}`，而循环要的是事件数组。组合根里 `readEvents()` 做这个适配（丢掉 offset，`ui/run.js` 不认字节偏移），并且对 P2 提一条硬要求：`items` 必须回溯到**至少** `min(cprStart, 当前未闭合 turn 的第一行)`。压缩器自己按 `offset >= cprStart` 过滤，多出来的头它不花钱；而折叠是从“打开这一轮的那条 `user_message`”答出 `task` 的（`ui/run-state.js`），轮中的一次压缩会把那一行推到 `cprStart` 之前——只给窗口，续跑的那一轮就会带着空任务去问模型。
   - 测试：`tests/run-host.test.js`（74 条：端口逐个缺失即 `TypeError`、窗口必须是正数、一轮 model→tool→model→final 的完整账——`schemas()` 每次模型调用一次、`ui`/`path_arg` 盖上、`runTool` 收到 `{call,signal}`、日志里只有六种 durable 而 `onEvent` 只见 display、`state_update` 序列 running×3→finished、小窗口触发压缩且窗口滑到 `log_offset`、压缩后任务仍在上下文里、`retry`→`llm_retry`、工具抛错→先 `error` 再原样抛且不落 `final`、续跑那一轮照旧、Stop 用真的 `cancelled.md` 文案、空日志 `idle`）；`tests/run.test.js` 第 10 段是这套次序的契约。
-  - 已落地第四步（IPC/bridge 接线）：`ui/run-session.js` 接进 `ui/main.js` 的 `run:start`/`run:stop`/`run:step`/`run:drive`/`run:state` ipcMain handlers（每窗口一个实例，`runInstances` Map，`win.on("closed")` 时 `stopAndFlush` 写 aborted final）；同步接进 `android/host/android-host.js` 的 `clutchRun` bridge namespace（单窗口，`runInst` 槽，`loadSessionRun()` 懒加载——phone 还不跑循环，P1-6 前 UI_NODE 不扩展）。`ui/preload.js` 暴露 `window.clutchRun{start,stop,step,drive,state,onEvent}`。Stop 收尾：`stopAndFlush(run)` → `run.stop()` + `drive()` 捕 rejection + `run.step()` 写 aborted final。
+  - 已落地第四步（IPC/bridge 接线）：`ui/run-session.js` 接进 `ui/main.js` 的 `run:start`/`run:stop`/`run:step`/`run:drive`/`run:state` ipcMain handlers（每窗口一个实例，`runInstances` Map，`win.on("closed")` 时 `stopAndFlush` 写 aborted final）；同步接进 `android/host/android-host.js` 的 `clutchRun` bridge namespace（按 slot 一个实例，`loadSessionModule()` 懒加载 = `useUI("run-session.js")`）。**补记（bugfix）**：这一条原先带“phone 还不跑循环，P1-6 前 UI_NODE 不扩展”，可手机早就在跑循环了——`scripts/sync-android-host.sh` 的 `UI_NODE` 一直没补 `run-session.js` 那棵树（`run.js` / `run-host.js` / `run-state.js` / `log-client.js` / `tool-client.js` / `tool-decl.js` / `llm-client.js`），于是 APK 起得来、bridge 绑得上、**每一轮**都答 `run failed: the run loop is not available in this build`。修法：整棵树进 `UI_NODE`，加载改走 `useUI()`（这样 `tests/android-assets.test.js` 第 1 条 `useUI()` sweep 才会盯住它，外加一条显式断言“loop 必须经 `useUI()` 解析”），第 2 条 require 闭包跟着守住整棵树。`ui/preload.js` 暴露 `window.clutchRun{start,stop,step,drive,state,onEvent}`。Stop 收尾：`stopAndFlush(run)` → `run.stop()` + `drive()` 捕 rejection + `run.step()` 写 aborted final。
   - 端口接线：`derive: createDerive({mode, components, shell, memory})`、`model:` 上面的 `llm.ask` 翻译层（`tools` 来自 P3-1 的工具声明；P3 之前只跑无工具 turn）、`stream: llmClient.stream`（给压缩器）、`text: prompt.say`、`runTool` 到执行端点（P3-2）。广播：`state_update` + 各类 delta 走 `/events`，durable 六种只进 `.clc`。
 - [x] **P1-5 页面退为 view**：`ui/js/permissions.js` 只显示 `allow/deny/ask` + 回传用户对**这一次调用**的决定；`ui/js/sse-stream.js` 保持 `document.hidden → suspend / 回来 resync` 的姿态不变。
   - 已落地：`ui/js/render-events.js` 的 `run()` / `stop()` 不再碰 `/api/run` / `/api/stop`（`ui/js` 里已无这两个 URL，路由表里那两条留给 P4 删），改走 `window.clutchRun.start(payload)` → `drive()` / `stop()`。`hostCall()` 把两种壳的答复归一成一个带 `.code` 的 `Error`（`ui/preload.js` 答 `{ok:false,error}`、`ui/bridge-shim.js` reject，页面不该知道自己是哪一个）；没有 code 或 `no_session` → `connectionLost(...)`，`project_mismatch` 留在页内说清楚。`opened` 标志决定失败时要不要 `setStatus("idle")`：轮中间失败把“运行中/出错”的权威留给 host 自己的 `error` 帧。
@@ -685,3 +685,125 @@ CLUTCH_E2E_HOST=… CLUTCH_E2E_USER=… CLUTCH_E2E_PASS=… node tests/remote-bo
 5. 市场：只有一个 `clutch-websearch`，且它是前端形态；本机 registry 里没有 cli 残留。
 6. 全仓：搜不到第二条路径式的兜底。
 7. 重连可见（D12）：拔网跑一次 turn → `.clc` 里能看到每一次尝试（attempt 号 + 原因），界面不会只剩 spinner；Stop 一定停得住；网回来之后同一次 turn 继续，不需要重开。
+
+**补记（2026-11-25，py 侧清空 5 个钉死 wheel）**
+
+- **审计结论**：118 个被 git 跟踪的 `.py` 文件里，`openai`/`httpx2`/`pydantic`/`pydantic_core`/`jiter` 的
+  static import 为 **0**，字符串/动态引用也为 **0**；`agent/` 只 import 标准库与包内相对模块。模型调用在
+  宿主（`ui/src/host/llm.js` 打 `/chat/completions` 与 `/responses`），远端没有模型路径。
+  `agent/tools/registry.py` 的 `to_openai_schema` 只是**方法名**（wire schema），不是依赖。
+- **做了什么**：`pyproject.toml` → `dependencies = []`（后三个本来就是 `openai` 的传递依赖，跟着一起走）；
+  `uv lock` 重跑，`uv.lock` 少 386 行，只剩开发组（pyinstaller/ruff/setuptools/…），5 个包名计数为 0；
+  `scripts/build-pylibs-tar.sh` 从 146 行的"venv + pip download + PINS"改成 ~60 行的"拷 `agent/` + 建空
+  `site-packages/`"；`server-bundle.ts` 的 `venvPin()` 删除，缓存 key 去掉 wheel 版本；`TREE_PROBE_CMD` 从
+  "import 自己的 wheel"改成"两棵树都在 + dist-info 不重复 + `import agent.server`"，verdict 词表随之变成
+  `OK`/`NONE`/`NOPY`/`DUP:…`/`IMPORT:ImportError`/`IMPORT:SyntaxError`/`IMPORT:Other`（`IMPORT:SystemError`
+  不再存在）；CI 的 `pylibs-matrix` 删掉 `uv sync` 两步，注释改成"target 只是标签"。
+- **为什么便宜了**：这 5 个包把 Python 下限钉在 3.9/3.10（`openai 3.5.0`/`httpx2 2.12.0` 要 `>=3.10`，
+  `pydantic 2.13.4`/`pydantic_core 2.46.4`/`jiter 0.16.0` 要 `>=3.9`）。现在 16 格矩阵产出**逐字节相同**的 tar：
+  `linux-aarch64-glibc-py3.8` 与 `linux-x86_64-glibc-py3.12` 的 sha256 都是
+  `ca7a14148f79d1881a4c07f21afea04fc8469ddef54d568b574e95907d8355e5`（0.24 MB / 100 members，含 `site-packages/`、
+  `agent/supervisor.py`）。tar 的形状（`agent/` + 空 `site-packages/`）**保留**：安装门要求两棵树都在，
+  `__ART__` 靠该目录识别策略，DUP 扫描读该路径。
+- **当时仍未做（下一步降级才需要）**——**三项后来全做了，见文末“补记（3.8 落地）”**：
+  1. `pyver` 从 index key 里拿掉（或在 provider 侧忽略它）——不然一台 py3.8 远端仍会为一个不存在的
+     `py3.8` 键 fail；
+  2. `installServer` 加 MIN_PY 版本门（`python3 -c 'import sys;sys.exit(0 if sys.version_info>=(3,10) else 1)'`），
+     把 `no prebuilt pylibs artifact … the pylibs-matrix CI job has not published one`
+     （`android/host/src/artifact-provider-android.ts:329`）换成诚实的一句话："远端的 python 是 3.8，
+     本版 agent 需要 ≥3.10"——否则现在会"装上了但起不来"；
+  3. 三处 `requires-python = ">=3.10"`（根 / `clutch-workspace` / `clutch-skills`）与 ruff 的
+     `target-version = "py310"`，只有在真要把 3.8 变成支持目标时才动；全仓语言级审计（`str.removeprefix`、
+     `dict |`、`functools.cache`、`asyncio.to_thread`、结构模式匹配）同批做。
+- **测试改了哪里**：`tests/android-pylibs-path-test.js`（钉死断言 → 零 `.dist-info` + 空 `site-packages/` +
+  两个不相关 target 同 hash）；`tests/pylibs-install-merge-test.js` 第 4 节（真树：`agent/` + 空
+  `site-packages/` → `OK`；只剩 `site-packages/` → `NONE`；旧版本遗留的两代 dist-info → `DUP:pydantic_core`；
+  `agent/server.py` 缺模块 → `IMPORT:ImportError`；`agent/server.py` 语法坏 → `IMPORT:SyntaxError`）；
+  `tests/tunnel-reconnect.test.js`（verdict 词表 + `could not unpack the artifact`）。
+  `tests/pylibs-tar-pack-test.js` 未动：它测的是 packer 的确定性，fixture 里的 `openai` 只是任意内容。
+
+**补记（2026-11-26，3.8 落地：把地板从"事实"变成"声明 + 门"）**
+
+- **为什么**：现场机一大片 Ubuntu 20.04，系统 `python3` 就是 3.8.10。之前 3.8 能不能跑取决于当天
+  有没有人用手写过的旧语法——这不是支持，是运气。现在 `requires-python = ">=3.8"` 是**声明**，由两道
+  门执行：一道静态扫描（廉价、在 `verify` 里），一道真在 3.8 上跑全套（权威、`verify-py38`）。
+- **设计不变的部分**：`pyver` **完全**退出 index key。key 就是 `<os>-<arch>-<libc>`（4 格矩阵，无别名、
+  无客户端回退），`entryFor` 保持严格精确匹配、没有 version ladder；`os/arch/libc` 仍是**发布边界**。
+  理由：tar 的内容不依赖解释器（`agent/` 只 import 标准库，见上一条补记），所以一台 py3.8 远端和一台
+  py3.12 远端该拿**同一个** artifact；把解释器写进键，就是为一个不存在的差异维护一整维矩阵。策略名
+  `pylibs` 保留（它不是"装 wheel"，是"装这棵树"）。
+- **声明的地板由显式门执行**：`ui/src/host/tunnel-bootstrap.ts` 的 `PY_FLOOR = [3, 8]` +
+  `pythonTooOld()`，只对 `strategy === "pylibs"` 生效（`bundle` 自包含、从不跑远端的 python3，所以
+  那儿的老解释器不是拒绝的理由）。太老的远端得到一句人话 + 自动落回 SSH-tools（文件/命令照用）。
+- **三处 `pyproject.toml`**：根 / `clutch-workspace` / `clutch-skills` → `requires-python = ">=3.8"`，
+  ruff `target-version = "py38"`，`uv lock` 重生成。README 徽章与"从源码运行"两处同步成 3.8+。
+- **新增 `tests/py38_check.py`（静态门）**：`ast.parse(feature_version=(3,8))` 查语法；本仓裸 checkout
+  扫 **117** 个文件（`agent`/`tests`/`scripts`），两个组件子模块在场时是 **140** 个——缺谁就**打印一行**
+  "not checked out (submodule)"，不会悄悄缩小范围；只查**求值时**会炸的注解（`X | None`、PEP 585 于无
+  `from __future__ import annotations` 的签名）；API 层查 `Path.write_text(newline=)`、`zip(strict=)`、
+  `str.removeprefix`、`sys.stdlib_module_names`、`tomllib`（`try:` 里的 fallback 放过）、`int | str`
+  常量掩码；声明层读 pyproject（根必备、组件按在场与否）+ `PY_FLOOR` + `verify-py38` job（含
+  `submodules: recursive`、`tests.py38_check`、`tests.selfcheck`、`python-version: "3.8"`）与 `deb`
+  的 `needs:`。带回归夹具：把 7 类事故写成 fixture，少报一条就红。
+  **已知盲区（docstring 里写了）**：`Call | Call` 形态的 dict 合并静态不可辨（`agent/tools/settings.py`
+  那处就是靠真跑 3.8 才发现的），alias 里两个类名 `A | B` 与常量掩码 `READ | WRITE` 同理——所以
+  静态门是**廉价先行**，3.8 leg 才是权威。
+- **CI**：`verify` 里加一步 `python3 -m tests.py38_check`（裸 checkout、不需要 3.8 解释器、秒级）；
+  新增 `verify-py38` job，**唯一** `submodules: recursive` 的 job（原因见下）：
+  `setup-python 3.8` → 静态门 → `scripts/install-component.py` 装本仓组件 →
+  `tests.selfcheck` / `tests.lazy_check` / 循环 `tests/*_test.py`。**`deb` 的 `needs:` 是
+  `[verify, verify-py38]`**——地板掉了，发布就停，而不是等用户装上才发现。
+  - 为什么这个 job 必须拿子模块：`read_file`/`grep`/`write_file`/`edit_file` 是**组件声明的**，
+    空 store 的宿主根本执行不了它们（实测：空 store 下 `selfcheck` 红在 `write_file ok`，
+    `server_test`/`decl_api_test`/`remote_filesystem_test`/`rendezvous_test` 同样红），所以
+    "在 3.8 上跑全套"必然要求组件在场；而 components 的代码本身就是远端要执行的代码，也该进扫描。
+  - 这份**诚实是有代价的、代价是故意的**：`verify-py38` 在子模块 pin 还指着 3.10-only 组件时是**红**的，
+    报错会点名到文件与构造（例如 `clutch-workspace/clutch_workspace/filesystem.py:115` 的
+    `write_text(newline=)`）。写这个 job 的那一刻它正好在说真话：**那两个组件还没有 3.8 地板**。
+    这个代价现在没有了——两个组件都发了 `v0.2.0`（见末条），主仓 gitlink 已指过去，leg 绿。
+    唯一的临时出口是"把 `verify-py38` 从 `deb` 的 `needs:` 里摘掉"，**没有用**，也不用。
+  - **`runs-on: ubuntu-22.04`，不是 `-latest`（实测，不是预防）**：`actions/setup-python@v5` 在
+    `ubuntu-latest`（24.04）的工具缓存里**没有 3.8**，第一次跑这个 job 就死在 "Set up Python"，
+    一个测试都没跑——起不来的 leg 不是地板门。22.04 是还带 3.8 的最新镜像。
+- **真跑 3.8 抓出来的（静态门漏掉或只报了一部分的）**：`agent/tools/gates.py:39` 的 PEP 604 **别名**
+  （运行时不求值，`GuardImpl = Foo | None` 在 3.8 直接 TypeError）；`agent/tools/settings.py:65` 与
+  `tests/settings_test.py:136,194` 的 dict 合并 `|`（PEP 584）；`tests/server_test.py:191` 的括号式
+  `with`（3.9+）；`tests/exec_layer_test.py` 的 `sys.stdlib_module_names`（3.10+，改成 3.8 回退 +
+  Windows 专有名）；`tests/browsing_hidden_test.py` 缺 future import；`agent/core/lazy.py` 的
+  `_pairs()`、`agent/tools/workspace.py` 的 `_is_relative_to()`/`open()`、`agent/project/format.py`
+  的 `open()` 的注解形态；`tests/lazy_check.py`/`selfcheck.py`/`supervisor_test.py` 共 16 处
+  `write_text(newline=)`（3.10+）改成 `with open(...)`。
+- **JS 侧跟上 key 的新形状**：`tests/android-provider-test.js`、`tests/android-pylibs-path-test.js`
+  （`build-pylibs-tar.sh` 现在 4 参 `<out> <os> <arch> <libc>`，测试的调用点同步）、
+  `tests/artifact-provider-test.js` 全部去掉 `-py3.N` 与 `pyver` 入参。prompt 校验的 `TREE_PROBE_CMD`
+  不含 `__` 之类约束没动。
+- **本机 3.8 上真跑过的两轮**：`HOME=/tmp/h38b`（组件由本仓源码装进 scratch store）28/28 个
+  `*_test.py` 全 rc=0；`HOME=/tmp/h38c`（完全复现 `verify-py38` leg：全新 store +
+  `scripts/install-component.py` 装本仓组件）31 个模块（静态门 + `selfcheck` + `lazy_check` +
+  28 个 `*_test.py`）全 rc=0。耗时约 80 秒，CI 成本可接受。裸 checkout 那一半（`verify`）另用
+  `tmp/bare_check.py` 验过：117 文件、rc=0、打印两行 "not checked out (submodule)"。
+- **跨仓的那三步：已做完（这才是地板真正落地的地方）**。主仓自己的 gitlink 只是一个指针；一台 3.8 现场机
+  装的是**市场里发布的组件**，所以地板必须由组件仓自己发出来：
+  - `clutch-workspace` → `06bb215`，`v0.2.0`（annotated tag `a09f60f`），CI run **45563891234** success
+    （3.8 与 3.12 两条 leg 都绿），三个资产：`clutch-component.json` 372 B sha `e1af71d0…`、
+    `clutch-workspace.tar.gz` 31660 B sha `7bab1955…`、`component.json` 6349 B。
+  - `clutch-skills` → `2735e5c`，`v0.2.0`（annotated tag `5ca2c46`），CI run **45563911805** success
+    （3.8 与 3.12），三个资产：`clutch-component.json` 366 B sha `41f66601…`、`clutch-skills.tar.gz`
+    90109 B sha `f6f9bc44…`、`component.json` 1763 B。
+  - 两个仓各自的第一次（`45563743499` / `45563757891`）**都失败在同一个地方**：`ubuntu-latest` 上
+    `setup-python` 没有 3.8，leg 在 "Set up Python" 就死了。这就是主仓 `verify-py38` 用 `ubuntu-22.04`
+    的同一条实测结论，不是两个独立的小问题。两条仓的 workflow 也顺势重构成
+    `tests`(matrix 3.8/3.12) + `release`(`needs: tests`)——原来的 shape 是 runner 的 python 直接跑
+    `node`/`pytest`，3.9-only 的 `str.removeprefix` 就这样漏过去了。
+  - 顺带修掉一个**真实的发布缺陷**：`clutch-skills/.gitattributes` 里 `scripts/ export-ignore` 没锚定，
+    于是**任何深度的** `scripts/` 都被排除——`skills/readme-crafter/scripts/`（SKILL.md 让 agent 跑的
+    `{baseDir}/scripts/scan-project.sh`）**从来没进过发布包**。dev checkout 有、测试也跑 checkout，
+    所以一直没人发现。改成 `/scripts/`、`/.github/`、`/.gitattributes` 后，`git archive HEAD` 的干净
+    导出树里也在（`tmp/cleancheck.sh` 就是拿导出树再跑一遍双绿）。
+  - 组件的代码改动本身很小：`filesystem.py` 三处 `write_text(newline=)` → `open(..., newline="\n")`、
+    两个测试模块补 `from __future__ import annotations`、`pyproject.toml` 的
+    `requires-python`/`target-version`、版本统一到 `0.2.0`（`clutch-workspace/component.json` 之前是
+    0.1.1 而 pyproject 是 0.2.0，两处不一致也一起理清了）。
+  - 主仓这侧收尾：`market/entries.json` 两行 → `v0.2.0`，`scripts/market_index.py --write` 重生成
+    `ui/market.snapshot.json`（新的 `manifest_sha256` 就是上面两个 `clutch-component.json` 的字节），
+    `--check` 通过；两个 gitlink 指到上面那两个提交。

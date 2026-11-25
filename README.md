@@ -6,7 +6,7 @@
   <a href="https://github.com/Ethereal1024/Clutch/blob/master/LICENSE"><img alt="License: MIT" src="https://img.shields.io/github/license/Ethereal1024/Clutch"></a>
   <a href="https://github.com/Ethereal1024/Clutch/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/Ethereal1024/Clutch?label=Release&amp;color=blue"></a>
   <a href="https://github.com/Ethereal1024/Clutch/actions/workflows/release.yml"><img alt="Build" src="https://img.shields.io/github/actions/workflow/status/Ethereal1024/Clutch/release.yml?label=Build"></a>
-  <a href="https://github.com/Ethereal1024/Clutch/blob/master/pyproject.toml"><img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&amp;logoColor=white"></a>
+  <a href="https://github.com/Ethereal1024/Clutch/blob/master/pyproject.toml"><img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&amp;logoColor=white"></a>
 </p>
 
 <p align="center">
@@ -56,7 +56,7 @@ used. The API key is supplied by the user.
 | --- | --- |
 | Desktop | Linux x86_64 (deb package), macOS Apple Silicon (dmg image), Windows x86_64 (exe installer). The installers bundle their runtime and need neither Python nor Node.js. |
 | Android | Android 7.0 or later, arm64-v8a or x86_64. |
-| From source | Python 3.10 or later, Node.js, uv. |
+| From source | Python 3.8 or later, Node.js, uv. |
 
 ## Installation
 

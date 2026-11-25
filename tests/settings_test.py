@@ -133,7 +133,7 @@ def _routes(base: str, name: str, root: Path) -> None:
 
     st, answered = post({"library.order": "recent"})
     check(
-        st == 200 and answered == {"status": "saved", "values": DEFAULTS | {"library.order": "recent"}},
+        st == 200 and answered == {"status": "saved", "values": {**DEFAULTS, "library.order": "recent"}},
         "POST saves the one knob it was sent and answers the whole document back",
     )
     check(get()[1]["values"]["library.order"] == "recent", "and the next GET reads it")
@@ -191,7 +191,7 @@ def main() -> int:
         check(settings.values("clutch-form", component) == DEFAULTS, "an unconfigured component reads back its own defaults")
         check(not (root / "settings").exists(), "...and nothing was written to say so")
         saved = settings.write("clutch-form", component, {"library.root": "~/my-library"})
-        check(saved == DEFAULTS | {"library.root": "~/my-library"}, "a partial write keeps the knobs it did not name")
+        check(saved == {**DEFAULTS, "library.root": "~/my-library"}, "a partial write keeps the knobs it did not name")
         check(_stored(root, "clutch-form") == saved, "the file holds the EFFECTIVE document, defaults included")
         mode = (root / "settings" / "clutch-form.json").stat().st_mode & 0o777
         check(oct(mode) == "0o600", "and only its owner can read it")

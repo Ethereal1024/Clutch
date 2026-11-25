@@ -92,6 +92,17 @@ jobs:
       - name: Verify the release graph
         run: python3 -m tests.release_graph_check
 
+      # The declared python floor, read where it is written: the `requires-python`
+      # /ruff `target-version` pair (the components' pairs too, when their
+      # submodules are checked out — this job has none, and the check prints the
+      # two trees it did not read), PY_FLOOR in the tunnel (which is what REFUSES
+      # an older remote), and the `verify-py38` leg below. This half is the cheap
+      # net — the runner's python is 3.12, where every construct the floor cannot
+      # run works fine. The authority is the 3.8 leg; this is what catches a
+      # drift in seconds.
+      - name: Verify the declared python floor
+        run: python3 -m tests.py38_check
+
       # The committed build outputs, in a bare checkout: ui/*.js and
       # android/host/*.js are emitted from TypeScript and are what actually
       # ships (the phone's libnode 18 cannot strip types, the Electron main runs
@@ -120,9 +131,72 @@ jobs:
       - name: Verify the pylibs tar packer
         run: node tests/pylibs-tar-pack-test.js
 
+  # ---- verify-py38: the declared floor, on the interpreter the floor names ----
+  # `verify` above runs on the runner's own python (3.12), where a PEP 585 alias,
+  # a `dict | dict` merge and `Path.write_text(newline=)` all work — which is the
+  # whole reason a floor needs a leg of its own, and why 0.2.x could declare 3.10
+  # and never notice that `agent/` was unimportable on anything older (ten
+  # module-level aliases, a parenthesized `with`, `sys.stdlib_module_names`).
+  # The machines this promise is FOR are Ubuntu 20.04 GUI hosts, whose system
+  # python3 is 3.8.10: they are the ones that run a `pylibs` tar with no install,
+  # and `ui/src/host/tunnel-bootstrap.ts` turns the floor into a refusal at the
+  # door for anything older.
+  #
+  # No third-party package anywhere in this job: the suite is stdlib-only, which
+  # is exactly the property the far side depends on (scripts/build-pylibs-tar.sh
+  # ships `agent/` and an EMPTY site-packages), so a green run here is also a
+  # check that no test quietly grew a dependency.
+  #
+  # It gates `deb`, and `dmg` / `win` / `pylibs-matrix` / `android-apk` reach it
+  # through `deb`'s `needs:` — one line to read (tests/release_graph_check.py
+  # reads that line, tests/py38_check.py requires this job to exist).
+  # ubuntu-22.04 and not -latest: `actions/setup-python` has no 3.8 in its tool
+  # cache for 24.04 (`ubuntu-latest`), and the job died in "Set up Python" before
+  # it ran a single test — a leg that cannot start is not a floor check. 22.04 is
+  # the newest image that still carries 3.8, and it was measured, not assumed:
+  # the first run of this job on 24.04 failed exactly there.
+  verify-py38:
+    runs-on: ubuntu-22.04
+    steps:
+      # The ONE job that checks out the components, and it has to: read_file /
+      # grep / write_file / edit_file are DECLARED by a component, so a host with
+      # an empty store cannot execute them at all — on a bare checkout this suite
+      # fails for "no such tool", which says nothing about the interpreter. A
+      # component's package is also what a remote executes, so its code is part
+      # of the floor (tests/py38_check.py scans these trees when they are here,
+      # and says so when they are not). The price of the honesty: a component
+      # that does not hold the floor turns this job red BY NAME — the file and
+      # the construct — instead of shipping a tar that dies on the user's 3.8 box.
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+
+      - name: Verify the declared python floor
+        run: python -m tests.py38_check
+
+      # Installs this checkout's own components through the host's real install
+      # channel (scripts/install-component.py), the same way a client's upload
+      # lands — not a path into the working tree.
+      - name: Install the components this checkout ships
+        run: python scripts/install-component.py clutch-workspace clutch-skills
+
+      - name: Every suite, on the floor
+        run: |
+          # selfcheck is the end-to-end runner and is not named *_test.py
+          python -m tests.selfcheck
+          python -m tests.lazy_check
+          for file in tests/*_test.py; do
+            echo "--- $file"
+            python -m "tests.$(basename "$file" .py)"
+          done
+
   deb:
     runs-on: ubuntu-latest
-    needs: verify
+    needs: [verify, verify-py38]
     steps:
       # No submodules: the bundle is the HOST's own code and carries no module —
       # a release must not depend on one being checked out (or published).
@@ -372,14 +446,27 @@ jobs:
   # ---- pylibs-matrix (M2 supply line for Android, docs/android/02 §7) ----
   # The phone has no pip/bash: its pylibs tar comes from these CI prebuilts
   # (byte-deterministic, so the tar's sha256 IS the remote's VERSION gate and
-  # the phone's ~/.clutch/bundles cache stays valid). Wheels are fetched for
-  # the TARGET (pip --platform), so no QEMU/cross toolchain is needed — the
-  # build script already cross-downloads for the desktop's cross remotes.
-  # openai/httpx2 versions come from uv.lock — the same pins the desktop's
-  # venvPin() bakes into its cache keys (docs §7 "与桌面发布同源").
-  # Determinism rests on the pinned interpreter (3.11) + locked wheels; a pip
-  # patch upgrade shifting bytes is safe by design: a new hash simply becomes
-  # a new VERSION on the remote (one reinstall), never a silent mismatch.
+  # the phone's ~/.clutch/bundles cache stays valid).
+  #
+  # What the tar carries is `agent/` (its own code, stdlib-only — pyproject.toml
+  # declares no dependencies) plus an EMPTY `site-packages/`. There is nothing
+  # to fetch for a target, so the target is a LABEL: it decides which asset a
+  # remote is offered and nothing about the bytes. Every cell of this matrix
+  # emits the same archive, hash included, on purpose — removing the wheel set
+  # (openai/httpx2 and, through them, pydantic/pydantic_core/jiter) removed the
+  # Python >= 3.9/3.10 floor that came with it.
+  #
+  # The axis is therefore PLATFORM, not interpreter: a py<ver> axis was what made
+  # the floor real in the wrong place — ">= 3.8" could only be true if every
+  # minor version in that range had a cell, and a remote running a version nobody
+  # enumerated (3.9, or 3.14 the day it ships) could not find an artifact at all.
+  # The floor now lives where it is declared: `requires-python = ">=3.8"` plus
+  # the `verify-py38` leg below. What stays platform-shaped is the promise of
+  # WHICH platforms get an artifact (a riscv64 remote is refused by name, never
+  # handed a guess).
+  #
+  # The interpreter below only has to run the packer
+  # (scripts/pack-pylibs-tar.py), not resolve anything.
   pylibs-matrix:
     runs-on: ubuntu-latest
     # needs: deb, not just for ordering — this is the other half of the
@@ -393,7 +480,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pyver: ["3.10", "3.11", "3.12", "3.13"]
         arch: [x86_64, aarch64]
         libc: [glibc, musl]
     steps:
@@ -403,37 +489,34 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.11" # only runs the packer; the tar's bytes do not depend on it
 
-      - name: Install uv
-        run: pip install uv
-
-      - name: Sync python deps (pins openai/httpx2 from uv.lock)
-        run: uv sync
-
-      - name: Build pylibs tar (linux/${{ matrix.arch }}/${{ matrix.libc }} py${{ matrix.pyver }})
+      - name: Build pylibs tar (linux/${{ matrix.arch }}/${{ matrix.libc }})
         id: build
         run: |
           set -euo pipefail
-          bash scripts/build-pylibs-tar.sh build pylibs.tar.gz \
-            Linux ${{ matrix.arch }} ${{ matrix.libc }} ${{ matrix.pyver }}
+          # <out> <os> <arch> <libc>: the platform is the whole contract, so the
+          # script takes it and nothing else (no key, no interpreter version).
+          bash scripts/build-pylibs-tar.sh pylibs.tar.gz \
+            Linux ${{ matrix.arch }} ${{ matrix.libc }}
           SHA256="$(sha256sum pylibs.tar.gz | cut -d' ' -f1)"
-          NAME="agent-pylibs-linux-${{ matrix.arch }}-${{ matrix.libc }}-py${{ matrix.pyver }}-${SHA256:0:16}.tar.gz"
+          NAME="agent-pylibs-linux-${{ matrix.arch }}-${{ matrix.libc }}-${SHA256:0:16}.tar.gz"
           mv pylibs.tar.gz "$NAME"
           echo "file=$NAME" >> "$GITHUB_OUTPUT"
           echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: pylibs-linux-${{ matrix.arch }}-${{ matrix.libc }}-py${{ matrix.pyver }}
+          name: pylibs-linux-${{ matrix.arch }}-${{ matrix.libc }}
           path: ${{ steps.build.outputs.file }}
           if-no-files-found: error
 
   # Assemble the release index the Android downloader reads (N3): one entry per
   # target, keyed exactly like artifact-provider-android.js builds its key
-  # ("<os>-<arch>-<libc>-py<ver>", lowercase). The filename hash must equal the
-  # content hash — the M2 acceptance is "remote VERSION == tar hash", and the
-  # phone recomputes the hash instead of trusting this manifest.
+  # ("<os>-<arch>-<libc>", lowercase — no interpreter, see the note above).
+  # The filename hash must equal the content hash — the M2 acceptance is "remote
+  # VERSION == tar hash", and the phone recomputes the hash instead of trusting
+  # this manifest.
   pylibs-index:
     needs: pylibs-matrix
     runs-on: ubuntu-latest
@@ -452,7 +535,7 @@ jobs:
           assert tars, "no pylibs artifacts found"
           index = {}
           for p in tars:
-              # agent-pylibs-linux-<arch>-<libc>-py<ver>-<hash16>.tar.gz
+              # agent-pylibs-linux-<arch>-<libc>-<hash16>.tar.gz
               key = p.name[len("agent-pylibs-"):-len(".tar.gz")].rsplit("-", 1)[0]
               stated = p.name.rsplit("-", 1)[-1][:16]
               sha = hashlib.sha256(p.read_bytes()).hexdigest()

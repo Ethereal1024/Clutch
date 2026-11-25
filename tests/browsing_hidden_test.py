@@ -8,6 +8,8 @@ window's file browser looked like the toggle did nothing. The unified policy
 is now the file-manager standard: off = no dot entries anywhere; reaching a
 hidden directory stays possible through the path input.
 """
+from __future__ import annotations
+
 import os
 import sys
 import tempfile

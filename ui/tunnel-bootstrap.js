@@ -1,12 +1,13 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-bootstrap.ts and run `npm run build:host`.
-// source sha256: f42946b5c7e3ba0df145ea3238ab5eccad5abaa61271ec32a4ade38b71f12cf6
+// source sha256: 4af660634c2e80195480c6c2a4971e986fa2c144a7870b2c0b96537f05f947ca
 
 "use strict";
 // make the far side exist — probe, choose a strategy, install, start
 //
 // One exec prints every fact the decision needs; chooseStrategy turns that
 // into "bundle" (same platform, and a local bundle is available) or "pylibs"
-// (exact wheels for the target). The version of the artifact we ship is the
+// (the far side's own code, run by the remote's python3). The version of the
+// artifact we ship is the
 // only install gate, so a remote already running it is left alone. Components
 // go last on purpose: they are code the far side runs on its own machine, and
 // the connect must not wait on the upload.
@@ -37,41 +38,48 @@ function fileSize(p) {
 // field's broken remote held a VERSION that matched ours exactly (so every
 // reconnect skipped the install — the gate is "the marker equals our hash") over
 // a site-packages that was a MERGE of three releases, and the far side's server
-// died on `import pydantic` before it could bind. So the tree is asked the two
-// questions a marker cannot answer, both far cheaper than the transfer they
+// died on `import pydantic` before it could bind. So the tree is asked the three
+// questions a marker cannot answer, all far cheaper than the transfer they
 // avoid:
 //
+//   * are both trees there at all? (`agent/` and `site-packages/` — the install
+//     swaps both, so a marker over one of them is a marker over nothing)
 //   * is any project carrying more than one dist-info? An install that unpacks
 //     ON TOP of a live tree leaves the previous generation's metadata (and the
 //     modules the new release does not ship) behind forever; two generations on
-//     one tree is what a merge is, and it is visible from the names alone.
-//   * does the import the far side's server does FIRST still work? `agent/llm`
-//     imports openai, which imports pydantic, which checks pydantic_core's
-//     version — that pair is the one the field broke on, and it is also the
-//     cheap one to import (openai pulls the whole client stack).
+//     one tree is what a merge is, and it is visible from the names alone. The
+//     tar ships no third-party wheel any more (pyproject.toml), so on a tree
+//     this client installed the directory is empty — the scan now guards the
+//     upgrade path off a tree an OLDER release left behind;
+//   * does the far side's own server import on the far side's python? That is
+//     `python3 -m agent.supervisor`'s first act (see remoteStartCmd), and it is
+//     the one question that separates "the bytes landed" from "they run here":
+//     a half-swapped tree fails with ImportError, and a python older than the
+//     sources fail with SyntaxError.
 //
 // One token, and neither the program nor anything it prints contains `__`: the
 // probe's sections are delimited by it. NONE = the VERSION file describes a tree
 // that is not there; NOPY = no python3 to ask with (not a verdict about the
 // tree). The import is caught by NAME rather than reflected off the exception
 // (type(exc).__name__ is the one dunder that would put the delimiter in the
-// program), and the names are the field's: SystemError is the mismatch pydantic
-// raises when pydantic_core is not the version it was built against.
+// program).
 const TREE_PROBE_CMD = `echo "__TREE__"; PYTHONPATH="$HOME/.clutch-server/site-packages" python3 -c '
 import os, sys
-sp = os.environ["PYTHONPATH"]
-if not os.path.isdir(sp):
+d = os.path.join(os.environ.get("HOME", ""), ".clutch-server")
+sp = os.path.join(d, "site-packages")
+if not (os.path.isdir(sp) and os.path.isdir(os.path.join(d, "agent"))):
     print("NONE")
     raise SystemExit(0)
-names = [d[:-10].rsplit("-", 1)[0] for d in os.listdir(sp) if d.endswith(".dist-info")]
+names = [x[:-10].rsplit("-", 1)[0] for x in os.listdir(sp) if x.endswith(".dist-info")]
 dups = sorted(set(n for n in names if names.count(n) > 1))
 if dups:
     print("DUP:" + ",".join(dups[:4]))
     raise SystemExit(0)
+sys.path.insert(0, d)
 try:
-    import pydantic, pydantic_core
-except SystemError:
-    print("IMPORT:SystemError")
+    import agent.server
+except SyntaxError:
+    print("IMPORT:SyntaxError")
 except ImportError:
     print("IMPORT:ImportError")
 except Exception:
@@ -130,10 +138,11 @@ function startCommand(strategy, home) {
         // explicit: a onefile's sys.executable cannot locate the sibling agent-server
         return `${nohup}${home}/.clutch-server/agent-supervisor ${args} --agent-cmd ${home}/.clutch-server/agent-server ${logredir}`;
     }
-    // pylibs: the remote imports the whole wheel stack before binding (cold
-    // start can take several seconds on slow disks), so keep the idle reaper
-    // at 25s (> the 20s start poll). NOTE: argparse takes the LAST --idle-timeout,
-    // so never append a second one after ${args}.
+    // pylibs: the remote runs its own code now (no wheel stack to import, so the
+    // cold start is a bare `import agent.supervisor`), but a slow disk or a busy
+    // server can still take seconds before the port answers — keep the idle
+    // reaper at 25s (> the 20s start poll). NOTE: argparse takes the LAST
+    // --idle-timeout, so never append a second one after ${args}.
     return `cd ${home}/.clutch-server && ${nohup}env PYTHONPATH=site-packages python3 -m agent.supervisor ${args} ${logredir}`;
 }
 function remoteRunningCmd(probe) {
@@ -245,8 +254,8 @@ async function stopServer(probe, strategy) {
 // (Android, N3/N4) cannot produce a bundle, so even a same-platform remote
 // goes through pylibs — otherwise a linux-aarch64 phone facing a linux-aarch64
 // remote would pick "bundle" and die in the provider's hard reject.
-// Cross-platform remotes use pylibs: exact wheels for the target are fetched
-// client-side and the remote runs them with its own python3.
+// Cross-platform remotes use pylibs: the far side's own code (and an empty
+// site-packages) is unpacked client-side and run by the remote's own python3.
 function chooseStrategy(probe, localTag = platformTag()) {
     const [localOs, localArch] = localTag.split("-");
     if (String(probe.os || "").toLowerCase() === localOs &&
@@ -259,13 +268,31 @@ function chooseStrategy(probe, localTag = platformTag()) {
         return "pylibs";
     return null;
 }
+// The interpreter floor the sources DECLARE (pyproject.toml `requires-python`,
+// mirrored by the 3.8 CI leg). It is stated here, once, because nothing else on
+// the supply line knows it: the artifact is interpreter-agnostic by construction
+// (scripts/build-pylibs-tar.sh) and the probe only reports whether a python3
+// exists at all. Without this check a 3.6 remote gets "pylibs" — it HAS a
+// python3 — installs, passes the import probe, and dies later on a construct the
+// 3.8 floor no longer allows, inside the user's first request instead of at the
+// door. Ubuntu 20.04's system python3 (3.8) is the case this floor exists for.
+const PY_FLOOR = [3, 8];
+// "3.6" -> too old; "" or an unparseable answer -> not a verdict about age (the
+// strategy check above/below already refuses a remote with no python3 at all).
+function pythonTooOld(python) {
+    const m = /^(\d+)\.(\d+)$/.exec(String(python || "").trim());
+    if (!m)
+        return false;
+    return Number(m[1]) * 100 + Number(m[2]) < PY_FLOOR[0] * 100 + PY_FLOOR[1];
+}
 // What the tree said about itself (TREE_PROBE_CMD), read as "may I hand this
 // remote our code with no install?". Only the answers that mean "this tree
 // cannot serve" make it unsound:
 //
 //   NONE      the VERSION file describes a tree that is not there
 //   DUP:…     two releases merged on one tree (the field's shape)
-//   IMPORT:…  the wheels are present and cannot be imported together
+//   IMPORT:…  the far side's own code does not import on the far side's python
+//             (a half-swapped tree, or a python older than the sources)
 //
 // "NOPY" (no python3 to ask with) and an exec that came back without the section
 // are NOT verdicts about the tree, and an install forced on one of them would be
@@ -279,14 +306,17 @@ function pylibsTreeSound(verdict) {
 }
 // How the pylibs tar lands on the far side: by REPLACE, never by merge.
 //
-// The tar carries two top-level trees — `site-packages` (the wheels) and `agent`
-// (the far side's own code) — and unpacking it OVER the live ones is not an
-// install. tarfile only adds and overwrites: every file the new release does not
-// ship (a dropped module, the previous generation's `pydantic_core-2.50.1.dist-info`,
-// an older extension module under the same name) stays behind forever, and two
+// The tar carries two top-level trees — `agent` (the far side's own code) and
+// `site-packages` (empty since the Python side went stdlib-only, but still a
+// tree the install swaps and the probes read) — and unpacking it OVER the live
+// ones is not an install. tarfile only adds and overwrites: every file the new
+// release does not ship (a module dropped from `agent/`, an older extension
+// module under the same name, the previous generation's `-<version>.dist-info`
+// from a release that still carried wheels) stays behind forever, and two
 // releases merged on one tree is a tree no import survives. That is the field's
 // "no backend": pydantic 2.13.5 beside pydantic_core 2.50.1 raising SystemError
-// at import, under a VERSION file that matched the release being connected to.
+// at import, under a VERSION file that matched the release being connected to —
+// the wheels are gone, the shape a merge leaves behind is not.
 //
 // So: unpack into a staging directory ON THE SAME FILESYSTEM, check that BOTH
 // trees really arrived, and only then swap them in — `mv` inside one directory
@@ -313,10 +343,10 @@ function pylibsInstallCmd(dir) {
         `rm -f ${dir}/pylibs.tar.gz`,
     ].join(" && ");
     // …and the staging tree is thrown away whatever happened. On success the swap
-    // already removed it; on a failure it holds a half-unpacked copy of the wheels
-    // (tens of megabytes, on a phone) until the next attempt's own `rm -rf` — so
-    // the failure path clears it too, and the exit status is preserved: a failed
-    // install is a nonzero exit, which installServer now asks about by name.
+    // already removed it; on a failure it holds a half-unpacked copy of the tree
+    // until the next attempt's own `rm -rf` — so the failure path clears it too,
+    // and the exit status is preserved: a failed install is a nonzero exit, which
+    // installServer now asks about by name.
     return `${chain} ; rc=$?; rm -rf ${stage}; test $rc -eq 0`;
 }
 async function installServer(probe, { force, progress } = {}) {
@@ -344,9 +374,21 @@ async function installServer(probe, { force, progress } = {}) {
                 "install python3 on the device to enable the full server experience.",
         };
     }
+    // The declared floor, checked only where it applies: "bundle" is a
+    // self-contained build that never runs the remote's python3, so an old
+    // interpreter there is not a reason to refuse.
+    if (strategy === "pylibs" && pythonTooOld(probe.python)) {
+        return {
+            ok: false,
+            error: `target runs python ${probe.python} (${probe.os}/${probe.arch}, ${probe.libc || "?"} libc), and the ` +
+                `server's sources declare python ${PY_FLOOR.join(".")} or newer. Falling back to SSH-tools: file and ` +
+                "command access over the tunnel still work; install a newer python3 on the device to enable the " +
+                "full server experience.",
+        };
+    }
     // content-hash version is the only install gate: installed iff the remote's
     // VERSION equals our binaries' hash
-    const target = { os: probe.os, arch: probe.arch, libc: probe.libc || "unknown", pyver: probe.python };
+    const target = { os: probe.os, arch: probe.arch, libc: probe.libc || "unknown" };
     let artifact;
     let version;
     if (strategy === "bundle") {
@@ -364,7 +406,7 @@ async function installServer(probe, { force, progress } = {}) {
         }
         catch (e) {
             tunnelLog("[bootstrap] pylibs resolve failed: " + e.message);
-            return { ok: false, error: "cannot obtain wheels for target: " + e.message };
+            return { ok: false, error: "cannot obtain the far side's artifact for target: " + e.message };
         }
     }
     // The gate has two halves, and the second one is the field's fix: VERSION is a
@@ -403,7 +445,7 @@ async function installServer(probe, { force, progress } = {}) {
             }
             catch (e) {
                 tunnelLog("[bootstrap] pylibs fetch failed: " + e.message);
-                return { ok: false, error: "cannot obtain wheels for target: " + e.message };
+                return { ok: false, error: "cannot obtain the far side's artifact for target: " + e.message };
             }
         }
         // the NAS refuses to truncate an executing binary in place: stop first
@@ -511,7 +553,7 @@ async function installServer(probe, { force, progress } = {}) {
                 tunnelLog(`[bootstrap] the pylibs install failed (exit ${landed.code}):\n` + diag);
                 return {
                     ok: false,
-                    error: "the remote could not unpack the wheels (exit " +
+                    error: "the remote could not unpack the artifact (exit " +
                         landed.code +
                         (diag ? ": " + diag : "") +
                         "). Nothing was replaced — the far side's tree is the one it had.",
@@ -560,9 +602,9 @@ async function installServer(probe, { force, progress } = {}) {
             progress("install:start");
         // short timeout: the start command backgrounds the server
         await remoteExec(startCommand(strategy, home), 10000);
-        // wait for it to answer; pylibs cold-start imports the whole wheel stack
-        // and can take >10s on slow servers, so poll for up to 20s (vs the old 6s
-        // window that reported a healthy install as "did not come up")
+        // wait for it to answer; a cold start on a slow server (first import of the
+        // sources, a phone-class disk) can take a while, so poll for up to 20s (vs
+        // the old 6s window that reported a healthy install as "did not come up")
         let after = "DOWN";
         for (let i = 0; i < 40; i++) {
             after = await remoteServingState(probe);

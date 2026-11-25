@@ -2,12 +2,18 @@
 name = "clutch"
 version = "0.1.0"
 description = "A self-built coding agent: LLM loop + tools + events, driven by a GUI. CLI removed."
-requires-python = ">=3.10"
+requires-python = ">=3.8"
 license = "MIT"
-dependencies = [
-    "openai>=1.0",
-    "httpx2>=2.0",
-]
+# None: the agent's Python side is stdlib-only. The model call lives in the
+# HOST (ui/src/host/llm.js speaks /chat/completions and /responses), so nothing
+# under agent/ imports a third-party wheel any more — the same posture as
+# clutch-workspace and clutch-skills. What used to be here (openai + httpx2, and
+# through them pydantic / pydantic_core / jiter) was the whole reason the far
+# side's tar had to be built per interpreter version: those wheels require
+# Python >= 3.9/3.10 and ship no cp38 build, so "support an older remote" meant
+# downgrading five packages at once. With nothing to install, the far side needs
+# only a python3 new enough for the sources themselves.
+dependencies = []
 
 [build-system]
 requires = ["hatchling"]
@@ -33,7 +39,7 @@ dev = [
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py38"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "B", "I"]

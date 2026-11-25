@@ -16,9 +16,12 @@
 //   3. a tar that carries half of itself (no `agent/`) or a corrupt upload fails
 //      with the live tree byte-for-byte what it was;
 //   4. the real TREE_PROBE_CMD, against real trees, says OK / DUP:… /
-//      IMPORT:SystemError / NONE / NOPY — including the field's exact shape
-//      (metadata older than the extension module beside it → SystemError at
-//      import) — and pylibsTreeSound reads exactly those as the gate does.
+//      IMPORT:ImportError / IMPORT:SyntaxError / NONE / NOPY — including the
+//      shape the release actually ships (`agent/` + an EMPTY `site-packages/`)
+//      and the two ways a tree that landed can still not run: a half-swapped
+//      one (ImportError) and a source the far side's python cannot parse
+//      (SyntaxError) — and pylibsTreeSound reads exactly those as the gate
+//      does.
 //
 // Run: node tests/pylibs-install-merge-test.js
 
@@ -264,25 +267,38 @@ async function main() {
   //
   // The gate's second half is only as good as what the far side is asked, so the
   // question is asked here the way it is asked there: PYTHONPATH set to the
-  // remote's site-packages, HOME pointing at the tree under test.
+  // remote's site-packages, HOME pointing at the tree under test. The healthy
+  // tree is the shape the build ships — `agent/` copied from this checkout plus
+  // an EMPTY `site-packages/` (scripts/build-pylibs-tar.sh) — not a wheel set:
+  // the agent's Python side is stdlib-only, so the import below is entirely its
+  // own code.
   const probeHome = fs.mkdtempSync(path.join(os.tmpdir(), "clutch-tree-probe-"));
-  const spDir = path.join(probeHome, ".clutch-server", "site-packages");
+  const serverDir = path.join(probeHome, ".clutch-server");
+  const spDir = path.join(serverDir, "site-packages");
+  const agentDir = path.join(serverDir, "agent");
   const verdict = (env) => parseProbe(run(TREE_PROBE_CMD, Object.assign({ HOME: probeHome }, env)).stdout).pylibsTree;
 
   check(verdict() === "NONE", "a VERSION file over a tree that is not there reads NONE (" + verdict() + ")");
 
-  fs.mkdirSync(path.join(spDir, "pydantic"), { recursive: true });
-  fs.mkdirSync(path.join(spDir, "pydantic_core"), { recursive: true });
+  // the install swaps BOTH trees, so either one missing is still no tree
+  fs.mkdirSync(spDir, { recursive: true });
+  check(
+    verdict() === "NONE",
+    "site-packages/ without agent/ is still NONE — the marker describes a tree the install swaps whole"
+  );
+  fs.rmSync(serverDir, { recursive: true, force: true });
+
+  fs.mkdirSync(spDir, { recursive: true });
+  fs.cpSync(path.join(__dirname, "..", "agent"), agentDir, { recursive: true });
+  const ok = verdict();
+  check(ok === "OK", `the shipped shape — agent/ + empty site-packages/ — imports on this python (${ok})`);
+
+  // leftovers from an OLDER release: the wheels this tar no longer ships were
+  // once unpacked here, and an install that merged instead of replacing left the
+  // previous generation's metadata behind. Two generations of one project on one
+  // tree are visible from the names alone — no import needed.
   fs.mkdirSync(path.join(spDir, "pydantic-2.13.5.dist-info"), { recursive: true });
   fs.mkdirSync(path.join(spDir, "pydantic_core-2.46.5.dist-info"), { recursive: true });
-  fs.writeFileSync(path.join(spDir, "pydantic", "__init__.py"), "");
-  fs.writeFileSync(path.join(spDir, "pydantic_core", "__init__.py"), "");
-  const ok = verdict();
-  check(ok === "OK", `a tree that imports its wheels with one generation each reads OK (${ok})`);
-
-  // the field's tree: the OLD generation's metadata is still there beside the new
-  // one — two generations of pydantic_core on one tree, which is what a merge
-  // leaves and what the names alone can see
   const dup = path.join(spDir, "pydantic_core-2.50.1.dist-info");
   fs.mkdirSync(dup, { recursive: true });
   const dupVerdict = verdict();
@@ -292,20 +308,27 @@ async function main() {
   );
   check(pylibsTreeSound(dupVerdict) === false, "…and the gate does not hand our code to a tree like that");
 
-  // the metadata cleaned up is not the tree cleaned up: the module left behind by
-  // the overwrite still cannot be imported beside its new core (the field's
-  // SystemError), and the import is the only witness left
+  // metadata cleaned up is not the tree cleaned up: a half-swapped tree (the new
+  // release landed, a module it needs did not) still cannot be imported, and the
+  // import is the only witness left.
   fs.rmSync(dup, { recursive: true, force: true });
-  fs.writeFileSync(
-    path.join(spDir, "pydantic", "__init__.py"),
-    "raise SystemError('pydantic 2.13.5 requires pydantic_core 2.13.x, got 2.50.1')\n"
-  );
+  fs.writeFileSync(path.join(agentDir, "server.py"), "import clutch_module_this_tree_does_not_have\n");
   const importVerdict = verdict();
   check(
-    importVerdict === "IMPORT:SystemError",
-    `the field's tree — clean metadata, mixed modules — reads ${importVerdict}`
+    importVerdict === "IMPORT:ImportError",
+    `a half-swapped tree — clean metadata, missing module — reads ${importVerdict}`
   );
   check(pylibsTreeSound(importVerdict) === false, "…and is an install, never a no-op");
+
+  // "the far side's python is older than the sources" — the case that made an
+  // old remote expensive. On this interpreter a genuinely unparsable source is
+  // the way to produce it (a py3.7 remote would produce the same token from the
+  // real sources with newer syntax in them); the verdict is the token, and the
+  // token is what the gate reads.
+  fs.writeFileSync(path.join(agentDir, "server.py"), "def half_written(:\n    pass\n");
+  const syntaxVerdict = verdict();
+  check(syntaxVerdict === "IMPORT:SyntaxError", `an unparsable source reads ${syntaxVerdict}`);
+  check(pylibsTreeSound(syntaxVerdict) === false, "…and is an install, never a no-op");
 
   // "no python3 to ask with" is NOT a verdict about the tree: it is the one
   // answer an install would be refused on anyway (chooseStrategy has no pylibs

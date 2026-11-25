@@ -1,12 +1,18 @@
 // GENERATED FILE — do not edit; edit android/host/src/artifact-provider-android.ts and run `node android/build-host.js`.
-// source sha256: 5d6b835a6721c297f6847cea197f327a1e597b0514d6f69b713165976b6a2eff
+// source sha256: 89b052dce50f6998a178bb1854e9bae6f7c35c7bff300a48700e8b7b4c38da67
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-// N3 — Android pylibs artifact provider. The pylibs tar is ABI-sensitive
-// (os,arch,libc,pyver) and Android has no pip/bash, so the tar comes from CI
+// N3 — Android pylibs artifact provider. The pylibs tar is keyed by PLATFORM
+// (os,arch,libc) and Android has no pip/bash, so the tar comes from CI
 // prebuilt Release artifacts instead of a local build (the desktop default in
 // server-bundle.js runs build-pylibs-tar.sh — unavailable on the phone).
+//
+// It is NOT keyed by the interpreter's version: the archive is the agent's own
+// stdlib-only sources, so 3.8 and 3.13 are handed the same bytes. The floor
+// those sources declare (3.8, pyproject.toml) is enforced once, at the tunnel
+// gate — not by which artifact a remote happens to be able to look up, which
+// would make the floor "whatever minor versions CI enumerated".
 //
 // The tars are byte-deterministic, so a tar's sha256 IS its content hash and
 // its first 16 hex chars are the VERSION-gate value — the same fileHash()
@@ -14,7 +20,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 // the hash locally, so the remote VERSION gate runs unmodified.
 //
 // Release index (published by the pylibs-matrix CI job alongside the tars):
-//   { "<os>-<arch>-<libc>-py<ver>": { "file": "agent-pylibs-<...>-<hash>.tar.gz",
+//   { "<os>-<arch>-<libc>": { "file": "agent-pylibs-<...>-<hash>.tar.gz",
 //                                     "sha256": "<64 hex>",
 //                                     "version": "<16 hex = gate value>" } }
 //
@@ -175,7 +181,7 @@ function writeCachedIndex(indexUrl, index) {
 }
 // probe spellings vary (uname -s says "Linux"); the CI index is lowercase
 function indexKey(target) {
-    return `${String(target.os || "").toLowerCase()}-${target.arch}-${target.libc || "unknown"}-py${target.pyver}`;
+    return `${String(target.os || "").toLowerCase()}-${target.arch}-${target.libc || "unknown"}`;
 }
 function createAndroidArtifactProvider({ indexUrl = defaultIndexUrl(), fetchIndex = fetchJson, fetch = fetchBuf, 
 // which mirrors a failed read falls back through: null is this machine's own
@@ -321,7 +327,8 @@ mirrorList = null, } = {}) {
     function entryFor(index, key) {
         const entry = index && index[key];
         if (!entry || !entry.file || !entry.sha256 || !entry.version) {
-            throw new Error(`no prebuilt pylibs artifact for ${key}: the pylibs-matrix CI job has not published one`);
+            throw new Error(`no prebuilt pylibs artifact for ${key}: this release publishes none for this platform. ` +
+                "The server cannot be installed here; file and command access over SSH keep working.");
         }
         if (entry.version !== entry.sha256.slice(0, 16)) {
             throw new Error(`pylibs index entry for ${key} disagrees with itself: version ${entry.version} is not the ` +
@@ -340,12 +347,12 @@ mirrorList = null, } = {}) {
         // a few KB naming file + sha256 + version per target. No tar, no cache
         // lookup, no transfer — so "Checking remote server…" is a check, and a
         // remote that already runs the release's artifact is recognised without
-        // sending anybody the wheel stack.
+        // sending anybody the artifact.
         async resolvePyLibsVersion(target) {
             const key = indexKey(target);
             return entryFor(await loadIndex(() => true), key).version;
         },
-        // target: { os, arch, libc, pyver } — the probe result, exactly what the
+        // target: { os, arch, libc } — the probe result, exactly what the
         // desktop key is built from. Returns { path, version } like the desktop:
         // version = recomputed content-hash prefix, i.e. the expected VERSION gate.
         async ensurePyLibsTar(target) {

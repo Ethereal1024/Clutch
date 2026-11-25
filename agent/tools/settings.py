@@ -62,7 +62,9 @@ def path(name: str) -> Path:
 
 def values(name: str, component: catalog.Component) -> dict[str, Any]:
     """Every setting's current value: what is stored over what is declared."""
-    return catalog.setting_defaults(component) | _stored(name, component)
+    # `{**a, **b}`, not `a | b`: dict's PEP 584 merge is 3.9, and this package
+    # declares (and is tested on) 3.8.
+    return {**catalog.setting_defaults(component), **_stored(name, component)}
 
 
 def _stored(name: str, component: catalog.Component) -> dict[str, Any]:

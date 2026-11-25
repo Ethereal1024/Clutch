@@ -186,7 +186,9 @@ def _write_header(path: Path, meta: ProjectMeta) -> None:
     # line is located by offset). Windows text mode would write \r\n and push
     # every modeled offset one byte short per line, so an in-place cpr_start
     # update would overwrite the wrong bytes.
-    path.write_text(_header_text(meta), encoding="utf-8", newline="\n")
+    # open(), not write_text(newline=…): that keyword is 3.10+.
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(_header_text(meta))
 
 
 def _apply_meta(meta: ProjectMeta, line: str) -> None:

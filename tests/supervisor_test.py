@@ -392,23 +392,17 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tdir:
         hb = Path(tdir) / "beat.txt"
         hb_py = Path(tdir) / "beat.py"
-        hb_py.write_text(
-            "import os, sys, time\n"
-            "p = sys.argv[1]\n"
-            "for _ in range(300):  # never outlives the test, even if leaked\n"
-            "    open(p, 'w').write(str(os.getpid()))\n"
-            "    time.sleep(0.1)\n",
-            encoding="utf-8",
-            newline="\n",
-        )
+        with open(hb_py, "w", encoding="utf-8", newline="\n") as f:
+            f.write("import os, sys, time\n"
+                "p = sys.argv[1]\n"
+                "for _ in range(300):  # never outlives the test, even if leaked\n"
+                "    open(p, 'w').write(str(os.getpid()))\n"
+                "    time.sleep(0.1)\n")
         parent_py = Path(tdir) / "parent.py"
-        parent_py.write_text(
-            "import subprocess, sys, time\n"
-            "subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])\n"
-            "time.sleep(60)\n",
-            encoding="utf-8",
-            newline="\n",
-        )
+        with open(parent_py, "w", encoding="utf-8", newline="\n") as f:
+            f.write("import subprocess, sys, time\n"
+                "subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])\n"
+                "time.sleep(60)\n")
         tree = _sp.Popen(
             [sys.executable, str(parent_py), str(hb_py), str(hb)],
             stdout=_sp.DEVNULL,
@@ -453,28 +447,22 @@ def main() -> int:
 
         with tempfile.TemporaryDirectory() as tdir:
             grandchild_py = Path(tdir) / "server.py"
-            grandchild_py.write_text(
-                "import socket, sys, time\n"
-                "s = socket.socket()\n"
-                "s.bind(('127.0.0.1', 0))\n"
-                "s.listen(1)\n"
-                "print(f'[clutch-server] http://127.0.0.1:{s.getsockname()[1]}', flush=True)\n"
-                "time.sleep(60)\n",
-                encoding="utf-8",
-                newline="\n",
-            )
+            with open(grandchild_py, "w", encoding="utf-8", newline="\n") as f:
+                f.write("import socket, sys, time\n"
+                    "s = socket.socket()\n"
+                    "s.bind(('127.0.0.1', 0))\n"
+                    "s.listen(1)\n"
+                    "print(f'[clutch-server] http://127.0.0.1:{s.getsockname()[1]}', flush=True)\n"
+                    "time.sleep(60)\n")
             launcher_py = Path(tdir) / "launcher.py"
-            launcher_py.write_text(
-                "import subprocess, sys, time\n"
-                "from pathlib import Path\n"
-                "# the supervisor appends its own CLI (e.g. '--port 0') AFTER the\n"
-                "# command; forward it untouched, like the real agent launcher does\n"
-                "sib = Path(sys.argv[0]).resolve().parent / 'server.py'\n"
-                "subprocess.Popen([sys.executable, str(sib), *sys.argv[1:]])  # stdout inherited\n"
-                "time.sleep(60)\n",
-                encoding="utf-8",
-                newline="\n",
-            )
+            with open(launcher_py, "w", encoding="utf-8", newline="\n") as f:
+                f.write("import subprocess, sys, time\n"
+                    "from pathlib import Path\n"
+                    "# the supervisor appends its own CLI (e.g. '--port 0') AFTER the\n"
+                    "# command; forward it untouched, like the real agent launcher does\n"
+                    "sib = Path(sys.argv[0]).resolve().parent / 'server.py'\n"
+                    "subprocess.Popen([sys.executable, str(sib), *sys.argv[1:]])  # stdout inherited\n"
+                    "time.sleep(60)\n")
             sup9 = Supervisor(
                 agent_cmd=[sys.executable, str(launcher_py)],
                 cwd=str(ROOT),

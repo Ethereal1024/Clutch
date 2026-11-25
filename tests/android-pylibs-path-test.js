@@ -20,12 +20,17 @@
 //        - a second call is a cache hit (zero further tar downloads; the
 //          few-KB index JSON is re-read on every call by design);
 //        - an index without the key rejects cleanly (→ SSH-tools fallback).
+//   3. the tar carries NO wheel (the agent's Python side is stdlib-only) and its
+//      bytes do not depend on the target at all: an aarch64 build is
+//      byte-identical to the x86_64 one. That is the whole point of dropping
+//      the wheel set — an old remote became a question about the sources
+//      instead of a five-package downgrade, and a py3.8 remote and a py3.12 one
+//      are offered the SAME asset (the key has no interpreter in it).
 //
 // Run: node tests/android-pylibs-path-test.js
 //
-// Needs bash + a venv with pip (pip download hits PyPI). uv-built venvs ship
-// without pip: that is an environment limit, not a product bug → SKIP, the
-// same policy as ssh-tunnel.test.js on a Windows host without a POSIX shell.
+// Needs bash + python3 + tar. No venv and no network: there is nothing left to
+// resolve (this used to need a venv with pip, because pip downloaded wheels).
 
 const { check, summary } = require("./harness");
 const crypto = require("crypto");
@@ -37,14 +42,12 @@ const { spawnSync } = require("child_process");
 
 const REPO = path.join(__dirname, "..");
 const TAR_SH = path.join(REPO, "scripts", "build-pylibs-tar.sh");
-const VENV_PY = path.join(
-  REPO,
-  process.platform === "win32" ? ".venv/Scripts/python.exe" : ".venv/bin/python"
-);
-// mid of the CI matrix (pylibs-matrix builds 3.10–3.13); pip download resolves
-// wheels for it regardless of the local interpreter's version
-const PYVER = "3.12";
-const KEY = `linux-x86_64-glibc-py${PYVER}`;
+// The target is a LABEL now: it decides which asset a remote is offered, not
+// what the asset holds. §1 builds two unrelated targets and demands one sha256.
+const KEY = "linux-x86_64-glibc";
+const OTHER_KEY = "linux-aarch64-glibc";
+const OTHER_TARGET = { os: "Linux", arch: "aarch64", libc: "glibc" };
+const DEFAULT_TARGET = { os: "Linux", arch: "x86_64", libc: "glibc" };
 
 function sha256File(p) {
   return crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
@@ -91,13 +94,13 @@ function serveIndex(indexJson, files) {
   });
 }
 
-function buildPylibs(out) {
-  // same invocation shape as defaultEnsurePyLibsTar: bash + the 6 args.
+function buildPylibs(out, target = DEFAULT_TARGET) {
+  // same invocation shape as defaultEnsurePyLibsTar: bash + the 4 args.
   // Output is captured and only shown on failure — a green run must not bury
-  // its assertion labels under a hundred lines of pip chatter.
+  // its assertion labels under build chatter.
   const r = spawnSync(
     "bash",
-    [TAR_SH, "key-unused", out, "Linux", "x86_64", "glibc", PYVER],
+    [TAR_SH, out, target.os, target.arch, target.libc],
     { cwd: REPO, encoding: "utf8" }
   );
   if (r.status !== 0) {
@@ -113,8 +116,18 @@ async function main() {
     console.log("SKIP: no bash on this host; the pylibs build script needs one");
     return;
   }
-  if (!fs.existsSync(VENV_PY) || spawnSync(VENV_PY, ["-m", "pip", "--version"]).status !== 0) {
-    console.log("SKIP: .venv has no pip (uv-built venvs do not); run: uv pip install pip");
+  // the packer needs some interpreter; the build script prefers this
+  // checkout's .venv and otherwise falls back to python3/python on PATH
+  const py = spawnSync(
+    "bash",
+    [
+      "-c",
+      'test -x .venv/bin/python || test -x .venv/Scripts/python.exe || command -v python3 >/dev/null || command -v python >/dev/null',
+    ],
+    { cwd: REPO, encoding: "utf8" }
+  );
+  if (py.status !== 0) {
+    console.log("SKIP: no interpreter to pack the tar with (need .venv or python3)");
     return;
   }
 
@@ -138,43 +151,36 @@ async function main() {
 
     const listing = spawnSync("tar", ["-tzf", tarA], { encoding: "utf8" }).stdout;
     check(
-  listing
-        .split("\n")
-        .some((l) => l === "agent/" || l === "agent") &&
+      listing.split("\n").some((l) => l === "agent/" || l === "agent") &&
         listing.includes("agent/supervisor.py") &&
-        listing.includes("site-packages/openai/"),
-  "tar embeds agent/ (incl. supervisor entry) + site-packages"
-);
-
-    // ④: the pinned wheel set. Pinning only openai/httpx2 left the pydantic
-    // pair to whatever the index resolved on build day — one pair per release,
-    // and pydantic refuses to import beside a pydantic_core it was not built
-    // against ("SystemError: The installed pydantic-core version ... is
-    // incompatible"), which is the drift that re-broke the tree. Both are
-    // pinned from THIS venv, so the tar must carry exactly the venv's version
-    // of each, and exactly one generation of each. jiter is in the set for the
-    // same reason — openai's other compiled wheel, and the one that floated
-    // three ways in 0.2.0 (0.16.0 here, 0.18.0 for py3.10, 0.19.0 for 3.11+,
-    // the last of which also demanded a python the builder did not have).
-    const distInfos = listing.split("\n").filter((l) => /\.dist-info\/?$/.test(l));
-    const gens = (name) =>
-      distInfos.filter((l) => new RegExp(`site-packages/${name}-[^/]+\\.dist-info`).test(l));
-    const venvVer = (name) =>
-      spawnSync(VENV_PY, ["-c", `import importlib.metadata as m;print(m.version('${name}'))`], {
-        encoding: "utf8",
-      }).stdout.trim();
-    check(gens("openai").length === 1 && gens("httpx2").length === 1, "tar carries one openai + httpx2 generation");
-    check(
-      gens("pydantic").length === 1 && gens("pydantic_core").length === 1 && gens("jiter").length === 1,
-      "tar pins exactly one pydantic + pydantic_core + jiter generation (④: no index-day drift)"
+        listing.includes("site-packages/"),
+      "tar embeds agent/ (incl. supervisor entry) + site-packages/"
     );
+
+    // The agent's Python side is stdlib-only now (pyproject.toml: no
+    // dependencies). No wheel, no .dist-info — that metadata is what the tree
+    // probe counts, so a leftover second generation is the half-installed
+    // state the probe reports as DUP. An empty site-packages keeps the tree
+    // shape the installer swaps and the probe scans.
+    const distInfos = listing.split("\n").filter((l) => /\.dist-info\/?$/.test(l));
+    check(distInfos.length === 0, "tar carries zero .dist-info (no wheel, one fixed tree shape)");
     check(
-      gens("pydantic")[0] === `site-packages/pydantic-${venvVer("pydantic")}.dist-info/` &&
-        gens("pydantic_core")[0] === `site-packages/pydantic_core-${venvVer("pydantic_core")}.dist-info/` &&
-        gens("jiter")[0] === `site-packages/jiter-${venvVer("jiter")}.dist-info/` &&
-        gens("openai")[0] === `site-packages/openai-${venvVer("openai")}.dist-info/` &&
-        gens("httpx2")[0] === `site-packages/httpx2-${venvVer("httpx2")}.dist-info/`,
-      "every pin equals the client venv's own version (the pair this client runs)"
+      !/\bsite-packages\/[^/]+\//.test(listing),
+      "site-packages/ ships empty (the agent needs nothing from it)"
+    );
+
+    // ---- 1b. the target no longer decides content ----
+    // Same input set → same bytes regardless of the key we claim: build the
+    // far end of the matrix (aarch64) and demand the x86_64 hash.
+    // This is the property that makes an old remote a source question instead
+    // of a five-wheel downgrade, so it is asserted, not assumed.
+    const tarC = path.join(buildDir, "c.tar.gz");
+    const r3 = buildPylibs(tarC, OTHER_TARGET);
+    check(r3.status === 0, `build for ${OTHER_KEY} exits 0`);
+    if (r3.status !== 0) return;
+    check(
+      sha256File(tarC) === hash,
+      `${OTHER_KEY} is byte-identical to ${KEY} — the artifact does not depend on the target`
     );
 
     // ---- 2. CI-named tar through the Android provider over a fake index ----
@@ -199,7 +205,7 @@ async function main() {
 );
 
     try {
-      const got = await ensurePyLibsTar({ os: "Linux", arch: "x86_64", libc: "glibc", pyver: PYVER });
+      const got = await ensurePyLibsTar({ os: "Linux", arch: "x86_64", libc: "glibc" });
       check(
   got.path === path.join(SANDBOX_HOME, ".clutch", "bundles", ciName),
   "tar lands in the sandbox ~/.clutch/bundles (same cache the desktop uses)"
@@ -211,7 +217,7 @@ async function main() {
       check(sha256File(got.path) === hash, "downloaded bytes match the index sha256");
 
       const tarsAfterFirst = fake.tarHits;
-      const again = await ensurePyLibsTar({ os: "linux", arch: "x86_64", libc: "glibc", pyver: PYVER });
+      const again = await ensurePyLibsTar({ os: "linux", arch: "x86_64", libc: "glibc" });
       check(
         fake.tarHits === tarsAfterFirst && again.version === got.version && again.path === got.path,
         "second call is a tar cache hit: zero further downloads, same path+version"
@@ -219,7 +225,7 @@ async function main() {
 
       let rejected = null;
       try {
-        await ensurePyLibsTar({ os: "Linux", arch: "riscv64", libc: "glibc", pyver: PYVER });
+        await ensurePyLibsTar({ os: "Linux", arch: "riscv64", libc: "glibc" });
       } catch (e) {
         rejected = e;
       }
@@ -247,7 +253,7 @@ async function main() {
       });
       let hashFail = null;
       try {
-        await evilProvider.ensurePyLibsTar({ os: "Linux", arch: "x86_64", libc: "glibc", pyver: PYVER });
+        await evilProvider.ensurePyLibsTar({ os: "Linux", arch: "x86_64", libc: "glibc" });
       } catch (e) {
         hashFail = e;
       }

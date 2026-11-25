@@ -36,7 +36,15 @@ ToolImpl = Callable[..., Envelope]
 # a refusal, or None to proceed — (workspace, config, args, arg), where `arg` is
 # the argument this policy judges, from the tool's own declaration
 # (catalog.Tool.access_arg) — never assumed to be "path".
-GuardImpl = Callable[[Workspace, Config, dict[str, Any], str], Envelope | None]
+#
+# The two inner quotes are load-bearing, not decoration: this is an ALIAS, an
+# expression evaluated at import time, so no `from __future__ import
+# annotations` reaches it. `dict[str, Any]` is 3.9 syntax and `Envelope | None`
+# is 3.10 — written bare, this line is a TypeError on the 3.8 the package
+# declares (and every module that imports a guard came down with it). Quoted,
+# typing stores them as ForwardRefs, which is the same style as
+# core/lock_reconcile.py's `Callable[[int], "bool | None"]`.
+GuardImpl = Callable[[Workspace, Config, "dict[str, Any]", str], "Envelope | None"]
 
 
 @dataclass(frozen=True)
