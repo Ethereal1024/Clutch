@@ -402,14 +402,16 @@ def _sse_adopts_the_window_project(base_url, clc, proj_dir, state) -> None:
     and it arrives on its own: the stream that names a project makes it the
     session's (agent/api/events.py _adopt_for_sse).
 
-    The replacement is staged with /api/backend, the one endpoint that drops the
-    session's whole project context while the .clc stays on disk, unheld — the
-    state a reconnecting window finds itself in.
+    The replacement is staged by dropping the session's whole project context
+    the way a fresh process starts — no project, no workspace, no claim — while
+    the .clc stays on disk, unheld: the state a reconnecting window finds itself
+    in.
     """
     (proj_dir / "adopt.txt").write_text("x", encoding="utf-8")  # something to find in the tree
-    st, _ = http_post(f"{base_url}/api/backend", {"mode": "local"})
-    check(st == 200, "the session's project context is dropped (a replaced session)")
-    check(state.project is None and state.workspace is None, "and it starts with nothing open")
+    state.release_run(str(clc))
+    state.project = None
+    state.workspace = None
+    check(state.project is None and state.workspace is None, "the replaced session starts with nothing open")
     st, body = http_get(f"{base_url}/api/workspace/tree")
     check(st == 200 and json.loads(body) == {"tree": [], "root": None},
           "every project-scoped view answers 'nothing open' (the blank panel)")
@@ -1355,18 +1357,18 @@ def _the_claim_never_outlives_its_run(base_url, clc, clc2, state, sdir) -> None:
     check(st == 200, "demo reopened for the turn section")
 
 
-def _remote_workspace_locks_locally() -> None:
-    # ---- 3g. remote workspaces lock locally (kernel lock keyed by .clc path) ----
+def _project_lock_is_local_to_this_host() -> None:
+    # ---- 3g. a project's lock is THIS host's kernel lock, keyed by .clc path ----
     from agent.core.project_lock import ProjectLock, _local_lock_path
 
     with tempfile.TemporaryDirectory() as rdir:
         root = Path(rdir)
-        rclc = str(root / "remote.clc")
-        (root / "remote.clc").write_text("x\n")
+        rclc = str(root / "proj.clc")
+        (root / "proj.clc").write_text("x\n")
 
         h1 = ProjectLock.acquire(rclc)
-        check(h1 is not None, "remote-path lock acquired (local kernel lock)")
-        check(not (root / ".clc.lock").exists(), "no lock file is written on the remote host")
+        check(h1 is not None, "the lock is acquired")
+        check(not (root / ".clc.lock").exists(), "no lock file is written next to the .clc")
         check(Path(_local_lock_path(rclc)).exists(), "lock file lives in the local temp dir")
 
         # a second window (fresh process state) is refused — the lock is held
@@ -1374,7 +1376,7 @@ def _remote_workspace_locks_locally() -> None:
         ProjectLock._held.clear()
         try:
             h2 = ProjectLock.acquire(rclc)
-            check(h2 is None, "second window on the same remote project refused")
+            check(h2 is None, "a second window on the same project is refused")
         finally:
             ProjectLock._held.update(saved_held)  # restore the demo handle
 
@@ -1382,14 +1384,14 @@ def _remote_workspace_locks_locally() -> None:
         check(ProjectLock.acquire(rclc) is not None, "fresh acquire after release")
         ProjectLock.release_all()
 
-        # read-only remote dir must open for write (old lock file could not be created there)
+        # a read-only project dir still opens for write (the lock file is elsewhere)
         ro = root / "ro-dir"
         ro.mkdir()
         (ro / "proj.clc").write_text("x\n")
-        ro.chmod(0o500)  # directory not writable by the ssh user
+        ro.chmod(0o500)  # directory not writable by the user running the test
         try:
             h3 = ProjectLock.acquire(str(ro / "proj.clc"))
-            check(h3 is not None, "acquire works in a read-only remote dir (no remote write)")
+            check(h3 is not None, "acquire works in a read-only dir (the lock file is not written there)")
             ProjectLock.release(h3)
         finally:
             ro.chmod(0o700)  # restore so the temp dir cleans up
@@ -1399,14 +1401,14 @@ def _dying_holder_frees_the_lock() -> None:
     from agent.core.project_lock import ProjectLock
 
     # ---- 3h. a dying holder frees the lock ----
-    # Both backends are KERNEL locks (flock / LockFileEx), so the OS drops the
-    # lock when the holder dies — no pid check, no reclaim. Killing the holder
+    # The lock is a KERNEL lock (flock / LockFileEx), so the OS drops it when the
+    # holder dies — no pid check, no reclaim. Killing the holder
     # is therefore enough, but it does have to be the TRUE holder: see
     # _kill_tree (the venv python.exe is a redirector).
     with tempfile.TemporaryDirectory() as rdir:
         root = Path(rdir)
-        rclc = str(root / "remote2.clc")
-        (root / "remote2.clc").write_text("x\n")
+        rclc = str(root / "dying.clc")
+        (root / "dying.clc").write_text("x\n")
         snippet = (
             "import sys,time; sys.path.insert(0,sys.argv[1]);"
             "from agent.core.project_lock import ProjectLock;"
@@ -1527,11 +1529,12 @@ def _the_claim_lifecycle() -> None:
         check(not state.owns_claim(key) and lock_free(), "so the file can be claimed again")
         check(state.drop_expired_claim() is False, "with nothing left to drop")
 
-        # a backend switch invalidates the project — and the claim taken on it
+        # a project switch invalidates the project — and the claim taken on it
         state.set_project(open_project_lazy(Path(key), workspace=ws), workspace=ws)
         check(state.claim_run(key) == "", "a run claims the project")
-        state.set_backend("local")
-        check(state._claim_lock is None and lock_free(), "a mode switch takes the claim with the project")
+        other = create_project(root / "switched", "switched", workspace=ws)
+        state.set_project(open_project_lazy(Path(other.path), workspace=ws), workspace=ws)
+        check(state._claim_lock is None and lock_free(), "switching project takes the claim with it")
 
 
 def _lock_claim_identity() -> None:
@@ -2212,7 +2215,7 @@ def _run_server_test() -> int:
         clc2 = _multi_window_isolation(base_url, clc, proj_dir, state, broadcaster)
         _the_claim_belongs_to_the_run(base_url, clc, clc2, state)
         _the_claim_never_outlives_its_run(base_url, clc, clc2, state, sdir)
-        _remote_workspace_locks_locally()
+        _project_lock_is_local_to_this_host()
         _dying_holder_frees_the_lock()
         _the_claim_lifecycle()
         _lock_claim_identity()

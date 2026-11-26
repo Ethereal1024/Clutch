@@ -78,9 +78,6 @@ Lifecycle (per product decision):
 Locking: each session child is an independent process, so the .clc write lock
 is a kernel file lock (flock / LockFileEx) on the machine's tmp dir —
 process-level mutual exclusion, released by the OS on exit, no TTL needed.
-(noclobber+TTL remains only for
-the execBridge-degraded path, where the agent process and the project files
-live on different machines.)
 
 Layering: the spawn/port/reap/kill/stdio machinery lives in agent/procmgr —
 the general Clutch process-management layer, built to manage every resident

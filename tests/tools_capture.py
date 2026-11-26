@@ -11,12 +11,11 @@ deployment A/C; `tests/host-tools.test.js` replays the same calls against
     .venv/bin/python -m tests.tools_capture --check    # regenerate+compare
 
 The workspace here is a STUB, and deliberately so (the same choice
-`tests/permission_capture.py` makes): the far-root host judges paths LEXICALLY,
-so the only facts `run_command` reads from a workspace are the root, the far
-user's home, the POSIX scratch trio, the protected set and the exec seam. The
-stub keeps those in `PurePosixPath` flavor, exactly like `RemoteWorkspace`, and
-the JS replay builds the same thing out of `ui/host/fs.js` (whose `resolve` is
-the port of the Python method `run_command` calls).
+`tests/permission_capture.py` makes): the only facts `run_command` reads from a
+workspace are the root, the user's home, the POSIX scratch trio, the protected
+set and the exec seam. The stub keeps those in `PurePosixPath` flavor, and the
+JS replay builds the same thing out of `ui/host/fs.js` (whose `resolve` is the
+port of the Python method `run_command` calls).
 
 What is captured, and why each part is contract:
 

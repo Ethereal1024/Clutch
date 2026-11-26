@@ -22,7 +22,6 @@ from pathlib import Path
 from ..config import Config
 from . import catalog, facts, rendezvous
 from .answers import _drivable, _entries, _resolve, _say, _whole_fact
-from .workspace import LocalWorkspace, Workspace
 
 
 def prompt_section(config: Config) -> str:
@@ -124,37 +123,24 @@ def components_unavailable(config: Config) -> list[dict[str, str]]:
     return out
 
 
-def module_blocked_reason(workspace: Workspace, module: str | None) -> str:
+def module_blocked_reason(module: str | None) -> str:
     """Why this host cannot run `module`'s statements for THIS call ("" = it can).
 
-    Two facts, and the second one is symmetric. The component has to be here and
-    drivable (`rendezvous.unavailable_reason` — nothing on the host's side can
-    stand in for it), and a component whose SUBJECT is *a* workspace filesystem
-    only serves the machine that filesystem is on:
-
-      * one whose process is this host's to start serves the root's own machine,
-        so the root has to live HERE (`rendezvous.serves_workspace_fs`);
-      * one whose process is the CLIENT's (it carries an `entry`: only a push can
-        bring one) serves the machine holding that root, so the root has to be
-        somewhere ELSE (`rendezvous.serves_remote_workspace_fs`).
-
-    Both questions are the same one — is this workspace local? — asked in opposite
-    directions, which is why one `isinstance` answers them. A component serving
-    anything else (the project file, the network, a library of its own) is
-    unaffected by where the workspace lives.
+    Two facts. The component has to be here and drivable
+    (`rendezvous.unavailable_reason` — nothing on the host's side can stand in
+    for it), and a component whose SUBJECT is *a* workspace filesystem must serve
+    the root's own machine: one whose process is the CLIENT's (it carries an
+    `entry`: only a push can bring one) serves the machine holding a root that
+    lives somewhere else, so on this host's local root it has nothing to say
+    (`rendezvous.serves_remote_workspace_fs`). A component serving anything else
+    (the project file, the network, a library of its own) is unaffected.
     """
     if module is None:
         return "no component serves this tool"
     missing = rendezvous.unavailable_reason(module)
     if missing:
         return missing
-    local = isinstance(workspace, LocalWorkspace)
-    if not local and rendezvous.serves_workspace_fs(module):
-        return (
-            f"{module} serves the filesystem of the machine this workspace root lives on, "
-            f"and this root is another machine's"
-        )
-    if local and rendezvous.serves_remote_workspace_fs(module):
+    if rendezvous.serves_remote_workspace_fs(module):
         return (
             f"{module} serves the filesystem of another machine over a channel, "
             f"and this workspace root is a local one"

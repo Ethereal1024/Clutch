@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-connect.ts and run `npm run build:host`.
-// source sha256: 112a945110f3f2ff530c53b8cb784ad87a281a13cb0f8429cfc15aee878ebb4f
+// source sha256: 8342fac110e93a3cf15fc081b44db6b9662d1aa807407c9bb1af708f698a139a
 
 "use strict";
 // one connect attempt — auth, the forwards, the health gate
@@ -463,14 +463,14 @@ function attach(ctx) {
             // markers is NOT "nothing is installed there". Reading it that way sent a
             // flaky reconnect into a full reinstall it did not need — and, with the old
             // stop patterns, into a loop it could not leave. Say what actually
-            // happened; the SSH session stays for SSH-tools.
+            // happened.
             if (!probe.os || !probe.home) {
                 const why = probeOut.code === -1
                     ? "the remote shell did not answer the capability probe in time"
                     : `the capability probe came back unreadable (exit ${probeOut.code})`;
                 tunnelLog("[bootstrap] probe unusable: " + why + " :: " + (probeOut.stdout || "").slice(0, 200));
                 state.wasDisconnected = false;
-                return { ok: false, error: why + " — the remote server was left untouched; reconnect." };
+                return failConnect(client, "[bootstrap] probe unusable: " + why, why + " — the remote server was left untouched; reconnect.");
             }
             // "check", not "install": the gate below decides, and installServer
             // announces the install itself when there really is one to do
@@ -478,11 +478,11 @@ function attach(ctx) {
                 progress("check");
             const boot = await installServer(probe, { progress });
             if (boot && boot.ok === false) {
-                // hard reject: keep the SSH session for SSH-tools degradation; mark the
-                // tunnel live so an unexpected death fires onEnd
+                // hard reject: nothing of this hop can serve the window, so the wire goes
+                // with the verdict instead of being left open to nobody
                 tunnelLog("[bootstrap] rejected: " + boot.error);
                 state.wasDisconnected = false;
-                return { ok: false, error: boot.error };
+                return failConnect(client, "[bootstrap] rejected: " + boot.error, boot.error);
             }
             if (progress)
                 progress("forward");

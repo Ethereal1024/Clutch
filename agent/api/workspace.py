@@ -1,13 +1,12 @@
 """The file-side API: the working tree and the directory browser.
 
-Every read and write goes through the Workspace abstraction, so a remote (SSH
-bridge) project works unchanged: the caller only ever sees paths and bytes.
+Every read and write goes through the Workspace abstraction: the caller only ever
+sees paths and bytes.
 """
 
 from __future__ import annotations
 
-import posixpath
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .. import browsing
@@ -16,16 +15,9 @@ from .. import browsing
 class WorkspaceMixin:
     "The workspace and the directory browser."
     def _project_path(self, raw: str) -> Path:
-        """Normalize a client-supplied .clc path WITHOUT local filesystem
-        semantics in ssh mode: the path lives on the REMOTE host, and
-        Path.resolve() here would rewrite it with the app host's view of the
-        world (/home -> /System/Volumes/Data/home on macOS autofs) — and a
-        Windows host's Path would even re-separator it with backslashes.
-        ssh mode therefore normalizes lexically in the PurePosixPath flavor;
-        Local mode keeps the OS realpath — it feeds the is_file() existence
-        check. Ssh mode leaves existence to the remote open/read itself."""
-        if self._state.backend_mode == "ssh":
-            return PurePosixPath(posixpath.normpath(raw.replace("\\", "/")))
+        """Normalize a client-supplied .clc path against the host's own
+        filesystem: the OS realpath, because it feeds the is_file() existence
+        check."""
         return Path(raw).resolve()
 
     def _workspace_tree(self) -> None:
@@ -131,15 +123,14 @@ class WorkspaceMixin:
     def _fs_list(self) -> None:
         """Server-side directory browser (the UI picks projects from here).
 
-        One level, starting at the server user's home (or the SSH remote's home in
-        degradation mode). Reachable only via the local bind or the SSH tunnel, so
-        no auth is needed. The payload contract and both transports live in
-        agent.browsing so the local and remote shapes cannot drift.
+        One level, starting at the server user's home. Reachable only via the
+        local bind or the SSH tunnel, so no auth is needed. The payload contract
+        lives in agent.browsing, which is the one place these shapes are built.
         """
         qs = parse_qs(urlparse(self.path).query)
         raw = (qs.get("path") or [""])[0]
         show_hidden = qs.get("hidden", ["0"])[0] == "1"
-        self._json(browsing.fs_list(self._state, raw, show_hidden))
+        self._json(browsing.fs_list(raw, show_hidden))
 
     def _fs_stat(self) -> None:
         """What is at this path: a directory, a regular file, or nothing yet.
@@ -151,7 +142,7 @@ class WorkspaceMixin:
         """
         qs = parse_qs(urlparse(self.path).query)
         raw = (qs.get("path") or [""])[0]
-        self._json(browsing.fs_stat(self._state, raw))
+        self._json(browsing.fs_stat(raw))
 
     def _fs_mkdir(self) -> None:
         """New folder, inside the directory the picker is showing.
@@ -165,7 +156,7 @@ class WorkspaceMixin:
             return self._json({"error": "bad json body"}, status=400)
         raw_dir = str(body.get("dir") or "").strip()
         name = str(body.get("name") or "")
-        result = browsing.fs_mkdir(self._state, raw_dir, name)
+        result = browsing.fs_mkdir(raw_dir, name)
         if result["path"] is None:
             return self._json({"error": result["error"]}, status=400)
         self._json(result)

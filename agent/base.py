@@ -6,9 +6,9 @@ write lock, appends durable lines to a `.clc`, runs one tool call per request
 The loop that drives a turn lives in the client; there is no model client on
 this side any more (P4 removed the one that used to be here).
 
-BaseServer is only `build_tools` + `build_workspace` now; the degraded SSH
-backend needs no code here at all, since build_workspace is implemented per
-server and the workspace/transport layer routes to the remote.
+BaseServer is only `build_tools` + `build_workspace` now, and both are local:
+the project's files are this machine's files, reached through `LocalWorkspace`
+and `LocalTransport`.
 
 Broadcaster and RunState live here too (not in server.py) so the base has no
 dependency on the HTTP layer.
@@ -28,7 +28,7 @@ from .core.permission import PermissionGate
 from .core.project_lock import LockHandle, ProjectLock, owner_summary
 from .project import Project
 from .tools.registry import ToolRegistry, build_tools
-from .tools.workspace import LocalWorkspace, RemoteWorkspace, Workspace
+from .tools.workspace import LocalWorkspace, Workspace
 
 # A window that stopped draining is not owed an unbounded buffer: every DURABLE
 # event is already in the project log, and the subscriber carries the byte offset
@@ -134,8 +134,7 @@ class RunState:
 
     A project is a single .clc file; its working directory is the directory that
     contains it. Runs within the same project share the project's event log so
-    the conversation continues across runs. Also owns the SSH degradation mode:
-    backend_mode/bridge_url/remote_root select RemoteWorkspace vs LocalWorkspace.
+    the conversation continues across runs.
     """
 
     # The run slot is a LEASE, not a latch (P2-3). The host drives the turn now
@@ -197,10 +196,6 @@ class RunState:
         self.trust_armed: bool = False
         # project of the active run; SSE subscribers filter live events by it
         self.run_project: str | None = None
-        # when set, tools/.clc/fs run through the exec bridge
-        self.backend_mode: str = "local"  # "local" | "ssh"
-        self.bridge_url: str | None = None
-        self.remote_root: str | None = None  # initial browse root on the remote
 
     @property
     def busy(self) -> bool:
@@ -382,9 +377,7 @@ class RunState:
         return lock is not None
 
     def build_workspace(self, root: str) -> Workspace:
-        """Workspace factory: RemoteWorkspace in ssh mode, LocalWorkspace otherwise."""
-        if self.backend_mode == "ssh" and self.bridge_url:
-            return RemoteWorkspace(root, self.bridge_url)
+        """Workspace factory: the one place a root becomes a Workspace."""
         return LocalWorkspace(root)
 
     def live_gates(self) -> list[PermissionGate]:
@@ -396,19 +389,6 @@ class RunState:
         """
         with self.lock:
             return [g for g in self.gates if g is not None]
-
-    def set_backend(self, mode: str, bridge_url: str | None = None, remote_root: str | None = None) -> None:
-        """Switch the SSH-degradation backend (mode: "local" | "ssh"). A mode
-        switch invalidates the open project's workspace (paths differ per mode),
-        and with the project goes the claim that was taken on it."""
-        with self.lock:
-            self._drop_claim_locked()
-            self.backend_mode = mode
-            self.bridge_url = bridge_url
-            self.remote_root = remote_root
-            # a mode switch invalidates any previously-opened project's workspace
-            self.project = None
-            self.workspace = None
 
     def set_project(self, project: Project, workspace: Workspace | None = None) -> Workspace:
         """Make `project` the active one.
@@ -445,13 +425,9 @@ class BaseServer(ABC):
         """Tools for a run; config overrides self.config for a per-run mode
         (chat read-only toolset vs work's full set).
 
-        The run's workspace goes with them: a remote root has no daemon of ours to
-        answer for the workspace's own filesystem, so the host declares the four
-        file tools itself there (`tools/host.py`) and a component publishing one of
-        those names is dropped rather than wired twice (`registry.build_tools`'s
-        `held`); a call still asks `prompt.module_blocked_reason` before it runs.
-        `state.workspace` is the open project's workspace (set_project); before a
-        project is open it is None, which offers everything.
+        The run's tools are the components': the host owns exactly `run_command`
+        (`tools/host.py`) and wires everything else from the catalog, so a call
+        still asks `prompt.module_blocked_reason` before it runs.
 
         The project's log goes with them too, and it is the same object in both
         places: `build_tools` needs it to answer the `project` gate, and the
@@ -459,8 +435,8 @@ class BaseServer(ABC):
         travels — the readers can only read the log this run is logged in."""
         cfg = config or self.config
         log = project.log if project else None
-        return ToolRegistry(build_tools(cfg, log=log, workspace=self.state.workspace), log=log)
+        return ToolRegistry(build_tools(cfg, log=log), log=log)
 
     @abstractmethod
     def build_workspace(self, project: Project) -> Workspace:
-        """Workspace for a project's working directory (local or remote)."""
+        """Workspace for a project's working directory."""

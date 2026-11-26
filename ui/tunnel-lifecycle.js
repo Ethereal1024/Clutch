@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-lifecycle.ts and run `npm run build:host`.
-// source sha256: 051b81e67a296625059c656bea806065752efa1df956188adfb86fa873063198
+// source sha256: 650f36d78124a9ee9bbdbe66f98df8bb65726477f8d6eab4d59d96e503353492
 
 "use strict";
 // teardown, the per-window session forwards, and self-healing
@@ -106,7 +106,7 @@ function attach(ctx) {
             // wire to a concurrent attempt tell "that attempt landed for ME" from
             // "something else is up".
             target: state.target ? { host: state.target.host, user: state.target.user, port: state.target.port } : null,
-            // exec bridge URL for the local agent's SshTransport; null with no live tunnel.
+            // the exec bridge a client plugin may post to; null with no live tunnel.
             // Asked of the bridge itself: it owns its port, and a rebind replaces the
             // server rather than rewriting a field the status would have to remember to
             // read.

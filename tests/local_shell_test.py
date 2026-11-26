@@ -8,9 +8,8 @@ host's POSIX sh / a detected Git Bash / cmd.exe). These tests PIN that decision
   - LocalTransport.run               spawn shape (argv vs shell=True, utf-8 decode)
   - shell.run_command/_blocked_reason  unparseable-command guard + REPL lexer
   - shell.run_trigger                the same guards under a longer clock
-  - PermissionEvaluator.escaped_paths  flavor comes from the WORKSPACE, so a
-                                     remote (SSH) workspace tokenizes POSIX even
-                                     on a host pinned to cmd
+  - PermissionEvaluator.escaped_paths  flavor comes from the WORKSPACE, which is
+                                     the host's own shell decision
   - supervisor._SafeStdStream        the no-fcntl (Windows) stdio degradation
 
 Run: uv run python3 -m tests.local_shell_test
@@ -31,7 +30,7 @@ from agent.supervisor import _SafeStdStream
 from agent.tools import shell as shell_mod
 from agent.tools.localshell import LocalShell, local_shell, reset_cache, split_command
 from agent.tools.transport import LocalTransport
-from agent.tools.workspace import LocalWorkspace, RemoteWorkspace
+from agent.tools.workspace import LocalWorkspace
 from tests.testsupport import check
 
 # pinned decisions (argv here is never spawned except in the recorder test,
@@ -203,9 +202,6 @@ def test_workspace_exec_shell() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         lws = LocalWorkspace(tmp)
         check(lws.exec_shell() is local_shell(), "local workspace exec_shell IS the pinned decision")
-    rws = RemoteWorkspace("/srv/proj", "http://127.0.0.1:9")
-    sh = rws.exec_shell()
-    check(sh.posix is True and sh.name == "posix-sh", "remote workspace is ALWAYS posix, whatever the host decided")
 
 
 def test_permission_flavor() -> None:
@@ -223,13 +219,14 @@ def test_permission_flavor() -> None:
         )
         esc3 = pe.escaped_paths('{"command": "cat \\"unbalanced"}', lws, access="command")
         check(esc3 == frozenset(), "unparseable command -> conservative empty escape set")
-    # the remote shell is POSIX even though the HOST is cmd-pinned: the same
-    # quoting must parse as sh and flag the escape (the ssh-from-Windows case)
-    rws = RemoteWorkspace("/srv/proj", "http://127.0.0.1:9")
-    esc2 = pe.escaped_paths('{"command": "grep \'a b\' /etc/hosts"}', rws, access="command")
+    # a POSIX host: the same quoting parses as sh and flags the escape
+    reset_cache(POSIX)
+    with tempfile.TemporaryDirectory() as tmp:
+        pws = LocalWorkspace(tmp)
+        esc2 = pe.escaped_paths('{"command": "grep \'a b\' /etc/hosts"}', pws, access="command")
     check(
         len(esc2) == 1 and any("hosts" in str(p) for p in esc2),
-        "remote workspace tokenizes POSIX despite the cmd-pinned host",
+        "a posix workspace tokenizes POSIX",
     )
 
 

@@ -231,7 +231,6 @@ export function connLostNeedsUser() {
 export function connLostCancel() {
   if (!connLost) return;
   localStorage.removeItem("clutch_ssh_connected");
-  localStorage.removeItem("clutch_degrade"); // exiting the degrade mode too
   if (connLostTimer) {
     clearTimeout(connLostTimer);
     connLostTimer = null;

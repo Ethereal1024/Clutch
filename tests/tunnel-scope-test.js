@@ -116,8 +116,8 @@ check(/^\(info\) => \{/.test(onEndSrc) && /refreshPicker\(\)/.test(onEndSrc),
   "the tunnel-end handler is one function of the verdict (and this runner found its real text)");
 check(/if \(info && info\.lost === false\) return;/.test(onEndSrc),
   "a window the hop never owned returns immediately: no dialog, nothing re-dialled — the innocent-window bug's own line");
-check(onEndSrc.indexOf('removeItem("clutch_degrade")') < onEndSrc.indexOf("info.lost === false"),
-  "after dropping what the hop implies for everyone: degrade mode died with the exec bridge, whoever was on it");
+check(!/clutch_degrade/.test(onEndSrc),
+  "the hop's end has no degrade mode to drop: that mode died with the exec bridge, so nothing here reads or clears it");
 check(onEndSrc.indexOf("info.lost === false") < onEndSrc.indexOf('getItem("clutch_ssh_connected")'),
   "and the verdict is read BEFORE the standing intent: that intent is a global key, which is exactly why it cannot decide this alone");
 check(onEndSrc.indexOf('getItem("clutch_ssh_connected")') < onEndSrc.indexOf('connectionLost("lost the remote connection")'),
@@ -188,7 +188,6 @@ function makeCore(tunnel) {
 // intent from the window that WAS on the remote is what this window sees
 const store = new Map([
   ["clutch_ssh_connected", "1"],
-  ["clutch_degrade", "{}"],
 ]);
 global.localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
@@ -235,9 +234,8 @@ async function main() {
   await onEnd(mine.sent[0][1]);
   check(losts === 0 && pickerPaints === 0,
     "the innocent window raises no dialog and repaints no picker: it still has its session, its stream and its work");
-  check(!store.has("clutch_degrade"),
-    "it does still drop what the hop implied — degrade mode died with the exec bridge");
-  store.set("clutch_degrade", "{}");
+  check(store.get("clutch_ssh_connected") === "1",
+    "and it does not touch what the hop implied: degrade mode died with the exec bridge, and the standing intent is the user's");
 
   await onEnd(theirs.sent[0][1]);
   check(losts === 1,

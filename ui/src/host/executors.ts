@@ -20,9 +20,9 @@
 //                 alive.
 //   capabilities  what can be asked of it RIGHT NOW: `supervisor` (a session can
 //                 be claimed on it) and `exec` (this process can run a command
-//                 on it, through the exec bridge). An endpoint with exec and no
-//                 supervisor is the SSH-tools degradation — the far side takes
-//                 commands but runs no session.
+//                 on it, through the exec bridge). A session needs the first:
+//                 an endpoint with exec and no supervisor can carry a command
+//                 but has nothing to claim.
 //   status()      { active, url, target } — what the page and the picker are told
 //   base()        the supervisor base a session is claimed on, or null
 //   ready()       make the supervisor answer, when starting it is OURS to do: the

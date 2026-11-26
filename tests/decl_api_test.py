@@ -36,7 +36,6 @@ from agent.config import Config
 from agent.project import create_project
 from agent.server import build
 from agent.tools import answers, catalog, rendezvous
-from agent.tools.workspace import RemoteWorkspace
 from tests.testsupport import check, http_get
 
 SECRET = "sk-decl-test-SECRET-not-in-the-surface"
@@ -71,8 +70,8 @@ def files_check(tmp: Path) -> None:
     status, body, _text = surface(base)
     check(status == 200, "no project open is answered 200, not 409 (the page needs a surface first)")
     check(
-        sorted(body) == ["available", "backends", "config", "declarations", "facts", "host", "mode", "project", "remote"],
-        "the answer carries exactly the nine facts the reading needs",
+        sorted(body) == ["available", "backends", "config", "declarations", "facts", "host", "mode", "project"],
+        "the answer carries exactly the eight facts the reading needs",
     )
     check(
         body["declarations"] == catalog.registrations(),
@@ -102,19 +101,6 @@ def files_check(tmp: Path) -> None:
     check(
         body["declarations"][0].get("name") == catalog.registrations()[0].get("name"),
         "the first registration is first",
-    )
-    check(body["remote"] is False, "no workspace, or a local one -> `remote` is false (the host declares no file tools)")
-
-    # The session's ROOT is what decides it, and it is asked of the object the
-    # run will really use: a workspace on another machine has no daemon over there
-    # to declare read_file and its three siblings, so the host declares them
-    # (tools/host.py `_REMOTE_DECLARATIONS`) and the reading adds the four.
-    state.workspace = RemoteWorkspace(str(tmp), "http://127.0.0.1:1/exec")
-    _status, remote_body, _text = surface(base)
-    check(remote_body["remote"] is True, "a workspace on another machine -> `remote` is true")
-    check(
-        remote_body["declarations"] == body["declarations"],
-        "and the declarations themselves do not change: the four are the HOST's, not a component's",
     )
     srv.shutdown()
 

@@ -11,13 +11,13 @@
 //   1. the fixture set is COMPLETE and SELF-CONSISTENT (every endpoint in the
 //      manifest has its file, every case it lists is there, every recorded status
 //      is a number, and no golden leaked a machine path through the <ROOT>/<HOME>/
-//      <TMP> normalization);
-//   2. the four tools' frozen text, compared between the component that serves
-//      a LOCAL root (clutch-workspace's CLI) and the implementation the HOST
-//      brings when the root is on another machine (agent/tools/filesystem.py,
-//      driven by tests/filesystem_dump.py). Same fixture tree, same cases,
-//      same frozen texts — that parity is what `agent/prompts/tools/<name>.md`
-//      promises the model, so it is what the seam is held to.
+//      <TMP> normalization).
+//
+// (The second half this file used to carry — the four file tools' frozen text,
+// compared between `clutch-workspace`'s CLI and the host's own implementation for
+// a root on another machine — is gone with that host-side copy: the four are the
+// component's alone now, and its own suite under clutch-workspace/tests is what
+// holds their text.)
 //
 // `pending` is the M0 deliverable, not a TODO: it names the milestone that owes the
 // route. When ui/host/api.js exists, an endpoint flips to `enforced` in
@@ -28,9 +28,7 @@
 // Run: node tests/conform.test.js
 
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
-const { execFile } = require("child_process");
 
 const { check, summary } = require("./harness");
 
@@ -220,211 +218,9 @@ function noLeakedPaths(manifest) {
   check(found.length === 0, `no golden carries a machine path (${found.length ? found.join(" | ") : "clean"})`);
 }
 
-// ---- 2. the four tools' frozen text -------------------------------------
-//
-// One pair of implementations, on purpose: the component that performs these
-// calls on a LOCAL root (clutch-workspace's CLI) and the HOST's own
-// (agent/tools/filesystem.py), which is what a root on another machine is
-// served by. Same fixture tree on both sides, same cases, same answers — a
-// call reads the same whichever machine answered it.
-
-const PYTHON = process.env.PYTHON || (fs.existsSync(".venv/bin/python") ? path.resolve(".venv/bin/python") : "python3");
-const COMPONENT = path.resolve("clutch-workspace");
-
-// The HOST's four (agent/tools/filesystem.py), as one stateful batch: the cases
-// run in order against one root, exactly like the component's CLI runs them in
-// order against the other root.
-function hostDump(root, cases) {
-  return new Promise((resolve, reject) => {
-    const child = execFile(
-      PYTHON,
-      [path.join("tests", "filesystem_dump.py")],
-      { cwd: path.resolve(__dirname, ".."), encoding: "utf8", maxBuffer: 256 * 1024 * 1024 },
-      (error, stdout, stderr) => {
-        if (error) {
-          reject(new Error((error.message || String(error)) + "\n" + stderr));
-          return;
-        }
-        try {
-          resolve(JSON.parse(stdout));
-        } catch (e) {
-          reject(new Error("not a batch of envelopes: " + stdout.slice(0, 300)));
-        }
-      }
-    );
-    child.stdin.end(JSON.stringify({ root, cases: cases.map(({ tool, args }) => ({ tool, args })) }));
-  });
-}
-
-function component(cwd, args, stdin) {
-  return new Promise((resolve, reject) => {
-    const child = execFile(
-      PYTHON,
-      ["-m", "clutch_workspace", "--json"].concat(args),
-      { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, env: Object.assign({}, process.env, { PYTHONPATH: COMPONENT }) },
-      (error, stdout, stderr) => {
-        if (error && !stdout) {
-          reject(new Error(error.message + "\n" + stderr));
-          return;
-        }
-        let envelope;
-        try {
-          envelope = JSON.parse(stdout);
-        } catch (e) {
-          reject(new Error("not an envelope: " + stdout.slice(0, 300)));
-          return;
-        }
-        resolve(envelope);
-      }
-    );
-    if (typeof stdin === "string") child.stdin.end(stdin);
-  });
-}
-
-function fixture(root) {
-  fs.mkdirSync(path.join(root, "src"), { recursive: true });
-  fs.mkdirSync(path.join(root, "docs"), { recursive: true });
-  fs.writeFileSync(path.join(root, "README.md"), "# hi\n\nnotes about ssh-workspace\n");
-  fs.writeFileSync(path.join(root, "version"), "0.1.64\n");
-  fs.writeFileSync(path.join(root, "no-newline.txt"), "no trailing newline");
-  fs.writeFileSync(path.join(root, "src", "a.py"), "def build_x():\n    return 1\n");
-  fs.writeFileSync(path.join(root, "src", "b.py"), "def build_y():\n    return 2\n");
-  fs.writeFileSync(path.join(root, "src", "notes.md"), "ssh-workspace in a markdown file\n");
-  fs.writeFileSync(path.join(root, "docs", "guide.md"), "ssh-workspace guide\n\nssh-workspace again\n");
-  fs.writeFileSync(path.join(root, ".hidden"), "ssh-workspace hidden\n");
-  fs.writeFileSync(path.join(root, "blob.bin"), Buffer.from([0, 1, 2, 3, 0x73, 0x73, 0x68]));
-  fs.writeFileSync(path.join(root, "dup.txt"), "same\nsame\n");
-  fs.writeFileSync(path.join(root, "long.txt"), `${"a".repeat(400)}TAIL\n`);
-  fs.writeFileSync(path.join(root, "many.txt"), "hit\n".repeat(250));
-  fs.mkdirSync(path.join(root, "empty"), { recursive: true });
-  fs.writeFileSync(path.join(root, "empty-file.txt"), "");
-  fs.writeFileSync(path.join(root, "crlf.txt"), "one\r\ntwo\r\n");
-  fs.writeFileSync(path.join(root, "unicode-é.txt"), "unicode name\n");
-  fs.writeFileSync(path.join(root, "z.txt"), "first\n");
-}
-
-// The frozen texts the plan pins: `N: text`, `(empty directory)`, `(no matches)`,
-// `(Results capped at 100; …)`, `OK: wrote {path} (+A -D lines)`,
-// `OK: edited {path} (+A -D lines)`, `file not found: {path}`, the read-limit hint,
-// `old_string not found in {path}`, `old_string appears {n} times in {path}`,
-// `(showing lines X-Y of N; …)`, `[truncated, file is N chars; …]`.
-const TOOL_CASES = [
-  { tool: "read_file", args: { path: "README.md" } },
-  { tool: "read_file", args: { path: "no-newline.txt" } },
-  { tool: "read_file", args: { path: "." } },
-  { tool: "read_file", args: { path: "src" } },
-  { tool: "read_file", args: { path: "docs", offset: 1 } },
-  { tool: "read_file", args: { path: "README.md", offset: 1, limit: 2 } },
-  { tool: "read_file", args: { path: "README.md", offset: 2 } },
-  { tool: "read_file", args: { path: "README.md", offset: 9 } },
-  { tool: "read_file", args: { path: "README.md", offset: 1, limit: 500, max_chars: 10 } },
-  { tool: "read_file", args: { path: "nope.txt" } },
-  { tool: "grep", args: { pattern: "ssh-workspace" } },
-  { tool: "grep", args: { pattern: "ssh-workspace", include: "*.md" } },
-  { tool: "grep", args: { pattern: "ssh-workspace", path: "src" } },
-  { tool: "grep", args: { pattern: "return", path: "src/a.py" } },
-  { tool: "grep", args: { pattern: "zzzzz" } },
-  { tool: "grep", args: { pattern: "ssh-workspace", path: "nope" } },
-  { tool: "grep", args: { pattern: "ssh-workspace", include: "src/*.py" } },
-  { tool: "write_file", args: { path: "made.txt", content: "hello\nthere\n" } },
-  { tool: "write_file", args: { path: "README.md", content: "# hi\n\nnotes about ssh-workspace, edited\n" } },
-  { tool: "write_file", args: { path: "deep/er/new.txt", content: "" } },
-  { tool: "edit_file", args: { path: "dup.txt", old_string: "same", new_string: "other" } },
-  { tool: "edit_file", args: { path: "no-newline.txt", old_string: "trailing", new_string: "TRAILING" } },
-  { tool: "edit_file", args: { path: "nope.txt", old_string: "a", new_string: "b" } },
-  { tool: "edit_file", args: { path: "README.md", old_string: "absent", new_string: "b" } },
-  { tool: "edit_file", args: { path: "src/a.py", old_string: "return 1", new_string: "return 11" } },
-  { tool: "read_file", args: { path: "long.txt" } },
-  { tool: "read_file", args: { path: "many.txt" } },
-  { tool: "read_file", args: { path: "empty" } },
-  { tool: "read_file", args: { path: "empty-file.txt" } },
-  { tool: "read_file", args: { path: "crlf.txt" } },
-  { tool: "read_file", args: { path: "unicode-é.txt" } },
-  { tool: "grep", args: { pattern: "hit" } },
-  { tool: "grep", args: { pattern: "aaa" } },
-  { tool: "grep", args: { pattern: "two", path: "crlf.txt" } },
-  { tool: "grep", args: { pattern: "first", include: "?.txt" } },
-  { tool: "grep", args: { pattern: "unicode" } },
-  { tool: "read_file", args: { path: "./src/../README.md" } },
-  { tool: "write_file", args: { path: "z.txt", content: "first\n" } },
-  { tool: "write_file", args: { path: "many-lines.txt", content: "same\nsame\nsame\n".repeat(100) } },
-];
-
-function cliArgs(tool, args) {
-  const out = [tool];
-  if (tool === "read_file") {
-    if (args.path !== undefined) out.push("--path", args.path);
-    if (args.offset) out.push("--offset", String(args.offset));
-    if (args.limit) out.push("--limit", String(args.limit));
-    if (args.max_chars) out.push("--max-chars", String(args.max_chars));
-  } else if (tool === "grep") {
-    out.push("--pattern", args.pattern);
-    if (args.path) out.push("--path", args.path);
-    if (args.include) out.push("--include", args.include);
-  } else if (tool === "write_file") {
-    out.push("--path", args.path, "--content", "-");
-  } else if (tool === "edit_file") {
-    out.push("--path", args.path, "--old-string", args.old_string, "--new-string", args.new_string);
-  }
-  return out;
-}
-
-async function toolsConformance() {
-  const A = fs.mkdtempSync(path.join(os.tmpdir(), "conform-a-"));
-  const B = fs.mkdtempSync(path.join(os.tmpdir(), "conform-b-"));
-  TEMP_DIRS.push(A, B);
-  fixture(A);
-  fixture(B);
-  let bad = 0;
-  let host;
-  try {
-    // a probe first: both sides must be runnable, else say so instead of
-    // reporting 39 mismatches against a broken interpreter
-    const probe = await component(A, ["read_file", "--path", "README.md"]);
-    if (!probe || typeof probe.content !== "string") {
-      console.log("skip: four-tool comparison (the component answered no envelope)");
-      return;
-    }
-    host = await hostDump(B, TOOL_CASES);
-    if (!Array.isArray(host) || host.length !== TOOL_CASES.length) {
-      console.log("skip: four-tool comparison (the host dump answered the wrong number of cases)");
-      return;
-    }
-  } catch (e) {
-    console.log(`skip: four-tool comparison (${String(e.message).split("\n")[0]})`);
-    return;
-  }
-  for (const [i, { tool, args }] of TOOL_CASES.entries()) {
-    const want = await component(A, cliArgs(tool, args), tool === "write_file" ? args.content : undefined);
-    const got = host[i];
-    const same = want.content === got.content && (want.diff || "") === got.diff && !!want.error === !!got.error;
-    if (same) continue;
-    bad++;
-    console.log(`  MISMATCH ${tool} ${JSON.stringify(args)}`);
-    if (want.content !== got.content) {
-      console.log("    content want:", JSON.stringify(String(want.content).slice(0, 300)));
-      console.log("    content got :", JSON.stringify(String(got.content).slice(0, 300)));
-    }
-    if ((want.diff || "") !== got.diff) {
-      console.log("    diff want:", JSON.stringify(String(want.diff || "").slice(0, 200)));
-      console.log("    diff got :", JSON.stringify(String(got.diff || "").slice(0, 200)));
-    }
-    if (!!want.error !== !!got.error) console.log("    error want:", want.error, "got:", got.error);
-  }
-  check(bad === 0, `four tools: the frozen texts match the Python component (${TOOL_CASES.length} cases)`);
-}
-
-const TEMP_DIRS = [];
-
-function cleanup() {
-  for (const dir of TEMP_DIRS.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
-}
-
 async function main() {
   const manifest = fixtureShape();
   if (manifest) noLeakedPaths(manifest);
-  await toolsConformance();
-  cleanup();
   summary("conform");
 }
 

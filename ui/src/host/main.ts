@@ -987,10 +987,9 @@ if (!app.requestSingleInstanceLock()) {
     // tell every renderer the moment a tunnel dies, so it can drop a stale API
     // URL — each one told for ITSELF: `lost` is this window's answer, computed
     // from the windows the hop actually owned. A window on its own local session
-    // hears about the hop (it still drops what the hop implied, e.g. degrade
-    // mode), but it is not told it lost a session it never had: that answer is
-    // what used to raise the reconnect dialog — and re-dial a stranger's host —
-    // in windows that were working perfectly well.
+    // hears about the hop, but it is not told it lost a session it never had: that
+    // answer is what used to raise the reconnect dialog — and re-dial a stranger's
+    // host — in windows that were working perfectly well.
     tunnel.onTunnelEnd(async (endedId, url) => {
       // the session forwards over the URL that just died go with it: drop them
       // first, so a re-claim that races this notification opens a FRESH forward

@@ -1,8 +1,8 @@
-"""The live channel: SSE, plus the two POSTs a blocked run needs from the UI.
+"""The live channel: SSE, plus the one POST a blocked run needs from the UI.
 
 `_sse` replays the active project's history and then streams live events out of
-the broadcaster's private queue; `_permission_respond` and `_backend` resolve a
-permission ask and re-point the session's backend. The keepalive frame is a NAMED
+the broadcaster's private queue; `_permission_respond` resolves a permission ask.
+The keepalive frame is a NAMED
 event, not a comment heartbeat — the reasoning is on SSE_PING_FRAME in
 agent/server.py, and ui/js/sse-stream.js keys its liveness check on that name.
 Paced through `_server_module()` so tests/server_test.py's SSE_KEEPALIVE_SEC patch
@@ -90,26 +90,6 @@ class EventsMixin:
         self._state.trust_armed = armed
         self._json({"status": "ok", "armed": armed})
 
-    def _backend(self) -> None:
-        """Switch between the local and the SSH-degradation backend. The renderer
-        posts {mode:"ssh", bridge, workspace} when bootstrap fails on a host that
-        has no Python, and {mode:"local"} when it disconnects/resets."""
-        body = self._read_body()
-        if body is None:
-            return self._json({"error": "bad json body"}, status=400)
-        mode = body.get("mode") or "local"
-        if mode == "ssh":
-            bridge = (body.get("bridge") or "").strip()
-            if not bridge:
-                return self._json({"error": "bridge is required for ssh mode"}, status=400)
-            root = (body.get("workspace") or "").strip() or str(Path.home())
-            self._state.set_backend("ssh", bridge, root)
-        else:
-            self._state.set_backend("local")
-        # set_backend drops the run claim with the project it belonged to (a
-        # mode switch invalidates both), so there is no lock left to release here
-        self._json({"status": "ok"})
-
     def _project_for_sse(self, project_q: str | None) -> Project | None:
         """Resolve the project an SSE subscriber asked to watch: the global
         active one when no project is given (or it matches), otherwise open the
@@ -132,7 +112,7 @@ class EventsMixin:
                 if global_proj is not None and str(global_proj.path) == project_q:
                     return global_proj
                 full = self._project_path(project_q)
-                if full.suffix == ".clc" and (self._state.backend_mode == "ssh" or full.is_file()):
+                if full.suffix == ".clc" and full.is_file():
                     ws = self._state.build_workspace(str(full.parent))
                     if global_proj is None:
                         return self._adopt_for_sse(full, ws)

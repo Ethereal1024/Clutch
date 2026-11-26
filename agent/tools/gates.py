@@ -157,17 +157,6 @@ def _check_vocabulary() -> None:
     assert set(host.names()) == set(catalog.HOST_TOOL_NAMES), (
         f"host tool drift: catalog {sorted(catalog.HOST_TOOL_NAMES)} vs host {sorted(host.names())}"
     )
-    # The four the host declares for a workspace on another machine
-    # (catalog.REMOTE_TOOL_NAMES) are checked apart from the three above because
-    # they are NOT reserved: a component declares them too, and holds them on a
-    # local root. Drift is the same kind of host bug, so it is just as loud.
-    assert set(host.remote_names()) == set(catalog.REMOTE_TOOL_NAMES), (
-        f"remote host tool drift: catalog {sorted(catalog.REMOTE_TOOL_NAMES)} vs host {sorted(host.remote_names())}"
-    )
-    assert not set(host.names()) & set(host.remote_names()), (
-        "one name is declared twice by the host: "
-        f"{sorted(set(host.names()) & set(host.remote_names()))} — the remote copy could never be offered"
-    )
 
 
 _check_vocabulary()

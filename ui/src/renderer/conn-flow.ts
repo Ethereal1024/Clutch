@@ -11,8 +11,7 @@
 
 import { IS_ANDROID } from "./env";
 import {
-  dropStaleBackend, resetBackendLocal, switchBackendResolved,
-  tryDegradeToSshTools,
+  dropStaleBackend, switchBackendResolved,
 } from "./backend-lifecycle";
 import { connLostExitClear, connLostNeedsUser } from "./conn-lost";
 import {
@@ -453,24 +452,13 @@ export async function handleSshConnect(host, user, port, statusEl) {
       refreshPicker();
       return true;
     } else {
-      // host alive but unbootstrappable: degrade to SSH-tools
-      const degraded = await tryDegradeToSshTools();
-      if (degraded === true) {
-        upsertConn(host, user, port);
-        localStorage.setItem("clutch_ssh_connected", "1");
-        await switchBackendResolved(); // the local server is now remote-backed
-        refreshPicker();
-        return true;
-      }
-      // false = tunnel never came up; string = local backend down (the real failure).
-      // res.error is the bootstrap verdict (e.g. the pylibs index 404) — never
-      // drop it: the bare "unreachable" hid a whole class of supply-line
-      // failures behind a symptom.
+      // There is no second route: the session is the far side's own agent
+      // server, so a hop that came up but could not bootstrap has no API base
+      // to point this window at. res.error is the bootstrap verdict (e.g. the
+      // pylibs index 404) — never drop it: the bare "unreachable" hid a whole
+      // class of supply-line failures behind a symptom.
       setFsConnectError(
-        degraded === false
-          ? "connection failed: " + (res.error || "could not connect")
-          : "SSH connected, but the local agent server is " + degraded +
-            (res.error ? " (" + res.error + ")" : ""),
+        "connection failed: " + (res.error || "could not connect"),
         statusEl,
         door
       );
@@ -545,9 +533,9 @@ export async function connectTabMachine(machine): Promise<string> {
       up = true;
       return "";
     }
-    // No degrade-to-SSH-tools here: a tab whose FILE is on that machine needs the
-    // hop's session, and a local server with a remote exec bridge has no file.
-    // The honest verdict is this attempt's own words.
+    // No second route here: a tab whose FILE is on that machine needs the hop's
+    // session, and there is no local stand-in for it. The honest verdict is this
+    // attempt's own words.
     return "connection failed: " + (res.error || "could not connect");
   } catch (e) {
     return "connection failed: " + ((e && e.message) || e);
@@ -591,14 +579,13 @@ export async function connSwitch(host, user, port, statusEl) {
     // the intent goes FIRST, so the teardown below is the user leaving on purpose
     // and is not announced as a lost session (backend-lifecycle.ts)
     localStorage.removeItem("clutch_ssh_connected");
-    localStorage.removeItem("clutch_degrade");
     if (window.clutchTunnel) await window.clutchTunnel.disconnect();
   }
   const ok = await handleSshConnect(host, user, port, statusEl);
   if (!ok && leaving) {
-    // the attempt may have left a partial hop (the SSH session kept for SSH-tools,
-    // a dial the failure path could not tear down): the move is over either way,
-    // so nothing of it may outlive the verdict
+    // the attempt may have left a partial dial (a hop the failure path could not
+    // tear down): the move is over either way, so nothing of it may outlive the
+    // verdict
     if (window.clutchTunnel) {
       try {
         await window.clutchTunnel.disconnect();
@@ -657,9 +644,7 @@ export async function connConnect(v) {
       // but a hop that dies while the move is in flight must not arrive as
       // "lost the remote connection".
       localStorage.removeItem("clutch_ssh_connected");
-      localStorage.removeItem("clutch_degrade"); // exiting degrade mode too
       await window.clutchTunnel.disconnect();
-      await resetBackendLocal(); // end any SSH degradation on the local server
     }
     // this machine's own session, by asking the host for it: with no session yet
     // the honest answer is still "not connected", never a guessed local port
@@ -724,7 +709,6 @@ $("#conn-retry").addEventListener("click", () => {
 });
 $("#conn-cancel").addEventListener("click", async () => {
   localStorage.removeItem("clutch_ssh_connected");
-  localStorage.removeItem("clutch_degrade"); // exiting degrade mode too
   // the bar's Cancel belongs to the picker's own attempt (a popup attempt keeps
   // its verdict inside the popup), so no popup should be up here; closing one anyway
   // is the cheap guarantee that none is (closeModal returns early on a closed modal)
@@ -733,7 +717,6 @@ $("#conn-cancel").addEventListener("click", async () => {
     // desktop only: "cancel" goes back to this machine's local session. There
     // is no local backend on the phone, so that path could only point the app
     // at 127.0.0.1:8890 — a port nothing there serves.
-    resetBackendLocal(); // end any SSH degradation on the local server
     await switchBackendResolved();
   }
   refreshPicker();

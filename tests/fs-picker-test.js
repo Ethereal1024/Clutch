@@ -355,7 +355,7 @@ async function main() {
     "and does nothing else itself: the connect path owns what follows it");
   check(done[0] === "disconnect",
     `leaving one remote for another drops the tunnel first (got ${done.join(",")})`);
-  check(!store.has("clutch_ssh_connected") && !store.has("clutch_degrade"),
+  check(!store.has("clutch_ssh_connected"),
     "the standing intent goes before the drop, so the move is not announced as a loss");
   global.state.apiBase = null;
 
@@ -381,7 +381,7 @@ async function main() {
   check(done.join(",") ===
     'disconnect,dial:"gone.example.com" "me" "22",disconnect,dropStaleBackend,refreshPicker',
     `the move drops the old hop first, dials the new host, and then cleans up after itself (got ${done.join(",")})`);
-  check(!store.has("clutch_ssh_connected") && !store.has("clutch_degrade"),
+  check(!store.has("clutch_ssh_connected"),
     "the standing intent is spent by the move and not put back: this window is on nothing");
   check(global.state.apiBase === null,
     "and the base that named the old host's session is dropped with the hop it rode");

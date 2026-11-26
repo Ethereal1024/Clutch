@@ -389,15 +389,15 @@ async function installServer(
     strategy = chooseStrategy(probe, localTag);
   }
   if (strategy !== "bundle" && strategy !== "pylibs") {
-    // e.g. no python3 (no deterministic install path — reject, renderer falls to
-    // SSH-tools), or an explicit CLUTCH_TUNNEL_FORCE=assist
+    // e.g. no python3: there is no deterministic install path, so the hop cannot
+    // serve a session at all (an explicit CLUTCH_TUNNEL_FORCE=assist lands here
+    // too)
     return {
       ok: false,
       error:
         `target runs ${probe.os}/${probe.arch} without python3 (${probe.libc || "?"} libc) and no ` +
         "bundle for this platform is available, so the server cannot be installed. " +
-        "Falling back to SSH-tools: file and command access over the tunnel still work; " +
-        "install python3 on the device to enable the full server experience.",
+        "Install python3 on the device to connect to it.",
     };
   }
   // The declared floor, checked only where it applies: "bundle" is a
@@ -408,9 +408,8 @@ async function installServer(
       ok: false,
       error:
         `target runs python ${probe.python} (${probe.os}/${probe.arch}, ${probe.libc || "?"} libc), and the ` +
-        `server's sources declare python ${PY_FLOOR.join(".")} or newer. Falling back to SSH-tools: file and ` +
-        "command access over the tunnel still work; install a newer python3 on the device to enable the " +
-        "full server experience.",
+        `server's sources declare python ${PY_FLOOR.join(".")} or newer. ` +
+        "Install a newer python3 on the device to connect to it.",
     };
   }
   // content-hash version is the only install gate: installed iff the remote's

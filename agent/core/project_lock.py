@@ -14,12 +14,11 @@ ProjectOpenConflict (HTTP 409 + code project_open_conflict).
 
 The lock is an OS-level file lock on <tmp>/clutch-<sha1(path)[:16]>.lock, keyed
 by the .clc's absolute path: an flock on POSIX, a byte-range lock (LockFileEx,
-through msvcrt.locking) on Windows. This covers BOTH local and
-SSH-degradation workspaces: every Clutch window (local or remote-backed) is a
-process on the CLIENT machine, so they all lock the same local file and
-arbitrate with each other through the kernel. Keying by the remote absolute path
-(e.g. /root/test.clc) means two windows pointing at the same remote project
-collide exactly like two windows on a local project.
+through msvcrt.locking) on Windows. Every Clutch window is a process on this
+machine and the project's files are on this machine too, so every window that
+opens one project locks the same local file and they arbitrate with each other
+through the kernel: two windows on the same project collide, two windows on
+different projects never do.
 
 Both are KERNEL locks, and that is the whole point: the OS drops the lock when
 the holding process dies (a documented guarantee for both flock and
@@ -61,17 +60,15 @@ unlinking it while a waiter already holds a handle would let two processes lock
 two different files that share one name. It stays in the temp dir, one per .clc
 opened for write, at most RECORD_MAX bytes.
 
-It lives in the OS temp dir — the workspace tree (local or remote) stays
-untouched, so an SSH user needs NO write permission on the remote project
-directory (the old remote lock-file failed for non-root users on root-owned
-dirs).
+It lives in the OS temp dir — the workspace tree stays untouched, so a project
+directory needs NO write permission of ours beyond the .clc itself (the old
+in-tree lock file failed for non-root users on root-owned dirs).
 
 Trade-off (accepted): the lock is host-local and the temp dir is per-user, so
-two different CLIENTS (machines) SSH-ing to the same remote, or two USERS on one
-Windows machine sharing a project directory, do NOT arbitrate with each other.
-Clutch is a single-user, single-client tool, so this is accepted — the old
-remote file only ever arbitrated Clutch-vs-Clutch anyway (never against external
-editors on the remote).
+two USERS on one Windows machine sharing a project directory do NOT arbitrate
+with each other. Clutch is a single-user tool, so this is accepted — and the
+in-tree file it replaced only ever arbitrated Clutch-vs-Clutch anyway (never
+against external editors).
 
 The same process re-opening the same project (reopen within one window) must
 not conflict with itself: an flock and a byte-range lock are both exclusive even
@@ -79,8 +76,8 @@ between two handles of one process, so acquired handles are cached by path and
 reused.
 
 A lock's lifetime is the ACTIVE PROJECT'S RUN: a window claims at most its
-currently-open project, and set_project / set_backend / release_run are the
-choke points that hand the handle back. Nothing else keeps that handle, so a
+currently-open project, and set_project / release_run are the choke points that
+hand the handle back. Nothing else keeps that handle, so a
 lock outliving its run would be unreachable: never released, it would keep every
 other window from running that .clc until this server exits — which is exactly
 the "an idle project is read-only everywhere" bug this lifetime fixes.
@@ -415,7 +412,7 @@ class ProjectLock:
         """Drop a lock: unlock+close the fd (POSIX) or the file holding the
         byte-range lock (Windows). The OS also frees either one if this process
         dies while holding it, so no stale lock survives a crash — which is what
-        lets both backends skip any liveness/TTL recovery.
+        lets every caller skip any liveness/TTL recovery.
 
         Idempotent per HANDLE, not just per path: a caller that already dropped a
         handle (and left it referenced somewhere) must not close it a second time

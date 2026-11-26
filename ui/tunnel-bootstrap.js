@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-bootstrap.ts and run `npm run build:host`.
-// source sha256: 19d6b4058735ed89eb58cca456fd89ed19f7bb0623cf0cca48b38c612acf8394
+// source sha256: d4618e0d96f05a80d30740d2d7a8682788fdafe9cecff2192bdba0ff81a40b83
 
 "use strict";
 // make the far side exist — probe, choose a strategy, install, start
@@ -369,14 +369,14 @@ else:
             strategy = chooseStrategy(probe, localTag);
         }
         if (strategy !== "bundle" && strategy !== "pylibs") {
-            // e.g. no python3 (no deterministic install path — reject, renderer falls to
-            // SSH-tools), or an explicit CLUTCH_TUNNEL_FORCE=assist
+            // e.g. no python3: there is no deterministic install path, so the hop cannot
+            // serve a session at all (an explicit CLUTCH_TUNNEL_FORCE=assist lands here
+            // too)
             return {
                 ok: false,
                 error: `target runs ${probe.os}/${probe.arch} without python3 (${probe.libc || "?"} libc) and no ` +
                     "bundle for this platform is available, so the server cannot be installed. " +
-                    "Falling back to SSH-tools: file and command access over the tunnel still work; " +
-                    "install python3 on the device to enable the full server experience.",
+                    "Install python3 on the device to connect to it.",
             };
         }
         // The declared floor, checked only where it applies: "bundle" is a
@@ -386,9 +386,8 @@ else:
             return {
                 ok: false,
                 error: `target runs python ${probe.python} (${probe.os}/${probe.arch}, ${probe.libc || "?"} libc), and the ` +
-                    `server's sources declare python ${PY_FLOOR.join(".")} or newer. Falling back to SSH-tools: file and ` +
-                    "command access over the tunnel still work; install a newer python3 on the device to enable the " +
-                    "full server experience.",
+                    `server's sources declare python ${PY_FLOOR.join(".")} or newer. ` +
+                    "Install a newer python3 on the device to connect to it.",
             };
         }
         // content-hash version is the only install gate: installed iff the remote's

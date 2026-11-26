@@ -103,7 +103,7 @@ function tunnelStatus() {
     // wire to a concurrent attempt tell "that attempt landed for ME" from
     // "something else is up".
     target: state.target ? { host: state.target.host, user: state.target.user, port: state.target.port } : null,
-    // exec bridge URL for the local agent's SshTransport; null with no live tunnel.
+    // the exec bridge a client plugin may post to; null with no live tunnel.
     // Asked of the bridge itself: it owns its port, and a rebind replaces the
     // server rather than rewriting a field the status would have to remember to
     // read.

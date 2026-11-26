@@ -155,12 +155,12 @@ class PermissionEvaluator:
                 if tok == "cd" and i + 1 < len(tokens):
                     nxt = tokens[i + 1]
                     if nxt.startswith("~"):
-                        # workspace.home(), not expanduser: in ssh mode `~` is
-                        # the REMOTE user's home, never the app host's
+                        # workspace.home(), not expanduser: `~` is the
+                        # WORKSPACE's answer, never the app host's
                         nxt = str(workspace.home()) + nxt[1:]
                     base = cwd if cwd is not None else workspace.realpath(workspace.root)
-                    # norm_join, not os.path: in ssh mode the token is judged
-                    # against the remote layout (ntpath on Windows would
+                    # norm_join, not os.path: the token is judged against the
+                    # workspace's own layout (ntpath on Windows would
                     # backslash-rewrite it). shell_path first: the token is
                     # shell text, so /tmp on a Git-Bash host is %TEMP%
                     cwd = workspace.norm_join(str(base), workspace.shell_path(nxt))

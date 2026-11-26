@@ -267,17 +267,6 @@ HOST_TOOL_NAMES: tuple[str, ...] = (
     "start_tick",
     "end_tick",
 )
-# The names the host declares for ITSELF again when the session's root is on
-# another machine (the ssh backend: tools/host.py `_REMOTE_DECLARATIONS`). These
-# are NOT reserved the way HOST_TOOL_NAMES are: the same four names are what
-# `clutch-workspace` (subject workspace-fs) publishes on a local root, where its
-# own daemon really performs them — a component may declare them, and must,
-# because on a local machine there is nothing else. What the ssh backend adds is
-# the case no component can cover: a root with no process behind it, where the
-# host's own implementation (tools/filesystem.py) IS the tool. registry.
-# build_tools therefore drops a component's copy of a name the host already holds
-# in THIS session, and keeps it whenever the host holds nothing.
-REMOTE_TOOL_NAMES: tuple[str, ...] = ("read_file", "grep", "write_file", "edit_file")
 # facts: the host facts a component may PUBLISH, because only its own code can
 # compute them. `vars` is the other direction (what a component consumes from the
 # host); a `facts` key is a host fact a component ANSWERS — a component declares

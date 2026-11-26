@@ -436,17 +436,17 @@ def main() -> int:
         check(not rendezvous.serves_workspace_fs(other), f"{other} is not tied to the workspace's machine")
     check(not rendezvous.serves_workspace_fs("clutch-nope"), "an unknown component serves nothing")
     # the OTHER half of the same axis: the same filesystem reached from ANOTHER
-    # machine. NOTHING in this table occupies it any more. The client-side plugin
-    # that did (an `entry` and no process here, so its commands travelled the ssh
-    # tunnel) was retired with 甲-P1: on a root that is another machine, the HOST
-    # declares read_file and its three siblings itself
-    # (agent/tools/host.py `_REMOTE_DECLARATIONS`), so a component publishing
-    # those names could only shadow the only implementation that works there.
-    # The predicate still has its readers (registry.build_tools,
-    # prompt.module_blocked_reason) and a driver that is not this table
-    # (tests/channel_test.py pushes a synthetic client-side workspace-fs
-    # declaration and reads both halves through it), so what is pinned HERE is
-    # the empty answer: nothing in this repo claims that side of the axis.
+    # machine. NOTHING in this table occupies it. The client-side plugin that did
+    # (an `entry` and no process here, so its commands travelled the ssh tunnel)
+    # was retired; the host used to declare read_file and its three siblings
+    # itself for such a root (agent/tools/host.py) and keeps no copy of them any
+    # more, so what a root on another machine is served by is a component whose
+    # process really is at that end — and none ships here. The predicate still
+    # has its readers (registry.build_tools, prompt.module_blocked_reason) and a
+    # driver that is not this table (tests/channel_test.py pushes a synthetic
+    # client-side workspace-fs declaration and reads both halves through it), so
+    # what is pinned HERE is the empty answer: nothing in this repo claims that
+    # side of the axis.
     for mod in catalog.table().values():
         check(not rendezvous.serves_remote_workspace_fs(mod.name), f"{mod.name} is not a filesystem on another machine")
     check(not rendezvous.serves_remote_workspace_fs("clutch-nope"), "an unknown component serves nothing there either")

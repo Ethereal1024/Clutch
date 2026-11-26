@@ -7,67 +7,36 @@ the agent cannot read, write, or even list them.
 
 Workspace is the base class: it owns root/path-safety/transport and lets
 subclasses define how files are actually touched. LocalWorkspace uses Path
-operations; RemoteWorkspace (SSH degradation layer) maps the same calls to sh
-commands executed through the transport.
+operations.
 
 What it carries is the HOST's own bookkeeping, not the file tools: the .clc
 project file (byte offsets, the fixed-width memory index line), the per-file
 snapshot the UI's undo restores, the lazy indexed log reads, the transport every
 statement runs through, and the entries browsing.py walks into the UI's tree.
 
-`list` and `grep` are here because a root on another machine has no component
-that could serve them: a component needs a process on the machine the root is
-on, and the whole point of the ssh backend is that there is nothing to install
-there (agent/tools/filesystem.py is the tool face over these two, declared by
-the host in that one backend — tools/host.py). In the local backend the
-workspace COMPONENT declares those same names and the host does not, so these
-two exist for the ssh backend and are harmless elsewhere.
+`list` and `grep` are here because the host's own bookkeeping needs them (the
+project's memory index, the tree the UI browses) — they are not tools: the four
+file tools are the workspace component's, and a root this host cannot run that
+component on has no file tools at all (agent/tools/registry.py).
 """
 
 from __future__ import annotations
 
 import fnmatch
-import json
 import os
 import posixpath
 import re
 import tempfile
 import threading
-import time
 from abc import ABC, abstractmethod
-from pathlib import Path, PurePath, PurePosixPath
+from pathlib import Path, PurePath
 
-from .localshell import LocalShell, local_shell, shq
-from .transport import CommandResult, LocalTransport, SshTransport, Transport, TransportError
-
-
-def parse_ls_entries(stdout: str) -> list[tuple[str, bool]]:
-    """Parse `ls -1AF` output into [(name, is_dir)] in listing order.
-
-    ls -1AF marks dirs with a trailing '/', executables with '*', symlinks with
-    '@'; the '*'/'@' suffixes are stripped. Hidden filtering is deliberately NOT
-    done here: the shared rule lives in browsing.entry_visible (off = no dot
-    entries anywhere) and every call site applies it after this parse.
-    """
-    out: list[tuple[str, bool]] = []
-    for entry in stdout.splitlines():
-        if not entry:
-            continue
-        if entry.endswith("/"):  # ls -1AF marks dirs with a trailing /
-            out.append((entry[:-1], True))
-            continue
-        name = entry[:-1] if entry[-1] in ("*", "@") else entry
-        out.append((name, False))
-    return out
-
-
-# Single source for the remote-wire limits, shared with ui/ssh-tunnel.js
-_DEFAULTS = json.loads((Path(__file__).resolve().parent.parent / "transport_defaults.json").read_text(encoding="utf-8"))
+from .localshell import LocalShell, local_shell
+from .transport import CommandResult, LocalTransport, Transport
 
 # Scratch dirs that are harmless to write to (test logs, /dev/null redirects).
 # POSIX spellings; see Workspace._scratch_dirs for how they are flavored per
-# workspace kind (a Windows LOCAL host has no /tmp; the REMOTE host is the
-# POSIX side).
+# host kind (a Windows LOCAL host has no /tmp; a POSIX host is the scratch side).
 POSIX_SCRATCH_DIRS = ("/tmp", "/var/tmp", "/dev")
 
 
@@ -121,15 +90,13 @@ def _inside_or_scratch(p: PurePath, root: PurePath, scratches: tuple[PurePath, .
 
 class Workspace(ABC):
     def __init__(self, root: str | None = None, transport: Transport | None = None) -> None:
-        # _root_path picks the path FLAVOR: the host's Path locally, PurePosixPath
-        # remotely (a Windows client's Path would re-separator remote /-paths
-        # with backslashes before they were ever sent over the bridge)
+        # _root_path picks the path FLAVOR: a host Path here (a remote root is
+        # that machine's own server's LocalWorkspace, never this object's)
         self.root: PurePath = self._root_path(root) if root else Path(tempfile.mkdtemp(prefix="clutch-"))
-        # No local mkdir here on purpose: this base also serves RemoteWorkspace,
-        # whose root lives on another HOST. Creating it locally broke macOS
-        # (/home is an autofs mount: mkdir -> [Errno 45] ENOTSUP -> "cannot
-        # create project"). LocalWorkspace ensures its root in its own
-        # __init__; the remote side creates what it needs (mkdir -p on write).
+        # No local mkdir here on purpose: this base owns the root spelling only
+        # and LocalWorkspace ensures the directory in its own __init__. Creating
+        # it here broke macOS (/home is an autofs mount: mkdir -> [Errno 45]
+        # ENOTSUP -> "cannot create project").
         self._transport = transport or LocalTransport(str(self.root))
         self._protected: set[Path] = set()
         # absolute paths outside the root the CURRENT tool call may touch;
@@ -273,9 +240,8 @@ class Workspace(ABC):
 
     def _scratch_dirs(self) -> tuple[PurePath, ...]:
         """Harmless scratch dirs for escape verdicts (test logs, /dev/null),
-        in the workspace's OWN path flavor. Local: the host temp dir on Windows
-        (there is no /tmp), the POSIX trio on POSIX hosts. Remote: overridden —
-        the remote host is the POSIX side, in PurePosixPath flavor."""
+        in the workspace's OWN path flavor: the host temp dir on Windows (there
+        is no /tmp), the POSIX trio on POSIX hosts."""
         if os.name == "nt":
             return (Path(tempfile.gettempdir()),)
         return (Path("/tmp"), Path("/var/tmp"), Path("/dev"))
@@ -295,21 +261,16 @@ class Workspace(ABC):
 
     def norm_join(self, base: str, token: str) -> PurePath:
         """Lexical base+token join for escape verdicts and the `cd` tracker, in
-        the workspace's own path flavor: host os.path locally, posixpath
-        remotely (on Windows ntpath would backslash-rewrite remote paths)."""
+        the workspace's own path flavor (os.path, so Windows joins with ntpath)."""
         return Path(os.path.normpath(os.path.join(base, token)))
 
     def realpath(self, path: Path | str) -> Path:
         """Normalize a workspace path for bookkeeping (containment checks, the
-        protected set, undo keys, escape verdicts). LOCAL workspaces resolve
-        symlinks through the OS; REMOTE workspaces must NOT touch the local
-        filesystem at all: the app host's filesystem knows nothing about the
-        remote host's layout, and resolving a remote path locally rewrote it
-        with the app host's spelling of /home (on macOS the autofs target
-        /System/Volumes/Data/home) before the remote ever saw it. Everything
-        internal goes through this hook so the two can never drift.
+        protected set, undo keys, escape verdicts), resolving symlinks through
+        the OS. Everything internal goes through this hook so the callers cannot
+        drift.
 
-        The local normalization is TOTAL: os.path.realpath instead of
+        The normalization is TOTAL: os.path.realpath instead of
         Path.resolve(), which raises RuntimeError("Symlink loop from ...") on a
         loop (CPython 3.10 — a RuntimeError is not an OSError, so no caller's
         `except OSError` ever saw it). A loop IS a real directory entry, and
@@ -323,18 +284,17 @@ class Workspace(ABC):
         return Path(os.path.realpath(path))
 
     def home(self) -> Path:
-        """The home directory a leading `~` expands to for this workspace.
-        Local: the app user's home; remote: the REMOTE user's home — a `~` in
-        a remote path must never expand to the app host's home."""
+        """The home directory a leading `~` expands to for this workspace: the
+        app user's home."""
         return Path.home()
 
     def exec_shell(self) -> LocalShell:
         """The shell run_command text executes under (see tools.localshell):
-        LOCAL workspaces follow the app host's decision (posix sh / Git Bash /
-        cmd). Everyone who reasons about command TEXT — the shell guard's
-        tokenizer, the permission engine's escape parser, the context platform
-        hint — must agree with the shell that actually parses the command, so
-        they read the flavor from here instead of guessing from the OS."""
+        the app host's decision (posix sh / Git Bash / cmd). Everyone who
+        reasons about command TEXT — the shell guard's tokenizer, the permission
+        engine's escape parser, the context platform hint — must agree with the
+        shell that actually parses the command, so they read the flavor from
+        here instead of guessing from the OS."""
         return local_shell()
 
     def resolve(self, rel_path: str) -> Path:
@@ -369,8 +329,8 @@ class Workspace(ABC):
         if not token:
             return None
         if token.startswith("~"):
-            # workspace.home(), not expanduser: in ssh mode `~` is the REMOTE
-            # user's home, never the app host's
+            # workspace.home(), not expanduser: the hook is the one place that
+            # decides whose home `~` denotes
             token = str(self.home()) + token[1:]
         base = anchor if anchor is not None else self.root
         root = self.realpath(self.root)
@@ -393,8 +353,7 @@ class Workspace(ABC):
         """Return the file's byte range [lo, hi) as RAW BYTES (the lazy log's
         indexed reads: exact byte offsets, so materialization matches the file).
         The range may cut mid-multibyte-character — implementations must round
-        the bytes through losslessly (remote: the transport's binary mode base64-encodes
-        client-side, so the remote needs no base64)."""
+        the bytes through losslessly."""
 
     @abstractmethod
     def size(self, path: str) -> int:
@@ -410,15 +369,14 @@ class Workspace(ABC):
 
     @abstractmethod
     def append_line(self, path: str, line: str) -> None:
-        """Append one line to a file (the remote .clc writer)."""
+        """Append one line to a file (the .clc writer)."""
 
     @abstractmethod
     def write_at(self, path: str, offset: int, data: bytes) -> None:
         """Overwrite bytes [offset, offset + len(data)) IN PLACE (the .clc
         header's fixed-width memory index line). Never changes the file size
         and never touches bytes outside the range; implementations must
-        round the raw bytes losslessly (remote: the transport's binary mode keeps bytes
-        exact without a remote base64)."""
+        round the raw bytes losslessly."""
 
     @abstractmethod
     def delete(self, path: str) -> None:
@@ -557,311 +515,5 @@ class LocalWorkspace(Workspace):
             return True
 
 
-# Minimal sshd drops a single exec over ~8KB: writes are chunked below it;
-# limits come from transport_defaults.json (shared with ui/ssh-tunnel.js).
-_EXEC_CHUNK_BYTES = int(_DEFAULTS["exec_chunk_bytes"])
-_EXEC_MAX_COMMAND_BYTES = int(_DEFAULTS["exec_max_command_bytes"])
-
-# generous per-op timeout for internal remote file ops (read/write/list/append)
-_REMOTE_IO_TIMEOUT = 60.0
-# how much of a failed exec's stderr/stdout to show in the raised error
-_ERR_SNIPPET = 300
 # undo stack depth per file (snapshots before each overwrite)
 _MAX_SNAPSHOTS_PER_FILE = 5
-
-
-class RemoteWorkspace(Workspace):
-    """Workspace whose files live on a remote host reached over the exec bridge.
-
-    Every exec starts a fresh shell, so read/write/list use absolute paths and
-    run() prefixes `cd '<root>' &&` for the same cwd semantics as LocalWorkspace.
-    File operations are plain POSIX sh — cat, ls, and `printf '%s'` appends (no
-    base64, no SFTP) — so any device that can run an sshd shell works. Writes and
-    appends are chunked so no single exec command exceeds the sshd's limit.
-    """
-
-    def __init__(self, root: str | None, bridge_url: str) -> None:
-        super().__init__(root, transport=SshTransport(bridge_url))
-        self._remote_home: str | None = None
-
-    def _root_path(self, root: str) -> PurePath:
-        """PurePosixPath, never the host's Path: remote paths are POSIX, and a
-        Windows client's Path (WindowsPath) would turn their '/' separators
-        into '\\' in every str() — mangling every command sent over the bridge.
-        PurePosixPath keeps the spelling host-independent."""
-        return PurePosixPath(root)
-
-    def _scratch_dirs(self) -> tuple[PurePath, ...]:
-        # the remote runs the POSIX shell stack: keep the POSIX trio in the
-        # REMOTE path flavor so the verdict never mixes PurePosixPath with a
-        # host WindowsPath (TypeError)
-        return tuple(PurePosixPath(s) for s in POSIX_SCRATCH_DIRS)
-
-    def norm_join(self, base: str, token: str) -> PurePath:
-        """posixpath, not the host's os.path: the token is judged against the
-        REMOTE layout (on Windows ntpath would backslash it)."""
-        return PurePosixPath(posixpath.normpath(posixpath.join(base, token)))
-
-    def realpath(self, path: PurePath | str) -> PurePath:
-        """LEXICAL normalization only — never a local filesystem call.
-
-        Every path here lives on the REMOTE host, so the app host's view of the
-        filesystem must not rewrite it: on the macOS app host,
-        Path('/home/u/p').resolve() spelled /home through the local autofs
-        layout (/System/Volumes/Data/home/u/p), and the project write then ran
-        `mkdir -p '/System/...'` on the Linux remote -> permission denied.
-        normpath collapses `..`, `.` and duplicate slashes without consulting
-        any filesystem; remote-side symlinks stay invisible to the client, so
-        containment is lexical here exactly like escape_path's verdict. The
-        backslash rewrite tolerates a caller that str()'d a host Path first.
-        """
-        return PurePosixPath(posixpath.normpath(str(path).replace("\\", "/")))
-
-    def home(self) -> PurePath:
-        """The REMOTE user's home for `~` tokens: one cached exec (`echo $HOME`
-        over the bridge) instead of expanduser, which would return the app
-        host's home. On failure falls back to the literal `~` — a relative-ish
-        path that reads as an escape and asks the user, never silently maps a
-        remote path onto the app host. PurePosixPath: a Windows host's
-        Path('/home/u') would str() backslash it."""
-        if self._remote_home is None:
-            r = self._transport.run("echo $HOME", _REMOTE_IO_TIMEOUT)
-            self._remote_home = r.stdout.strip() if (r.code == 0 and r.stdout.strip()) else "~"
-        return PurePosixPath(self._remote_home)
-
-    def exec_shell(self) -> LocalShell:
-        """The remote host runs the POSIX shell stack regardless of the app
-        host's OS: even on a Windows machine behind the UI, run_command text
-        parses as POSIX sh on the REMOTE — never tokenize it with the local
-        (cmd) rules. posix=True, argv=None (spawn decisions stay localshell's)."""
-        return LocalShell(argv=None, posix=True, name="posix-sh")
-
-    def run(self, command: str, timeout: float, cancel: threading.Event | None = None) -> CommandResult:
-        cmd = f"cd {shq(str(self.root))} && {command}"
-        # oversized exec commands drop a minimal sshd: fail cleanly up front
-        size = len(cmd.encode("utf-8"))
-        if size > _EXEC_MAX_COMMAND_BYTES:
-            raise TransportError(
-                f"command too long to send over the remote transport ({size} bytes); "
-                "write large content with write_file and run it"
-            )
-        return self._transport.run(cmd, timeout, cancel=cancel)
-
-    def read(self, path: str) -> str:
-        p = self.resolve(path)
-        r = self._transport.run(f"cat {shq(str(p))}", _REMOTE_IO_TIMEOUT)
-        if r.code != 0:
-            raise FileNotFoundError(str(p))
-        return r.stdout
-
-    def read_range(self, path: str, lo: int, hi: int) -> bytes:
-        """Byte range [lo, hi) as RAW bytes. The exec bridge carries text, so the
-        transport's binary mode base64-encodes the slice CLIENT-side: every byte
-        round-trips exactly even when the range cuts mid-multibyte-character, and
-        the remote needs no base64 binary (just tail/head — minimal hosts lack it)."""
-        p = self.resolve(path)
-        r = self._transport.run(
-            f"tail -c +{lo + 1} {shq(str(p))} | head -c {hi - lo}", _REMOTE_IO_TIMEOUT, binary=True
-        )
-        if r.code != 0:
-            raise OSError(f"cannot read {p} (exit {r.code}): {(r.stderr or r.stdout)[:_ERR_SNIPPET]}")
-        return r.stdout.encode("latin-1")
-
-    def size(self, path: str) -> int:
-        """Total file size in bytes: wc -c on a regular file stats it (O(1)),
-        no content transfer."""
-        p = self.resolve(path)
-        r = self._transport.run(f"wc -c < {shq(str(p))}", _REMOTE_IO_TIMEOUT)
-        if r.code != 0:
-            raise FileNotFoundError(str(p))
-        return int(r.stdout.strip())
-
-    def _chunk_content(self, content: str) -> list[str]:
-        """Split into pieces whose ON-WIRE size (after shq quoting) stays under
-        _EXEC_CHUNK_BYTES. A single quote inflates to the 4-char sequence '\''
-        in the shell command, so it is budgeted at 4; multibyte chars are never
-        split mid-character."""
-        chunks: list[str] = []
-        cur: list[str] = []
-        size = 0
-        for ch in content:
-            sz = 4 if ch == "'" else len(ch.encode("utf-8"))
-            if cur and size + sz > _EXEC_CHUNK_BYTES:
-                chunks.append("".join(cur))
-                cur, size = [ch], sz
-            else:
-                cur.append(ch)
-                size += sz
-        if cur:
-            chunks.append("".join(cur))
-        return chunks
-
-    def _exec_append(
-        self,
-        p: Path,
-        content: str,
-        first_op: str,
-        add_trailing_nl: bool,
-        ensure_dir: bool,
-    ) -> None:
-        """Write/append content via one small `printf '%s'` per chunk.
-
-        printf is a POSIX sh builtin (present even where base64 is not) and `%s`
-        emits its argument byte-for-byte with no added newline, so chunks can be
-        cut anywhere and the file stays byte-exact. The last chunk optionally
-        uses `%s\\n` to restore the JSONL terminator.
-        """
-        chunks = self._chunk_content(content) or [""]
-        for i, chunk in enumerate(chunks):
-            fmt = "%s\n" if (add_trailing_nl and i == len(chunks) - 1) else "%s"
-            op = first_op if i == 0 else ">>"
-            prefix = f"mkdir -p {shq(str(p.parent))} && " if (ensure_dir and i == 0) else ""
-            cmd = f"{prefix}printf '{fmt}' {shq(chunk)} {op} {shq(str(p))}"
-            r = self._transport.run(cmd, _REMOTE_IO_TIMEOUT)
-            if r.code != 0:
-                raise OSError(f"write failed (exit {r.code}): {(r.stderr or r.stdout)[:_ERR_SNIPPET]}")
-
-    def write(self, path: str, content: str) -> None:
-        p = self.resolve(path)
-        self._exec_append(p, content, first_op=">", add_trailing_nl=False, ensure_dir=True)
-
-    def list(self, path: str) -> list[str]:
-        p = self.resolve(path)
-        # test -d first: ls alone succeeds on a plain file
-        r = self._transport.run(f"test -d {shq(str(p))} && ls -1AF {shq(str(p))}", _REMOTE_IO_TIMEOUT)
-        if r.code != 0:
-            raise NotADirectoryError(str(p))
-        return self._parse_list_output(p, r.stdout)
-
-    def _parse_list_output(self, p: Path, stdout: str) -> list[str]:
-        """One shared ls parser + the protected-file filter (protected dirs stay
-        listed — the agent sees the dir but cannot read inside it)."""
-        out = []
-        for name, is_dir in parse_ls_entries(stdout):
-            if not is_dir and self.is_protected(p / name):
-                continue
-            out.append(name + ("/" if is_dir else ""))
-        return sorted(out)
-
-    def list_many(self, paths: list[str]) -> dict[str, list[str]]:
-        """list several directories in ONE exec (one round trip); missing/non-dir
-        paths map to []. Used by the remote tree walk so a whole level costs a
-        single round trip instead of one exec per directory. Commands are grouped
-        so each exec stays under the sshd's command-size limit."""
-        keyed = [(p, self.resolve(p)) for p in paths]
-        marker = f"CLUTCH_LIST_{time.time_ns()}"
-        result: dict[str, list[str]] = {p: [] for p in paths}
-        groups: list[tuple[list[tuple[str, Path, str]], str]] = []
-        cur_cmd: list[str] = []
-        cur_group: list[tuple[str, Path, str]] = []
-        for i, (rel, p) in enumerate(keyed):
-            m = f"{marker}_{i}"
-            frag = f"if test -d {shq(str(p))}; then echo '{m}'; ls -1AF {shq(str(p))}; else echo '{m}:MISSING'; fi"
-            if cur_cmd and sum(len(f) + 2 for f in cur_cmd) + len(frag) > _EXEC_MAX_COMMAND_BYTES - 200:
-                groups.append((cur_group, "; ".join(cur_cmd)))
-                cur_cmd, cur_group = [], []
-            cur_cmd.append(frag)
-            cur_group.append((rel, p, m))
-        if cur_cmd:
-            groups.append((cur_group, "; ".join(cur_cmd)))
-        for group, cmd in groups:
-            r = self._transport.run(cmd, _REMOTE_IO_TIMEOUT)
-            if r.code != 0:
-                raise OSError(f"list failed (exit {r.code}): {(r.stderr or r.stdout)[:_ERR_SNIPPET]}")
-            raw: dict[str, list[str]] = {}
-            current: str | None = None
-            for line in r.stdout.splitlines():
-                if line.startswith(marker):
-                    idx = int(line[len(marker) + 1 :].split(":", 1)[0])
-                    current = group[idx][0]
-                    continue
-                if current is not None:
-                    raw.setdefault(current, []).append(line)
-            for rel, p, _ in group:
-                result[rel] = self._parse_list_output(p, "\n".join(raw.get(rel, [])))
-        return result
-
-    def append_line(self, path: str, line: str) -> None:
-        p = self.resolve(path)
-        self._exec_append(p, line, first_op=">>", add_trailing_nl=True, ensure_dir=False)
-
-    def write_at(self, path: str, offset: int, data: bytes) -> None:
-        """In-place overwrite at a byte offset (the .clc memory index header
-        line). The bytes travel as POSIX octal escapes through printf %b (a sh
-        builtin — the remote needs no base64); dd with conv=notrunc writes over
-        the range without truncating the file or touching anything past it."""
-        p = self.resolve(path)
-        octal = "".join(f"\\{b:03o}" for b in data)
-        cmd = (
-            f"printf '%b' '{octal}' | "
-            f"dd of={shq(str(p))} bs=1 seek={offset} conv=notrunc"
-        )
-        r = self._transport.run(cmd, _REMOTE_IO_TIMEOUT)
-        if r.code != 0:
-            raise OSError(f"cannot write_at {p} (exit {r.code}): {(r.stderr or r.stdout)[:_ERR_SNIPPET]}")
-
-    def delete(self, path: str) -> None:
-        """Remove a file: `rm -f` (a POSIX sh command, like every other op here)
-        so a path that is already gone is NOT an error — the rollback that
-        un-creates a file must survive the user having deleted it by hand. A
-        real failure (permissions, a directory) reports the exit code."""
-        p = self.resolve(path)
-        r = self._transport.run(f"rm -f {shq(str(p))}", _REMOTE_IO_TIMEOUT)
-        if r.code != 0:
-            raise OSError(f"cannot delete {p} (exit {r.code}): {(r.stderr or r.stdout)[:_ERR_SNIPPET]}")
-
-    def grep(self, pattern: str, path: str = ".", include: str | None = None) -> list[tuple[str, int, str]]:
-        # busybox grep lacks --include/dotfile awareness: use find, skip hidden
-        # files/dirs and the protected .clc
-        p = self.resolve(path)
-        # A path that is neither a file nor a directory is `file not found` on
-        # the component side, so probe for it IN the search's own exec (no extra
-        # round trip): `test -e` is false only when nothing is there, and the
-        # marked exit then stops the shell before find can print an error of its
-        # own — which is how the caller tells this apart from "no matches".
-        absent = f"CLUTCH_NO_PATH_{time.time_ns()}"
-        probe = f"test -e {shq(str(p))} || {{ echo {shq(absent)} >&2; exit 64; }}; "
-        find_cmd = f"find {shq(str(p))} -type f ! -path '*/.*' ! -path '*/.*/*'"
-        for prot in self._protected:
-            find_cmd += f" ! -name {shq(prot.name)}"
-        if include:
-            find_cmd += f" -name {shq(include)}"
-        cmd = f"{probe}{find_cmd} -print0 | xargs -0 grep -HnE {shq(pattern)} | head -n 100"
-        r = self._transport.run(cmd, _REMOTE_IO_TIMEOUT)
-        if not r.stdout.strip():
-            err = (r.stderr or "").strip()
-            if absent in err:
-                raise FileNotFoundError(str(p))
-            # No hits AND a diagnostic on stderr is a search that did not run:
-            # a malformed pattern, an unreadable directory, a missing xargs.
-            # Answering "(no matches)" there would tell the model the text is
-            # absent when nothing was actually read. The pipeline's own exit
-            # status is `head`'s, so stderr is the only signal that survives
-            # (`grep` says nothing at all for the genuine no-match, exit 1).
-            if err or r.code != 0:
-                raise OSError(err.splitlines()[0] if err else f"grep failed (exit {r.code})")
-            return []
-        out: list[tuple[str, int, str]] = []
-        for line in r.stdout.splitlines():
-            first = line.find(":")
-            if first < 0:
-                continue
-            rest = line[first + 1 :]
-            second = rest.find(":")
-            if second < 0:
-                continue
-            try:
-                lineno = int(rest[:second])
-            except ValueError:
-                continue
-            fpath = line[:first]
-            try:
-                # PurePosixPath: the remote prints POSIX paths; the host's Path
-                # flavor must not re-separator them (WindowsPath on Windows)
-                rel = str(PurePosixPath(fpath).relative_to(self.root))
-            except ValueError:
-                rel = fpath
-            out.append((rel, lineno, rest[second + 1 :]))
-            if len(out) >= 100:
-                break
-        return out

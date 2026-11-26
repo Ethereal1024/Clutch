@@ -497,7 +497,6 @@ async function main() {
   intent = { host: "box.example", user: "dev", port: "2222" };
   redialOk = false;
   store.set("clutch_ssh_connected", "1");
-  store.set("clutch_degrade", "{}");
   global.connLostTries = 1;
   global.IS_ANDROID = false;
   calls.length = 0;
@@ -507,7 +506,7 @@ async function main() {
   calls.length = 0;
   check((await connLostRecover()) === false && calls.join(",") === "intent,tunnelUp,redial",
   "and it keeps those tries: there is no try-counted door to a second host");
-  check(store.get("clutch_ssh_connected") === "1" && store.get("clutch_degrade") === "{}",
+  check(store.get("clutch_ssh_connected") === "1",
   "the dialog clears nothing behind the user's back: the intent is theirs to drop");
 
   global.IS_ANDROID = true;
@@ -516,7 +515,6 @@ async function main() {
   "the phone takes the same single path (it has no local session to reach for at all)");
   global.IS_ANDROID = false;
   global.connLostTries = 0;
-  store.delete("clutch_degrade");
 
   // ---- 8. the door itself: the same host, by name, through the picker's path ----
   reload("connLostRemoteIntent"); // §6 stubbed the decision, this section tests the door
@@ -652,7 +650,6 @@ async function main() {
 
   // and it holds, driven: a live outage, a redial already armed, then the Cancel
   store.set("clutch_ssh_connected", "1");
-  store.set("clutch_degrade", "{}");
   let switchCalls = 0;
   global.switchBackendResolved = async () => {
     switchCalls++;
@@ -674,8 +671,8 @@ async function main() {
   connLostCancel();
   check(global.connLost === false && global.connLostTimer === null,
   "Cancel ends the outage and disarms the attempt behind it");
-  check(!store.has("clutch_ssh_connected") && !store.has("clutch_degrade"),
-  "the intent and the degrade mode it implied are both dropped, in that order");
+  check(!store.has("clutch_ssh_connected"),
+  "the standing intent is dropped with the outage: nothing of what Cancel ended is left to re-dial");
   check(statuses[statuses.length - 1] === "idle",
   "the badge is settled honestly: no session means nothing to show and nothing to stop");
   check(global.busy === false,

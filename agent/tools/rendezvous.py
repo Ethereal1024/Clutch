@@ -25,9 +25,8 @@ CLIENT-side declaration (Component.client_side) contributes no tools until this
 host has a channel to that client machine (`unavailable_reason` says so, as a
 sentence a client can show) — it must never quietly run here, which is the one
 thing the derivation forbids. So a component that serves ANOTHER machine's
-filesystem (an ssh workspace), or one that is called FROM another host (a
-client-side component behind a reverse channel), adds an ENTRY to the table, never
-a branch to a tool.
+filesystem, or one that is called FROM another host (a client-side component
+behind a reverse channel), adds an ENTRY to the table, never a branch to a tool.
 
 Where a component's artifact comes from is a different question again, and
 tools/components.py answers it: the host runs the component installed on ITS own
@@ -319,9 +318,9 @@ def serves_remote_workspace_fs(module: str) -> bool:
     offered — keeping it would shadow the `read_file` that really works on this
     machine with one that reads some machine a tunnel happens to reach
     (`registry.build_tools`) — and a call is refused with that sentence
-    (`prompt.module_blocked_reason`). On a root that IS elsewhere the four file
-    names are the host's own (`tools/host.py`), so what it contributes there is a
-    diagnostic rather than a second reading.
+    (`prompt.module_blocked_reason`). There is no root that IS elsewhere: a
+    workspace is served by the process that owns the machine it sits on, and that
+    process is this host, so this shape is dropped on every root.
     """
     mod = catalog.table().get(module)
     return mod is not None and mod.client_side and mod.subject == catalog.WORKSPACE_FS

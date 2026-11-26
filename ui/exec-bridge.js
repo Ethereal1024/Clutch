@@ -1,11 +1,12 @@
 // GENERATED FILE — do not edit; edit src/host/exec-bridge.ts and run `npm run build:host`.
-// source sha256: f52af487d4eeeff4735b5eceb671ebcaa13c47bf55ba0e93d6f185b43d3b338e
+// source sha256: a17801dcebff2679649320337d683e4f4eca7a812257a3f3918ceef47bbde209
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-// Loopback HTTP bridge exposing one tunnel's remoteExec to the local Python agent
-// (SshTransport): a POST /exec runs one command on the far side of THAT tunnel
-// and answers with its exit code and output.
+// Loopback HTTP bridge exposing one tunnel's remoteExec to the CLIENT's plugins
+// (plugin-host.ts): a POST /exec runs one command on the far side of THAT tunnel
+// and answers with its exit code and output. It is a capability of the window
+// that holds the hop, not a second way to reach a workspace.
 //
 // One bridge per tunnel, keyed by the tunnel's id. The port a session posts to
 // has to run its commands on the machine the session belongs to — with one

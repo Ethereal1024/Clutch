@@ -1,6 +1,7 @@
-// Loopback HTTP bridge exposing one tunnel's remoteExec to the local Python agent
-// (SshTransport): a POST /exec runs one command on the far side of THAT tunnel
-// and answers with its exit code and output.
+// Loopback HTTP bridge exposing one tunnel's remoteExec to the CLIENT's plugins
+// (plugin-host.ts): a POST /exec runs one command on the far side of THAT tunnel
+// and answers with its exit code and output. It is a capability of the window
+// that holds the hop, not a second way to reach a workspace.
 //
 // One bridge per tunnel, keyed by the tunnel's id. The port a session posts to
 // has to run its commands on the machine the session belongs to — with one

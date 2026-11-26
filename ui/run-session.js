@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/run-session.ts and run `npm run build:host`.
-// source sha256: d822374fbd802dcb3a9491d9eb01994d0df77a6744f3ad91b07cff92c18d1d00
+// source sha256: aba613f56c6238dd78fe7038b29029139b837b5d9ff57a5d921808c79f3274a6
 
 // Composition root for one session's run loop (P3-2 wiring).
 //
@@ -156,11 +156,9 @@ async function createSessionRun({ base, mode: modeOverride, project, onEvent, wa
     // mode: caller override wins (allows chat sessions from the same endpoint),
     // otherwise trust the session.
     const resolvedMode = typeof modeOverride === "string" ? modeOverride : (typeof mode === "string" ? mode : "work");
-    // Tool surface: the declarations data, the session mode, the log's open
-    // state (whether a project is open) and the session's ROOT (a workspace on
-    // another machine, served through a shell) all feed createTools. The
-    // session's own `project` and `remote` flags are encoded in the declarations
-    // response, asked of the machine that owns the workspace.
+    // Tool surface: the declarations data, the session mode and the log's open
+    // state (whether a project is open) all feed createTools. `project` is encoded
+    // in the declarations response, asked of the machine that owns the workspace.
     const tools = createTools({
         declarations: Array.isArray(declsData.declarations) ? declsData.declarations : [],
         available: declsData.available && typeof declsData.available === "object" ? declsData.available : {},
@@ -169,7 +167,6 @@ async function createSessionRun({ base, mode: modeOverride, project, onEvent, wa
         facts: declsData.facts && typeof declsData.facts === "object" ? declsData.facts : {},
         host: declsData.host && typeof declsData.host === "object" ? declsData.host : {},
         project: Boolean(declsData.project),
-        remote: Boolean(declsData.remote),
         mode: resolvedMode,
         warn: typeof warn === "function" ? warn : undefined,
     });

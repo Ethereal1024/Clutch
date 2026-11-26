@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 20c1dcf0bb01d7eac87fd73220b08ef665b028526ba993a46f341c9545a75673
+// sources sha256: 52426c0181580589d336dbf06c2ada28f6a77a8010e383b52a29375542f2362d
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -6113,16 +6113,8 @@
         refreshPicker();
         return true;
       } else {
-        const degraded = await tryDegradeToSshTools();
-        if (degraded === true) {
-          upsertConn(host, user, port);
-          localStorage.setItem("clutch_ssh_connected", "1");
-          await switchBackendResolved();
-          refreshPicker();
-          return true;
-        }
         setFsConnectError(
-          degraded === false ? "connection failed: " + (res.error || "could not connect") : "SSH connected, but the local agent server is " + degraded + (res.error ? " (" + res.error + ")" : ""),
+          "connection failed: " + (res.error || "could not connect"),
           statusEl,
           door
         );
@@ -6178,7 +6170,6 @@
     const leaving = Boolean(localStorage.getItem("clutch_ssh_connected"));
     if (leaving) {
       localStorage.removeItem("clutch_ssh_connected");
-      localStorage.removeItem("clutch_degrade");
       if (window.clutchTunnel) await window.clutchTunnel.disconnect();
     }
     const ok = await handleSshConnect(host, user, port, statusEl);
@@ -6210,9 +6201,7 @@
     if (v === "local") {
       if (localStorage.getItem("clutch_ssh_connected")) {
         localStorage.removeItem("clutch_ssh_connected");
-        localStorage.removeItem("clutch_degrade");
         await window.clutchTunnel.disconnect();
-        await resetBackendLocal();
       }
       await switchBackendResolved();
       refreshPicker();
@@ -6260,10 +6249,8 @@
   });
   $("#conn-cancel").addEventListener("click", async () => {
     localStorage.removeItem("clutch_ssh_connected");
-    localStorage.removeItem("clutch_degrade");
     closeConnNew();
     if (!IS_ANDROID) {
-      resetBackendLocal();
       await switchBackendResolved();
     }
     refreshPicker();
@@ -6299,7 +6286,6 @@
   }
   async function switchBackendResolved() {
     if (!switchBackend(await hostSessionUrl())) return false;
-    await reapplyDegradeIfNeeded();
     return true;
   }
   async function switchBackendActiveSlot() {
@@ -6309,56 +6295,7 @@
     if (!base) return false;
     adoptBase(base);
     reconnectSSE();
-    await reapplyDegradeIfNeeded();
     return true;
-  }
-  async function reapplyDegradeIfNeeded() {
-    const raw = localStorage.getItem("clutch_degrade");
-    if (!raw || !window.clutchTunnel) return;
-    const s = await window.clutchTunnel.status();
-    if (!s.active || !s.execBridge) {
-      localStorage.removeItem("clutch_degrade");
-      return;
-    }
-    let bridge = null;
-    try {
-      bridge = JSON.parse(raw).bridge;
-    } catch (e) {
-      localStorage.removeItem("clutch_degrade");
-      return;
-    }
-    try {
-      await apiFetch("/api/backend", {
-        method: "POST",
-        body: { mode: "ssh", bridge, workspace: "~" }
-      });
-    } catch (e) {
-    }
-  }
-  async function tryDegradeToSshTools() {
-    if (!window.clutchTunnel) return false;
-    const s = await window.clutchTunnel.status();
-    if (!s.active || !s.execBridge) return false;
-    const url = await hostSessionUrl();
-    if (!url) return "not running";
-    try {
-      await apiFetch("/api/backend", {
-        method: "POST",
-        body: { mode: "ssh", bridge: s.execBridge, workspace: "~" },
-        base: url
-      });
-    } catch (e) {
-      return e.status ? "not running" : "unreachable";
-    }
-    localStorage.setItem("clutch_degrade", JSON.stringify({ bridge: s.execBridge }));
-    return true;
-  }
-  async function resetBackendLocal() {
-    if (DEFAULT_BASE === SUPERVISOR_BASE) return;
-    try {
-      await apiFetch("/api/backend", { method: "POST", body: { mode: "local" }, base: DEFAULT_BASE });
-    } catch (e) {
-    }
   }
   async function claimedByTunnel(slot) {
     if (!(window.clutchApi && window.clutchApi.slotStatus)) return false;
@@ -6402,7 +6339,6 @@
   }
   if (window.clutchTunnel) {
     window.clutchTunnel.onEnd((info) => {
-      localStorage.removeItem("clutch_degrade");
       if (info && info.lost === false) return;
       if (typeof unwatchAll === "function") unwatchAll();
       if (!localStorage.getItem("clutch_ssh_connected")) return;
@@ -6512,7 +6448,6 @@
   function connLostCancel() {
     if (!connLost) return;
     localStorage.removeItem("clutch_ssh_connected");
-    localStorage.removeItem("clutch_degrade");
     if (connLostTimer) {
       clearTimeout(connLostTimer);
       connLostTimer = null;

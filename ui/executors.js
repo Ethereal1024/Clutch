@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/executors.ts and run `npm run build:host`.
-// source sha256: feea2f67837751d9c91129f782439b97de42f217d2cdb76472705609d7b9e8ac
+// source sha256: 674ca25f5cb4a81f417e24e193ebd53a7d9e3eea0a17afa020472e4897eca4c3
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -25,9 +25,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
 //                 alive.
 //   capabilities  what can be asked of it RIGHT NOW: `supervisor` (a session can
 //                 be claimed on it) and `exec` (this process can run a command
-//                 on it, through the exec bridge). An endpoint with exec and no
-//                 supervisor is the SSH-tools degradation — the far side takes
-//                 commands but runs no session.
+//                 on it, through the exec bridge). A session needs the first:
+//                 an endpoint with exec and no supervisor can carry a command
+//                 but has nothing to claim.
 //   status()      { active, url, target } — what the page and the picker are told
 //   base()        the supervisor base a session is claimed on, or null
 //   ready()       make the supervisor answer, when starting it is OURS to do: the

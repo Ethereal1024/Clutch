@@ -33,16 +33,8 @@ class ProjectMixin:
         name = (body.get("name") or "").strip()
         if not dirname or not name:
             return self._json({"error": "dir and name are required"}, status=400)
-        ws = None
         try:
-            if self._state.backend_mode == "ssh" and self._state.bridge_url:
-                # _project_path: PurePosixPath lexical normalization — never the
-                # host's Path (backslash re-separation on a Windows client)
-                root = self._project_path(dirname)
-                ws = self._state.build_workspace(str(root))
-                project = create_project(root / name, name, model=self._cfg.model, workspace=ws)
-            else:
-                project = create_project(Path(dirname) / name, name, model=self._cfg.model)
+            project = create_project(Path(dirname) / name, name, model=self._cfg.model)
         except ProjectExists as e:
             # the name is taken by a file this create would have truncated: the
             # picker asked to MAKE a project, and one is already there — say
@@ -70,7 +62,7 @@ class ProjectMixin:
             return self._json(payload, status=409)
         except OSError as e:
             return self._json({"error": f"cannot create project: {e}"}, status=400)
-        self._state.set_project(project, workspace=ws)
+        self._state.set_project(project)
         self._json(
             {
                 "status": "ok",
@@ -92,17 +84,14 @@ class ProjectMixin:
         full = self._project_path(path)
         if full.suffix != ".clc":
             return self._json({"error": "not a .clc project file"}, status=400)
-        if self._state.backend_mode != "ssh":
-            # remote paths don't exist on the local filesystem; the open itself
-            # reports a missing remote file via workspace.read
-            if not full.is_file():
-                return self._json({"error": "not a .clc project file"}, status=400)
+        if not full.is_file():
+            return self._json({"error": "not a .clc project file"}, status=400)
         read_only = bool(body.get("read_only")) or str(body.get("read_only", "")).lower() == "true"
         self._open_stream_start(full, read_only=read_only)
 
     def _open_stream_start(self, full: Path, read_only: bool = False) -> None:
-        # build the workspace first (ssh mode -> RemoteWorkspace over the bridge),
-        # so index/load/append all hit the same remote host
+        # build the workspace before index/load/append, so all three hit the same
+        # root this open is about
         ws = self._state.build_workspace(str(full.parent))
         # NO LOCK IS TAKEN HERE. Opening a project is a read: the .clc is claimed
         # by the session that RUNS it (agent/base.py RunState.claim_run), not by

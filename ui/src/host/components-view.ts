@@ -20,10 +20,6 @@
 //
 // `deps` (injected, so a test can drive this with no Electron and no network):
 //   supervisorBase()  => "http://127.0.0.1:8890"   THIS machine's supervisor
-//   tunnelStatus()    => {active, url, execBridge} a live tunnel: its far
-//                                                 supervisor, and the exec
-//                                                 channel a DEGRADED session
-//                                                 runs its commands through
 //   plugins()         => ui/plugin-host.js        THIS client's plugin domain
 //                      (or null)                 (null on a host that has none)
 //   windowExecutor(win, slot) => executor id | null  which machine one of the
@@ -79,7 +75,6 @@ const NO_CLIENT_SETTINGS =
 function createComponentsView(deps) {
   const {
     supervisorBase,
-    tunnelStatus = () => ({}),
     plugins = null, // a function: this client plugin domain, or null where it has none
     // which machine one of a WINDOW's slots (one tab = one slot) sits on, and the
     // supervisor URL that slot's machine answers on — the two facts that make an
@@ -140,31 +135,10 @@ function createComponentsView(deps) {
       : "this build has no supervisor URL for the local machine";
   }
 
-  // The session machine, and the one shape in which this app cannot reach it.
-  //
-  // A session whose commands run somewhere else than its own process does is the
-  // SSH-tools degradation (ui/js/backend-lifecycle.js): a LOCAL agent with an exec
-  // bridge, so the executor says this machine while every command a tool runs lands on
-  // the far machine. A cli/daemon component belongs where those commands run —
-  // its own tools call it over THAT loopback — so installing it here would put it
-  // on the wrong machine, which is exactly the failure the plug-in page used to
-  // hide behind "Local (this machine)". The bridge is an exec channel, not a
-  // supervisor, so there is nothing to install through: the honest answer is the
-  // sentence, per read and per write.
-  function bridged(t) {
-    const ts = tunnelStatus() || {};
-    if (t.kind !== "local" || !ts.active || !ts.execBridge) return "";
-    return (
-      "this session runs its commands on another machine over an SSH bridge, and this build has no " +
-      "component channel to that machine — a component installed here would land on the machine this " +
-      "window is on instead"
-    );
-  }
-
-  // One answer for "why this cannot be done here", covering both shapes (no
-  // machine yet, and the machine the declaration names being out of reach).
+  // One answer for "why this cannot be done here": no machine yet, or the
+  // machine the declaration names being out of reach.
   function trouble(t) {
-    return why(t) || bridged(t) || null;
+    return why(t) || null;
   }
 
   // This client plugin domain, or null. A throw is the domain saying it cannot

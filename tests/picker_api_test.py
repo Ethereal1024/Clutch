@@ -197,65 +197,8 @@ def create_route(base: str) -> None:
     check(not ProjectLock.inspect(str(fresh))["held"], "the refusal left no claim on the file")
 
 
-def stat_remote_transport() -> None:
-    """The same three answers over the SSH bridge — about the REMOTE filesystem.
-
-    A remote picker that answered from the app host's own disk would offer to
-    create a file on the wrong machine, so the stat has to be one exec over the
-    bridge, exactly like the listing it sits beside.
-    """
-    import re
-
-    import agent.browsing as browsing
-    from agent.tools.transport import CommandResult
-
-    state = RunState()
-    state.backend_mode = "ssh"
-    state.bridge_url = "http://127.0.0.1:1"  # never dialled: the transport is faked
-    state.remote_root = "/home/u/proj"
-    seen: list[str] = []
-
-    class FakeTransport:
-        def __init__(self, url: str) -> None:
-            self.url = url
-
-        def run(self, command: str, timeout: float, cancel=None, *, binary: bool = False):
-            seen.append(command)
-            found = re.search(r"'([^']*)'", command)
-            target = (found.group(1) if found else "").rstrip("/")
-            if target == "/home/u/proj":
-                return CommandResult(code=0, stdout="dir\n", stderr="")
-            if target == "/home/u/proj/notes.clc":
-                return CommandResult(code=0, stdout="file\n", stderr="")
-            return CommandResult(code=0, stdout="none\n", stderr="")
-
-    real = browsing.SshTransport
-    browsing.SshTransport = FakeTransport  # type: ignore[assignment]
-    try:
-        got = browsing.fs_stat(state, "")
-        check(got == {"path": "/home/u/proj", "type": "dir", "error": None}, f"remote: the browse root is a dir: {got}")
-        got = browsing.fs_stat(state, "notes.clc")
-        check(
-            got == {"path": "/home/u/proj/notes.clc", "type": "file", "error": None},
-            f"remote: a relative name lands under the remote root: {got}",
-        )
-        got = browsing.fs_stat(state, "brand-new.clc")
-        check(
-            got == {"path": "/home/u/proj/brand-new.clc", "type": "none", "error": None},
-            f"remote: an absent file is the create offer, not a failure: {got}",
-        )
-    finally:
-        browsing.SshTransport = real  # type: ignore[assignment]
-    check(len(seen) == 3, f"each stat is ONE exec over the bridge (got {len(seen)})")
-    check(
-        all("test -d" in c and "test -f" in c for c in seen),
-        f"and that exec asks both questions in one round trip: {seen}",
-    )
-
-
 def main() -> None:
     name_policy()
-    stat_remote_transport()
     base, srv = _serve()
     try:
         mkdir_route(base)

@@ -71,7 +71,7 @@ from .gates import (
 from .inst import InstError
 from .prompt import components_unavailable, module_blocked_reason, prompt_section
 from .transport import TransportError, failure_envelope
-from .workspace import LocalWorkspace, RemoteWorkspace, Workspace
+from .workspace import Workspace
 
 # The words the host refuses a declaration over, said ONCE per process (a
 # component's typo is a fact about its manifest, not something to repeat on every
@@ -257,7 +257,7 @@ def _wire(
     )
 
 
-def _bootstrap(config: Config, log: LazyEventLog | None = None, *, remote: bool = False) -> list[Tool]:
+def _bootstrap(config: Config, log: LazyEventLog | None = None) -> list[Tool]:
     """The host's OWN declarations (tools/host.py), wired like any other.
 
     The one exception to "the declaration belongs to a component", and it is a
@@ -266,11 +266,6 @@ def _bootstrap(config: Config, log: LazyEventLog | None = None, *, remote: bool 
     it adds is the implementation — host code, where a component's statement is
     its implementation — and it is why this tool can never be absent: with
     nothing installed it is the host's whole surface.
-
-    `remote` is the session's root (see build_tools): a workspace on another
-    machine has no daemon to serve the four file tools, so the host declares them
-    for that session (catalog.REMOTE_TOOL_NAMES) and nothing here changes for a
-    local root.
 
     A word the host itself cannot honor is a host bug, so it is LOUD here (an
     assert) rather than dropped the way a component's unreadable declaration is
@@ -282,15 +277,15 @@ def _bootstrap(config: Config, log: LazyEventLog | None = None, *, remote: bool 
     open), and a session with none should not be handed a reader that could only
     answer "no log"."""
     out: list[Tool] = []
-    for declared in host.declarations(config, remote=remote):
+    for declared in host.declarations(config):
         spec = catalog.tool_of(declared.declaration)
         assert spec is not None, f"the host's own declaration is not a tool: {declared.declaration!r}"
         fatal = [d.message for d in catalog.tool_diagnostics(host.NAME, spec) if d.fatal]
         assert not fatal, f"the host's own {declared.name} declaration is invalid: {'; '.join(fatal)}"
-        # The two writers are declared `modes: ["work"]`, and this is the only
-        # place that filter can run for them: on a local root their mode is the
-        # component's to declare (`build_tools` asks it below), but here the
-        # declaration is the host's own.
+        # A host declaration names its own `modes` like a component's does, and
+        # this is the one place that filter can run for it (`spec.modes` is every
+        # mode when the declaration says nothing, which is what all seven do
+        # today: `run_command` and its siblings mean the same thing in chat).
         if config.mode not in spec.modes:
             continue
         if not _gate_ok(spec.gate, config, log):
@@ -311,7 +306,6 @@ def _bootstrap(config: Config, log: LazyEventLog | None = None, *, remote: bool 
 def build_tools(
     config: Config,
     log: LazyEventLog | None = None,
-    workspace: Workspace | None = None,
 ) -> list[Tool]:
     """Every tool this host can offer right now, in one pass over the catalog.
 
@@ -333,50 +327,22 @@ def build_tools(
     can be driven at all is one filter for the whole model-facing surface
     (`_drivable`), shared with the prompt fragments they carry.
 
-    `workspace` is the session's root, when there is one: it decides whether the
-    host declares the four file tools itself (a `RemoteWorkspace` has no daemon
-    to serve them: tools/host.py `_REMOTE_DECLARATIONS`). It is a filter on the
-    surface, not a second implementation — a call still asks
-    `module_blocked_reason` before it runs. `log` is the session's own project
-    log: the one condition behind the `project` gate (`gates.gate_project`), and
-    the reader the host's own log tools are handed on every call."""
-    remote = isinstance(workspace, RemoteWorkspace)
-    local = isinstance(workspace, LocalWorkspace)
-    tools: list[Tool] = _bootstrap(config, log, remote=remote)
-    # The names the host holds ITSELF in this session, and the reason a component
-    # that declares one of them is dropped instead of wired twice: on a remote
-    # root `clutch-workspace` still declares read_file and its three siblings
-    # (they are its names, and on a local root its daemon performs them), but its
-    # statement is a daemon that cannot run on the far side. Wiring it after the
-    # host's own would shadow the only implementation that works there, and
-    # wiring both would be two readings of one name.
-    held = {t.name for t in tools if t.host is not None}
+    `log` is the session's own project log: the one condition behind the
+    `project` gate (`gates.gate_project`), and the reader the host's own log
+    tools are handed on every call."""
+    tools: list[Tool] = _bootstrap(config, log)
     for component in _drivable():
-        if local and rendezvous.serves_remote_workspace_fs(component.name):
+        if rendezvous.serves_remote_workspace_fs(component.name):
             # A component whose statements would be spoken to ANOTHER machine's
             # filesystem has nothing to say about a root that lives HERE: the same
             # names exist natively, and wiring it would shadow a working local
             # `read_file` with one that reads some machine a tunnel happens to
-            # reach. Reachable only through a client push (tools/channel.py); on a
-            # root that IS elsewhere its names are the host's own, so `held` drops
-            # it there.
+            # reach. Reachable only through a client push (tools/channel.py).
             continue
         for spec in component.tools:
             if config.mode not in spec.modes:
                 continue
             if not _gate_ok(spec.gate, config, log):
-                continue
-            if spec.name in held:
-                _report(
-                    [
-                        catalog.Diagnostic(
-                            component.name,
-                            spec.name,
-                            "the host declares this name itself for a workspace on another machine, and this "
-                            "component's daemon cannot run there — the host's own implementation is offered",
-                        )
-                    ]
-                )
                 continue
             tools.append(_wire(spec, config, owner=component.name))
     return tools
@@ -570,7 +536,7 @@ class ToolRegistry:
             if self._cancelable.get(tool.name):
                 return tool.host(workspace, config, cancel=cancel, **given)
             return tool.host(workspace, config, **given)
-        blocked = module_blocked_reason(workspace, tool.module)
+        blocked = module_blocked_reason(tool.module)
         if blocked:
             # A session holds the declarations it was assembled with, so a
             # component removed while it runs leaves a tool here that cannot

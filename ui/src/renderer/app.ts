@@ -31,7 +31,7 @@ export let DEFAULT_BASE = SUPERVISOR_BASE; // this machine's session base, once 
 //
 // This is the ONE ask, and every reader of this window's session goes through it
 // (resolveApiBase below, backend-lifecycle.ts switchBackendResolved /
-// tryDegradeToSshTools / reconciledBackendUrl), so the rules that belong to asking
+// reconciledBackendUrl), so the rules that belong to asking
 // exist once instead of once per caller:
 //
 //   * the exit's note is read BEFORE the ask. A window that left an outage

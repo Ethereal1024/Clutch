@@ -64,10 +64,6 @@ let reconnects = 0;
 global.reconnectSSE = () => {
   reconnects++;
 };
-let degradeReapplies = 0;
-global.reapplyDegradeIfNeeded = async () => {
-  degradeReapplies++;
-};
 global.window = {};
 // switchBackend announces the base to the status bar; the runner drives it
 // without a DOM, so the one event call it makes is stubbed here.
@@ -263,8 +259,8 @@ async function main() {
   const afterEnd = APP.indexOf("// the main process re-established", at);
   check(at > 0, "the tunnel-end handler exists");
   const onEnd = APP.slice(at, afterEnd > at ? afterEnd : at + 1200);
-  check(/removeItem\("clutch_degrade"\)/.test(onEnd),
-    "a tunnel end drops degrade mode: it died with the exec bridge");
+  check(!/clutch_degrade/.test(onEnd),
+    "a tunnel end carries no degrade mode to drop: that mode died with the exec bridge");
   check(!/if \(IS_ANDROID\)/.test(onEnd),
     "the handler is ONE path for phone and desktop: no local fallback to split off");
   check(/if \(!localStorage\.getItem\("clutch_ssh_connected"\)\) return;/.test(onEnd),

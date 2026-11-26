@@ -170,8 +170,7 @@ export function plugPlaceUnread(item) {
 // selector: a plugin is held by the app process itself (always here, or this
 // shell has no plugin domain at all), and a component with a process is held
 // where the session runs its commands — out of reach exactly when that domain did
-// not answer, because a degraded session runs its tools over an exec bridge, and
-// an exec bridge is not a component channel.
+// not answer.
 export function plugPlaceReady(place) {
   if (place === "client") {
     return plugState.client
@@ -938,8 +937,8 @@ export function plugReadNote() {
 }
 
 // The page own read failures, in the order they explain an empty or short list:
-// the session machine (the place a cli/daemon lives, and the one out of reach in a
-// degraded session), then this client plugin domain, then the market. A row that
+// the session machine (the place a cli/daemon lives), then this client plugin
+// domain, then the market. A row that
 // needs the missing half says the same sentence in its own title; this is the one
 // line under the list, so a page WITH rows in it still says what it could not see.
 export function plugReadProblem() {

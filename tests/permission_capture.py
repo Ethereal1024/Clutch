@@ -9,13 +9,12 @@ replays the same calls against `ui/host/permission.js`.
     .venv/bin/python -m tests.permission_capture            # write the fixture
     .venv/bin/python -m tests.permission_capture --check    # regenerate+compare
 
-The workspace here is a STUB, and deliberately so: the far-root host judges paths
-LEXICALLY (a remote path must never be resolved against this machine — plan §1,
-`RemoteWorkspace.realpath`), so the only workspace facts the engine reads are the
-root, the far user's home, and the POSIX scratch trio. The stub keeps those in
-PurePosixPath flavor, exactly like `RemoteWorkspace`, and the JS replay builds the
-same thing out of `ui/host/fs.js` (whose `escapePath`/`normJoin`/`home` are the
-port of the Python methods the engine calls).
+The workspace here is a STUB, and deliberately so: the judge reads the root and
+the workspace's own path hooks, never the disk, so the only workspace facts the
+engine reads are the root, the user's home, and the POSIX scratch trio. The stub
+keeps those in PurePosixPath flavor, and the JS replay builds the same thing out
+of `ui/host/fs.js` (whose `escapePath`/`normJoin`/`home` are the port of the
+Python methods the engine calls).
 
 A case is (args_repr, access, arg). `evaluate` records the verdict and the sorted
 escape list; `auto_allow` records what the gate does with the same call when no
@@ -83,6 +82,14 @@ class FarWorkspace(Workspace):
         raise NotImplementedError
 
     def delete(self, path: str) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+    def list(self, path: str) -> list[str]:  # pragma: no cover
+        raise NotImplementedError
+
+    def grep(
+        self, pattern: str, path: str = ".", include: str | None = None
+    ) -> list[tuple[str, int, str]]:  # pragma: no cover
         raise NotImplementedError
 
 

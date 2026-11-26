@@ -485,7 +485,7 @@ async function connectTunnel({ host, user, port, password }, progress) {
     // markers is NOT "nothing is installed there". Reading it that way sent a
     // flaky reconnect into a full reinstall it did not need — and, with the old
     // stop patterns, into a loop it could not leave. Say what actually
-    // happened; the SSH session stays for SSH-tools.
+    // happened.
     if (!probe.os || !probe.home) {
       const why =
         probeOut.code === -1
@@ -493,18 +493,22 @@ async function connectTunnel({ host, user, port, password }, progress) {
           : `the capability probe came back unreadable (exit ${probeOut.code})`;
       tunnelLog("[bootstrap] probe unusable: " + why + " :: " + (probeOut.stdout || "").slice(0, 200));
       state.wasDisconnected = false;
-      return { ok: false, error: why + " — the remote server was left untouched; reconnect." };
+      return failConnect(
+        client,
+        "[bootstrap] probe unusable: " + why,
+        why + " — the remote server was left untouched; reconnect."
+      );
     }
     // "check", not "install": the gate below decides, and installServer
     // announces the install itself when there really is one to do
     if (progress) progress("check");
     const boot = await installServer(probe, { progress });
     if (boot && boot.ok === false) {
-      // hard reject: keep the SSH session for SSH-tools degradation; mark the
-      // tunnel live so an unexpected death fires onEnd
+      // hard reject: nothing of this hop can serve the window, so the wire goes
+      // with the verdict instead of being left open to nobody
       tunnelLog("[bootstrap] rejected: " + boot.error);
       state.wasDisconnected = false;
-      return { ok: false, error: boot.error };
+      return failConnect(client, "[bootstrap] rejected: " + boot.error, boot.error);
     }
     if (progress) progress("forward");
 

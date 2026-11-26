@@ -48,7 +48,7 @@ from agent.config import Config
 from agent.server import build
 from agent.tools import catalog, channel, rendezvous
 from agent.tools.registry import ToolRegistry, build_tools, module_blocked_reason
-from agent.tools.workspace import LocalWorkspace, RemoteWorkspace
+from agent.tools.workspace import LocalWorkspace
 from tests.catalog_test import _declare, _third_party, isolated_host
 from tests.testsupport import check, http_get
 
@@ -498,22 +498,15 @@ def check_the_machine_a_component_serves() -> None:
     `workspace-fs` component this host runs, spoken to the machine the root lives
     on) and a client-side declaration of the SAME subject, reached over a channel
     to another machine (it declares an `entry` and no process here), publish the
-    SAME name. Which of them — if any — the model is offered follows the root's
-    machine:
+    SAME name. The root this host builds is always its own machine's, so the
+    component that runs here is the only one ever offered: the far-side one
+    shares the name, so keeping it would shadow the `read_file` that really works
+    on this machine with one that reads some other machine a tunnel happens to
+    reach.
 
-      * a LOCAL root: the component that runs here, and only it. The far-side one
-        shares the name, so keeping it would shadow the `read_file` that really
-        works on this machine with one that reads some other machine a tunnel
-        happens to reach.
-      * a root on ANOTHER machine: NEITHER of them. That backend has no process
-        on the far side to serve the name, so the HOST declares it itself
-        (tools/host.py `_REMOTE_DECLARATIONS`) and `registry.build_tools` drops
-        a component publishing a name the host already holds, with one
-        non-fatal diagnostic: two wired readings of one name is exactly what the
-        tool constitution forbids.
-
-    Both directions are pinned here, and so are the sentences a call would read
-    when only the wrong component is installed.
+    The other direction — a root on ANOTHER machine, served by the far-side
+    component — went with the ssh workspace: no root lives elsewhere any more, so
+    the far-side declaration is refused on every root there is.
     """
     client = Client()
     with isolated_host() as root:
@@ -537,8 +530,7 @@ def check_the_machine_a_component_serves() -> None:
             # a LOCAL root: the component that runs here, and only it — the
             # far-side declaration of the same name is dropped, not folded over
             # the one that really works here.
-            here = LocalWorkspace(tempfile.mkdtemp(prefix="clutch-c94-"))
-            local_set = build_tools(cfg, workspace=here)
+            local_set = build_tools(cfg)
             check(
                 [t.name for t in local_set].count("read_file") == 1,
                 "a local root is offered ONE read_file, not a same-name pair",
@@ -548,31 +540,12 @@ def check_the_machine_a_component_serves() -> None:
                 "…the local component's, because this is the machine the root names",
             )
             check(
-                "another machine" in module_blocked_reason(here, far),
+                "another machine" in module_blocked_reason(far),
                 "and the far-side component answers for itself if it is asked anyway",
             )
-
-            # a root on ANOTHER machine: the host's own four, and NEITHER
-            # component's — on that backend the component's daemon has nowhere to
-            # run, so the host brings the implementation itself (甲-P1).
-            there = RemoteWorkspace("/srv/proj", "http://127.0.0.1:1/exec")
-            remote_set = build_tools(cfg, workspace=there)
             check(
-                [t.name for t in remote_set].count("read_file") == 1,
-                "an ssh root is offered ONE read_file as well — one name, one reading",
-            )
-            tool = ToolRegistry(remote_set).tool("read_file")
-            check(
-                tool is not None and tool.host is not None and tool.module is None and tool.inst is None,
-                "…and it is the HOST's own declaration, with no component to ask",
-            )
-            check(
-                "another machine's" in module_blocked_reason(there, "clutch-workspace"),
-                "while the local component's call reads why it cannot serve this root",
-            )
-            check(
-                module_blocked_reason(there, far) == "",
-                "and the far-side component has nothing to explain for an ssh root",
+                far not in [t.module for t in local_set],
+                "a client-side filesystem component is never in the surface: no root lives elsewhere",
             )
 
             # The two halves of one axis, and what a component contributes is

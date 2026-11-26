@@ -608,56 +608,26 @@
   "module_blocked": [
     {
       "name": "an unknown component says so",
-      "local": false,
       "unavailable": "unknown component: ghost",
-      "serves_here": false,
       "serves_channel": false,
-      "far_root": true,
       "expect": "unknown component: ghost"
     },
     {
       "name": "not installed on this host",
-      "local": false,
       "unavailable": "clutch-probe is not installed on this host",
-      "serves_here": false,
-      "serves_channel": true,
-      "far_root": true,
+      "serves_channel": false,
       "expect": "clutch-probe is not installed on this host"
     },
     {
-      "name": "drivable here",
-      "local": false,
+      "name": "a client-side component cannot serve this host's root",
       "unavailable": "",
-      "serves_here": false,
       "serves_channel": true,
-      "far_root": true,
-      "expect": ""
-    },
-    {
-      "name": "a process here cannot serve another machine's root",
-      "local": false,
-      "unavailable": "",
-      "serves_here": true,
-      "serves_channel": false,
-      "far_root": false,
-      "expect": "clutch-probe serves the filesystem of the machine this workspace root lives on, and this root is another machine's"
-    },
-    {
-      "name": "a client cannot serve a local root",
-      "local": true,
-      "unavailable": "",
-      "serves_here": false,
-      "serves_channel": true,
-      "far_root": false,
       "expect": "clutch-probe serves the filesystem of another machine over a channel, and this workspace root is a local one"
     },
     {
-      "name": "drivable locally",
-      "local": true,
+      "name": "drivable here",
       "unavailable": "",
-      "serves_here": true,
       "serves_channel": false,
-      "far_root": false,
       "expect": ""
     }
   ],

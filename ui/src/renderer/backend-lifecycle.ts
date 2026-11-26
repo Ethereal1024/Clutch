@@ -1,9 +1,8 @@
-// the backend this window talks to — switching, degrading, healing
+// the backend this window talks to — switching, healing
 //
 // `switchBackend` is the one door API_BASE moves through, and it refuses the
 // supervisor's lifecycle port: that port answers no API, so adopting it (the
-// old "fallback") was a guaranteed "Failed to fetch". Degrade mode re-points a
-// live local session at the remote exec bridge; a remote that goes away is
+// old "fallback") was a guaranteed "Failed to fetch". A remote that goes away is
 // re-attempted (reconciled, re-connected, retried) instead of being replaced by
 // a local backend the phone does not have — and the announcement of that loss,
 // with the one way back from it, belongs to ui/src/renderer/conn-lost.ts (connectionLost).
@@ -13,7 +12,7 @@
 // whose imports are the old page order) into ui/renderer.js, because Electron
 // loads the page over file://, where Chromium refuses module scripts.
 
-import { DEFAULT_BASE, SUPERVISOR_BASE, apiFetch, hostSessionUrl } from "./app";
+import { SUPERVISOR_BASE, hostSessionUrl } from "./app";
 import { IS_ANDROID } from "./env";
 import { refreshPicker } from "./conn-flow";
 import { connLostExitPending, connectionLost } from "./conn-lost";
@@ -66,7 +65,6 @@ export function switchBackend(url) {
 // the host announces a real URL when it has one (backend:base-changed).
 export async function switchBackendResolved() {
   if (!switchBackend(await hostSessionUrl())) return false;
-  await reapplyDegradeIfNeeded();
   return true;
 }
 
@@ -84,78 +82,7 @@ export async function switchBackendActiveSlot() {
   // the visible tab's log is still what this window reads: re-open it on the
   // session that just answered (the pane adopted that scope when the tab opened)
   reconnectSSE();
-  await reapplyDegradeIfNeeded();
   return true;
-}
-
-// degrade mode is a per-process setting that dies with the session: re-apply
-// it whenever the session is (re)claimed
-export async function reapplyDegradeIfNeeded() {
-  const raw = localStorage.getItem("clutch_degrade");
-  if (!raw || !window.clutchTunnel) return;
-  const s = await window.clutchTunnel.status();
-  if (!s.active || !s.execBridge) {
-    // the tunnel is gone: degrade mode is meaningless, drop the marker
-    localStorage.removeItem("clutch_degrade");
-    return;
-  }
-  let bridge = null;
-  try {
-    bridge = JSON.parse(raw).bridge;
-  } catch (e) {
-    localStorage.removeItem("clutch_degrade");
-    return;
-  }
-  try {
-    await apiFetch("/api/backend", {
-      method: "POST",
-      body: { mode: "ssh", bridge, workspace: "~" },
-    });
-  } catch (e) {
-    /* best effort: the next re-apply retries */
-  }
-}
-
-// ---- SSH-tools degradation (host alive but unusable for bootstrap) ----
-// local agent, remote exec bridge; true = degraded, false = tunnel dead
-
-export async function tryDegradeToSshTools() {
-  if (!window.clutchTunnel) return false;
-  const s = await window.clutchTunnel.status();
-  // degradable only while the tunnel is alive (a dead tunnel has no bridge)
-  if (!s.active || !s.execBridge) return false;
-  // resolve the current backend first: the main process may have fallen back
-  // to a fresh local session (the one ask — see app.ts hostSessionUrl)
-  const url = await hostSessionUrl();
-  if (!url) return "not running";
-  try {
-    await apiFetch("/api/backend", {
-      method: "POST",
-      body: { mode: "ssh", bridge: s.execBridge, workspace: "~" },
-      base: url,
-    });
-  } catch (e) {
-    // .status = the backend answered but refused the mode (session gone);
-    // no .status = the request itself failed (backend unreachable)
-    return e.status ? "not running" : "unreachable";
-  }
-  // persist the mode: the session process may be re-created later
-  localStorage.setItem("clutch_degrade", JSON.stringify({ bridge: s.execBridge }));
-  return true;
-}
-
-export async function resetBackendLocal() {
-  // nothing to reset without a resolved base: DEFAULT_BASE is the supervisor
-  // sentinel until this machine's own session is claimed, and the supervisor
-  // does not serve /api/backend — posting there is a guaranteed "Failed to fetch"
-  if (DEFAULT_BASE === SUPERVISOR_BASE) return;
-  try {
-    // DEFAULT_BASE, not API_BASE: this machine's local session answers even
-    // while no window has claimed it yet
-    await apiFetch("/api/backend", { method: "POST", body: { mode: "local" }, base: DEFAULT_BASE });
-  } catch (e) {
-    /* the local server may be down; the renderer still falls back in place */
-  }
 }
 
 // Is the claim the host holds for ONE slot remote (a machine other than this
@@ -269,8 +196,6 @@ export function dropStaleBackend() {
 // re-dialling the host another window was on — was the innocent-window bug.
 if (window.clutchTunnel) {
   window.clutchTunnel.onEnd((info) => {
-    // the tunnel (and its exec bridge) is gone: any degrade mode dies with it
-    localStorage.removeItem("clutch_degrade");
     // the host's verdict for THIS window: false = its session was never on the
     // hop, so there is no lost session here to announce
     if (info && info.lost === false) return;

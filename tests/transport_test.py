@@ -1,18 +1,16 @@
-"""Transport + RemoteWorkspace round-trip check against an inline mock bridge.
+"""Transport checks: the output decoder, and LocalTransport's run/cancel/timeout.
 
 Run: uv run python -m tests.transport_test
 
-The mock bridge speaks the exec-bridge /exec contract (POST -> sh) against a
-temp "remote" root, so the SSH degradation path is exercised without ssh2 or a
-real device: heredoc quoting ($, backticks, quotes), trailing-newline handling,
-cd semantics, ls parsing, protected hiding, append_line, and the SshTransport
-timeout -> TransportError(timeout=True) surface.
+The workspace's commands run on THIS machine through LocalTransport, so what is
+checked here is the surface every tool call goes through: how a child's bytes are
+decoded (the Windows GBK regression), that a plain command answers, and that Stop
+and the deadline both end the wait promptly with TransportError saying which of
+the two it was.
 """
 
 from __future__ import annotations
 
-import os
-import subprocess
 import sys
 import tempfile
 import threading
@@ -20,12 +18,11 @@ import time
 from pathlib import Path
 
 from agent.tools.localshell import local_shell, shq
-from agent.tools.transport import LocalTransport, SshTransport, TransportError
-from agent.tools.workspace import _EXEC_CHUNK_BYTES, LocalWorkspace, RemoteWorkspace
-from tests.testsupport import MockBridge, check, posix_shell_argv, remote_root, start_bridge
+from agent.tools.transport import LocalTransport, TransportError
+from agent.tools.workspace import LocalWorkspace
+from tests.testsupport import check, posix_shell_argv
 
-# the mock "remote" parses commands with a POSIX shell, exactly like the real
-# remote's exec bridge (/bin/sh on POSIX, Git Bash / MSYS2 bash on Windows)
+# the host's POSIX shell (/bin/sh, Git Bash / MSYS2 bash on Windows), or None
 SH = posix_shell_argv()
 
 
@@ -71,149 +68,19 @@ def check_decoding() -> None:
 
 def main() -> int:
     check_decoding()
-    if SH is None:
-        print("SKIP: no POSIX shell on this host (Windows without Git Bash / MSYS2)")
-        print("      the mock remote runs `sh -c` like exec-bridge.js on a real remote;")
-        print("      cmd.exe cannot run heredocs/printf/base64, so this check needs one.")
-        return 0
+
     with tempfile.TemporaryDirectory() as rtmp:
-        srv, bridge = start_bridge()
-
-        # regression (macOS SSH): constructing a RemoteWorkspace must not touch
-        # the LOCAL filesystem — the root lives on the remote host, and macOS
-        # autofs (/home) fails a local mkdir with [Errno 45] ENOTSUP, which
-        # surfaced as "cannot create project: [Errno 45] Operation not
-        # supported: '/home/<user>'".
-        mkdir_calls: list[str] = []
-        real_mkdir = Path.mkdir
-
-        def _rec_mkdir(self, *a, **k):  # pure recorder: no real FS writes
-            mkdir_calls.append(str(self))
-
-        Path.mkdir = _rec_mkdir  # type: ignore[method-assign]
-        try:
-            _ = RemoteWorkspace("/home/remote-user/proj", bridge)
-        finally:
-            Path.mkdir = real_mkdir  # type: ignore[method-assign]
-        check(
-            not any(c.startswith("/home/") for c in mkdir_calls),
-            "RemoteWorkspace construction never mkdirs the remote root locally",
-        )
-
         made = Path(rtmp) / "init-made" / "deep"
         _ = LocalWorkspace(str(made))
-        check(made.is_dir(), "LocalWorkspace still creates its root (behavior kept)")
+        check(made.is_dir(), "LocalWorkspace creates its root")
 
-        ws = RemoteWorkspace(remote_root(rtmp), bridge)
-
-        # heredoc round trip: $, backticks, single/double quotes, tab, newline
-        tricky = "l1\nwith $VAR `bt` 'sq' \"dq\"\n\ttab\tend\n"
-        ws.write("sub/deep/f.txt", tricky)
-        check(ws.read("sub/deep/f.txt") == tricky, "remote write/read byte-identical")
-        check(ws.read("sub/deep/f.txt") == LocalWorkspace(rtmp).read("sub/deep/f.txt"), "matches local bytes")
-
-        # byte-exact writes: printf adds no newline (heredoc's trailing-\n caveat is gone)
-        ws.write("no-nl.txt", "abc")
-        check(ws.read("no-nl.txt") == "abc", "remote write is byte-exact (no added newline)")
-
-        # large content: chunking keeps every exec under the cap, bytes exact
-        big = "".join(f"line {i:04d} with $VAR and 'quotes' and \"dquotes\" and \ttab\t\n" for i in range(300))  # ~21KB
-        ws.write("big.txt", big)
-        check(ws.read("big.txt") == big, "large remote write byte-exact (chunked)")
-
-        # the .clc case: one huge single-line event (JSONL) appends without a newline split
-        event = '{"type": "tool_result", "content": "' + ("x" * 24000) + '"}'
-        ws.append_line("session.clc", event)
-        check(
-            LocalWorkspace(rtmp).read("session.clc") == event + "\n",
-            "large single-line append byte-exact (chunked, one trailing newline)",
-        )
-        # every exec command stays well under the sshd's ~8KB drop threshold
-        check(
-            MockBridge.max_cmd_len <= _EXEC_CHUNK_BYTES + 200,
-            f"exec commands chunked under the cap (max {MockBridge.max_cmd_len} bytes)",
-        )
-
-        # ls parsing + cd semantics + protected hiding + error mapping
-        entries = ws.list_many(["."])["."]
-        check("sub/" in entries and "no-nl.txt" in entries, "remote listing marks dirs with '/'")
-        try:
-            ws.read("missing.txt")
-            check(False, "remote read raises FileNotFoundError")
-        except FileNotFoundError:
-            check(True, "remote read raises FileNotFoundError")
-        r = ws.run("pwd", 30.0)
-        check(r.code == 0 and r.stdout.strip() == str(ws.root), "remote run cwd = root")
-
-        # oversized run_command: rejected up front, never reaches the bridge
-        try:
-            ws.run("echo " + ("x" * 20000), 30.0)
-            check(False, "oversized command raises TransportError")
-        except TransportError:
-            check(True, "oversized command raises TransportError before exec")
-        check(
-            MockBridge.max_cmd_len <= _EXEC_CHUNK_BYTES + 200,
-            f"rejected command never reached the bridge (max {MockBridge.max_cmd_len} bytes)",
-        )
-        ws.protect(Path(str(ws.root)) / "sub" / "secret.txt")
-        ws.write("sub/secret.txt", "x")
-        check("secret.txt" not in ws.list_many(["sub"])["sub"], "remote listing hides protected files")
-
-        # list_many: one exec lists a level; hidden entries not pre-filtered
-        (Path(rtmp) / "a").mkdir()
-        (Path(rtmp) / "a" / "inner").mkdir()
-        (Path(rtmp) / "b").mkdir()
-        (Path(rtmp) / "b" / "f.txt").write_text("x")
-        MockBridge.post_count = 0
-        many = ws.list_many([".", "a", "b", "missing", "no-nl.txt"])
-        check(
-            MockBridge.post_count == 1,
-            f"list_many batches the whole level into one exec (got {MockBridge.post_count})",
-        )
-        check(
-            {"sub/", "no-nl.txt", "a/", "b/"} <= set(many["."])
-            and many["a"] == ["inner/"]
-            and many["b"] == ["f.txt"],
-            "list_many lists each named dir, dirs marked with '/'",
-        )
-        check(
-            many["missing"] == [] and many["no-nl.txt"] == [],
-            "list_many maps a missing or non-dir path to []",
-        )
-        check(MockBridge.max_cmd_len <= _EXEC_CHUNK_BYTES + 200, "list_many command stays under the exec cap")
-
-        # append_line -> quoted heredoc >>, round trips special chars too
-        ws.append_line("log.txt", '{"a": "$x"}')
-        ws.append_line("log.txt", "second")
-        check(ws.read("log.txt") == '{"a": "$x"}\nsecond\n', "remote append_line")
-
-        # A session rooted on another machine is served the file tools by the
-        # HOST, over this very workspace (tools/host.py `_REMOTE_DECLARATIONS`,
-        # tools/filesystem.py: cat / ls / find|xargs grep / printf). The full
-        # suite for those four is tests/remote_filesystem_test.py; the point
-        # here is only that the wiring follows the ROOT — the tool list a run
-        # built with this workspace gets is the one that can actually answer.
-        from agent.config import Config
-        from agent.tools.registry import ToolRegistry, build_tools
-
-        cfg = Config()
-        reg = ToolRegistry(build_tools(cfg, workspace=ws))
-        got = reg.execute(ws, cfg, "read_file", {"path": "log.txt"})
-        check(
-            not got.error and got.content == '{"a": "$x"}\nsecond\n',
-            "a remote root is served read_file by the host, over the bridge",
-        )
-
-        # SshTransport surfaces a remote timeout as TransportError(timeout=True)
-        try:
-            SshTransport(bridge).run("sleep 5", 1.0)
-            check(False, "remote timeout raises TransportError")
-        except TransportError as e:
-            check(e.timeout, "remote timeout -> TransportError(timeout=True)")
+        if SH is None:
+            print("SKIP: no POSIX shell on this host (Windows without Git Bash / MSYS2)")
+            print("      the cancel/timeout checks run a real `sleep`, so they need one.")
+            print("\nall passed")
+            return 0
 
         # ---- Stop during a command: the cancel event kills the wait promptly ----
-        import time as _time
-
         lt = LocalTransport(rtmp)
 
         # baseline: the rewritten path still runs plain commands
@@ -232,42 +99,25 @@ def main() -> int:
         late = Path(rtmp) / "late.txt"
         cancel = threading.Event()
         threading.Timer(0.7, cancel.set).start()
-        t0 = _time.monotonic()
+        t0 = time.monotonic()
         try:
-            lt.run(f"sleep 120 && touch {shq(remote_root(str(late)))}", 300.0, cancel=cancel)
+            lt.run(f"sleep 120 && touch {shq(str(late))}", 300.0, cancel=cancel)
             check(False, "cancelled local command raises TransportError")
         except TransportError as e:
-            elapsed = _time.monotonic() - t0
+            elapsed = time.monotonic() - t0
             check(e.aborted and not e.timeout, f"local cancel -> TransportError(aborted=True) (timeout={e.timeout})")
             check(elapsed < 10, f"local cancel aborts promptly (took {elapsed:.1f}s)")
         time.sleep(1.0)  # a survivor would write its marker within this window
         check(not late.exists(), "the killed tree never ran its tail (no late writes)")
 
         # the deadline path still surfaces as TransportError(timeout=True)
-        t0 = _time.monotonic()
+        t0 = time.monotonic()
         try:
             lt.run("sleep 120", 1.0)
             check(False, "local timeout raises TransportError")
         except TransportError as e:
             check(e.timeout and not e.aborted, "local deadline -> TransportError(timeout=True)")
-            check(_time.monotonic() - t0 < 10, "local timeout is prompt")
-
-        # Stop on the remote path: the agent's WAIT ends promptly (the bridge's
-        # own short deadline below reaps the abandoned remote exec)
-        cancel = threading.Event()
-        threading.Timer(0.7, cancel.set).start()
-        t0 = _time.monotonic()
-        try:
-            SshTransport(bridge).run("sleep 30", 2.0, cancel=cancel)
-            check(False, "cancelled remote exec raises TransportError")
-        except TransportError as e:
-            check(e.aborted and not e.timeout, "remote cancel -> TransportError(aborted=True)")
-            check(
-                _time.monotonic() - t0 < 10,
-                f"remote cancel abandons the wait promptly (took {_time.monotonic() - t0:.1f}s)",
-            )
-
-        srv.shutdown()
+            check(time.monotonic() - t0 < 10, "local timeout is prompt")
 
     print("\nall passed")
     return 0

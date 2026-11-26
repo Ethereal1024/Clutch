@@ -1,9 +1,9 @@
 """File browsing for the HTTP API: the project-picker directory listing, the
-workspace tree, and the picker's one write action (new folder), over both
-transports (local iterdir / SSH remote `ls`).
+workspace tree, and the picker's one write action (new folder), against the
+host's own filesystem.
 
 The JSON shapes here are the UI's interface contract and are built in exactly
-one place per shape, so the local and remote implementations cannot drift:
+one place per shape, so the surfaces cannot drift:
 
   dir listing   {path, parent, entries: [{name, path, dir, link}], error}
   stat result   {path, type: "dir"|"file"|"none", error}
@@ -20,20 +20,13 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .base import RunState
-from .tools.localshell import shq
-from .tools.transport import SshTransport
-from .tools.workspace import RemoteWorkspace, Workspace, parse_ls_entries
-
-# per-exec timeout for remote directory browsing (one ls / echo $HOME over the bridge)
-_FS_LIST_TIMEOUT = 30.0
-
+from .tools.workspace import Workspace
 
 # ---- shared response contract ----
 
 
 def dir_payload(path: str, parent: str | None, entries: list[dict[str, Any]]) -> dict[str, Any]:
-    """The one directory-listing envelope both transports return."""
+    """The one directory-listing envelope the browsers return."""
     return {"path": path, "parent": parent, "entries": entries, "error": None}
 
 
@@ -44,8 +37,8 @@ def dir_error(message: str) -> dict[str, Any]:
 
 def entry_visible(name: str, is_dir: bool, show_hidden: bool) -> bool:
     """The one hidden-item policy for every browser surface (the picker's
-    /api/fs/list and the workspace tree, both transports): with the toggle off
-    NOTHING dot-prefixed is listed — file or directory. The old split (dot-dirs
+    /api/fs/list and the workspace tree): with the toggle off NOTHING
+    dot-prefixed is listed — file or directory. The old split (dot-dirs
     stayed in the picker so ~/.config could be clicked into) read as "the
     toggle does nothing"; a hidden directory is reached through the path input
     instead, and its non-dot children list normally once inside."""
@@ -55,15 +48,12 @@ def entry_visible(name: str, is_dir: bool, show_hidden: bool) -> bool:
 # ---- project-picker directory listing (/api/fs/list) ----
 
 
-def fs_list(state: RunState, raw: str, show_hidden: bool) -> dict[str, Any]:
+def fs_list(raw: str, show_hidden: bool) -> dict[str, Any]:
     """Server-side directory browser (the UI picks projects from here).
 
-    One level, starts at the server user's home (or the SSH remote's home in
-    degradation mode). Reachable only via the local bind or the SSH tunnel, so
-    no auth is needed.
+    One level, starts at the server user's home. Reachable only via the local
+    bind or the SSH tunnel, so no auth is needed.
     """
-    if state.backend_mode == "ssh" and state.bridge_url:
-        return _fs_list_remote(state, raw, show_hidden)
     return _fs_list_local(raw, show_hidden)
 
 
@@ -76,20 +66,6 @@ def _local_dir(raw: str) -> Path:
             p = Path.home() / p
         return p.resolve()
     return Path.home().resolve()
-
-
-def _remote_dir(state: RunState, transport: SshTransport, raw: str) -> str:
-    """The remote directory a picker request names: empty = the browse root,
-    relative = under it, `~` expanded by the remote's own shell (one echo)."""
-    base = state.remote_root or "~"
-    if raw:
-        target = raw if raw.startswith("/") else base.rstrip("/") + "/" + raw
-    else:
-        target = base
-    if target == "~" or target.startswith("~/"):
-        home = transport.run("echo $HOME", _FS_LIST_TIMEOUT).stdout.strip() or base
-        target = home if target == "~" else home + target[1:]
-    return target
 
 
 def _fs_list_local(raw: str, show_hidden: bool) -> dict[str, Any]:
@@ -117,33 +93,11 @@ def _fs_list_local(raw: str, show_hidden: bool) -> dict[str, Any]:
     return dir_payload(str(root), parent, entries)
 
 
-def _fs_list_remote(state: RunState, raw: str, show_hidden: bool) -> dict[str, Any]:
-    """One-level remote directory listing via a single ls exec over the bridge."""
-    transport = SshTransport(state.bridge_url)
-    target = _remote_dir(state, transport, raw)
-    r = transport.run(f"ls -1AF {shq(target)}", _FS_LIST_TIMEOUT)
-    if r.code != 0:
-        return dir_error(f"not a directory: {target}")
-    entries = [
-        {
-            "name": name,
-            "path": target.rstrip("/") + "/" + name,
-            "dir": is_dir,
-            # link targets need an extra readlink exec per symlink; skip (P2 MVP)
-            "link": None,
-        }
-        for name, is_dir in parse_ls_entries(r.stdout)
-        if entry_visible(name, is_dir, show_hidden)
-    ]
-    parent = target.rsplit("/", 1)[0] if target != "/" else None
-    return dir_payload(target, parent, entries)
-
-
 # ---- the path bar's one question (/api/fs/stat) ----
 
 
 def stat_payload(path: str, kind: str) -> dict[str, Any]:
-    """The one stat envelope both transports return.
+    """The one stat envelope.
 
     `type` is the whole answer the picker routes on, and it has exactly three
     values — the same three the JS host answers (ui/host/fs.js `fsStat`): a
@@ -154,7 +108,7 @@ def stat_payload(path: str, kind: str) -> dict[str, Any]:
     return {"path": path, "type": kind if kind in ("dir", "file") else "none", "error": None}
 
 
-def fs_stat(state: RunState, raw: str) -> dict[str, Any]:
+def fs_stat(raw: str) -> dict[str, Any]:
     """What is at this path: a directory, a regular file, or nothing yet?
 
     The address bar is the picker's single surface (navigate / open / create), so
@@ -164,8 +118,6 @@ def fs_stat(state: RunState, raw: str) -> dict[str, Any]:
     such route" — which is exactly how typing a new filename came back as
     "could not check path: not found" and no file could be created.
     """
-    if state.backend_mode == "ssh" and state.bridge_url:
-        return _fs_stat_remote(state, raw)
     return _fs_stat_local(raw)
 
 
@@ -181,19 +133,6 @@ def _fs_stat_local(raw: str) -> dict[str, Any]:
     return stat_payload(str(target), "none")
 
 
-def _fs_stat_remote(state: RunState, raw: str) -> dict[str, Any]:
-    """One `test` pipeline over the bridge, so a stat is a single exec."""
-    transport = SshTransport(state.bridge_url)
-    target = _remote_dir(state, transport, raw)
-    command = (
-        f"if test -d {shq(target)}; then echo dir; "
-        f"elif test -f {shq(target)}; then echo file; else echo none; fi"
-    )
-    r = transport.run(command, _FS_LIST_TIMEOUT)
-    kind = r.stdout.strip() if r.code == 0 else "none"
-    return stat_payload(target, kind)
-
-
 # ---- the picker's write side: one folder ----
 
 
@@ -202,8 +141,8 @@ def valid_name(name: str) -> str | None:
 
     One policy for the picker's create row and /api/fs/mkdir, so what the UI
     accepts is exactly what the server accepts: one path segment, no separator,
-    no control character (a newline would end an `ls -1` line early and split
-    one remote entry into two), and neither "." nor ".." — those name
+    no control character (a newline would end a listing line early and split
+    one entry into two), and neither "." nor ".." — those name
     directories, not new entries.
     """
     if not name.strip():
@@ -216,7 +155,7 @@ def valid_name(name: str) -> str | None:
     return None
 
 
-def fs_mkdir(state: RunState, raw_dir: str, name: str) -> dict[str, Any]:
+def fs_mkdir(raw_dir: str, name: str) -> dict[str, Any]:
     """Create ONE folder inside `raw_dir` — the picker's "+ Folder" row.
 
     mkdir(parents=False) is the point, not an accident: the browser names a
@@ -227,8 +166,6 @@ def fs_mkdir(state: RunState, raw_dir: str, name: str) -> dict[str, Any]:
     reason = valid_name(name)
     if reason is not None:
         return {"path": None, "error": reason}
-    if state.backend_mode == "ssh" and state.bridge_url:
-        return _fs_mkdir_remote(state, raw_dir, name)
     return _fs_mkdir_local(raw_dir, name)
 
 
@@ -246,28 +183,12 @@ def _fs_mkdir_local(raw_dir: str, name: str) -> dict[str, Any]:
     return {"path": str(target), "error": None}
 
 
-def _fs_mkdir_remote(state: RunState, raw_dir: str, name: str) -> dict[str, Any]:
-    transport = SshTransport(state.bridge_url)
-    target = _remote_dir(state, transport, raw_dir).rstrip("/") + "/" + name
-    r = transport.run(f"mkdir {shq(target)}", _FS_LIST_TIMEOUT)
-    if r.code != 0:
-        # busybox/GNU/BSD all say "File exists" for the one case the UI words
-        # itself; anything else is the remote's own sentence, passed through
-        msg = (r.stderr or r.stdout or "").strip()
-        if "exists" in msg.lower():
-            return {"path": target, "error": f"already exists: {name}"}
-        return {"path": target, "error": msg.splitlines()[-1] if msg else "cannot create folder"}
-    return {"path": target, "error": None}
-
-
 # ---- workspace tree (/api/workspace/tree) ----
 
 
 def tree(ws: Workspace, expanded: list[str], show_hidden: bool) -> list:
-    """Dispatch by transport; both walks list exactly what the panel shows: the
-    root, plus every directory the reader has expanded. Nothing else is read."""
-    if isinstance(ws, RemoteWorkspace):
-        return _walk_remote(ws, expanded, show_hidden)
+    """The walk lists exactly what the panel shows: the root, plus every
+    directory the reader has expanded. Nothing else is read."""
     return _walk(ws.root, ws, expanded, show_hidden)
 
 
@@ -283,75 +204,11 @@ def _should_list(child_rel: str, expanded: set[str]) -> bool:
     There used to be a one-level lookahead on top of this (`rel in expanded` and
     `rel == ""`), so every refresh listed the contents of every top-level dir and
     of every expanded one. That is what made the walk expensive: a panel showing
-    27 rows shipped 341 entries, and on a remote workspace each extra level was
-    another SSH round trip on the way to a tree the user was not looking at.
-    The children of a dir the reader opens arrive on the next walk, which the
-    toggle asks for immediately (workspace-panel.ts: scheduleTreeRefresh(0))."""
+    27 rows shipped 341 entries, every extra level read on the way to a tree the
+    user was not looking at. The children of a dir the reader opens arrive on the
+    next walk, which the toggle asks for immediately (workspace-panel.ts:
+    scheduleTreeRefresh(0))."""
     return child_rel in expanded
-
-
-def _expanded_dirs(expanded: list[str]) -> list[str]:
-    """The directories one walk lists, root first: "" plus the expanded paths that
-    are plain relative paths *under an expanded parent*.
-
-    The UI sends the dirs it has open, relative to the root. A path that is
-    absolute, climbs out with "..", or sits under a dir the panel is not showing
-    is dropped: the tree only hangs a listing under a parent node it discovered,
-    so such a path could never be rendered — and the remote walk would otherwise
-    hand it to `ls`."""
-    wanted = set()
-    for raw in expanded:
-        text = str(raw).replace("\\", "/").strip()
-        # absolute (or a Windows drive spelling): never a path under the root
-        if not text or text.startswith("/") or ":" in text.split("/", 1)[0]:
-            continue
-        parts = [p for p in text.split("/") if p not in ("", ".")]
-        if not parts or ".." in parts:
-            continue
-        wanted.add("/".join(parts))
-    out = [""]
-    # shallow first: a parent's node exists before its children are attached
-    for rel in sorted(wanted, key=lambda r: (r.count("/"), r)):
-        parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
-        if parent == "" or parent in wanted:
-            out.append(rel)
-    return out
-
-
-def _walk_remote(ws: Workspace, expanded: list[str], show_hidden: bool) -> list:
-    """Remote counterpart of _walk: the same partial walk, but the directories to
-    list are known BEFORE the first exec — the root plus the expanded dirs — so
-    `list_many` does the whole tree in ONE round trip instead of one per level.
-
-    That chain was the cost. A remote exec on the tunnel measures 0.3–0.9 s
-    (median 387 ms over 8k execs), and the old walk could not even build the
-    level-2 command until level 1's names came back, so a three-level tree was
-    three of those back to back. Now a tree is one, and a wider expansion only
-    splits when the command outgrows the sshd's limit."""
-    dirs = _expanded_dirs(expanded)
-    listed = ws.list_many(dirs)  # one SSH round trip
-    children: dict[str, list[dict[str, Any]]] = {}
-    by_path: dict[str, dict[str, Any]] = {}
-    for rel in dirs:  # depth order: the parent node exists when its children attach
-        out: list[dict[str, Any]] = []
-        for name, is_dir in parse_ls_entries("\n".join(listed.get(rel, []))):
-            if not show_hidden and name.startswith("."):
-                continue
-            child_rel = name if rel == "" else f"{rel}/{name}"
-            node = _tree_node(name, child_rel, is_dir)
-            out.append(node)
-            if is_dir:
-                by_path[child_rel] = node
-        children[rel] = out
-
-    # attach each listed level under its parent dir node
-    for rel, out in children.items():
-        if rel == "":
-            continue
-        parent = by_path.get(rel)
-        if parent is not None:
-            parent["children"] = out
-    return children[""]
 
 
 def _walk(root: Path, workspace: Workspace, expanded: list[str], show_hidden: bool) -> list:

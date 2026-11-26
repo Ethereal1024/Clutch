@@ -110,8 +110,6 @@ class RoutingMixin:
             self._fs_mkdir()
         elif parsed.path == "/api/workspace/rollback":
             self._workspace_rollback()
-        elif parsed.path == "/api/backend":
-            self._backend()
         elif parsed.path == "/api/channel":
             self._channel_post()
         else:

@@ -406,7 +406,7 @@ function createHostCore(deps) {
 
     if (!ex.capabilities().supervisor) {
       // The endpoint exists and cannot serve a claim: a hop that is up but between
-      // forwards, a far host that takes commands but runs no session. Nothing is
+      // forwards, or a far host whose server is not answering. Nothing is
       // retired for that — the session the slot may still hold out there is not
       // provably gone, and the next hop is the answer for it.
       if (pinned || ex.remote) {
@@ -447,9 +447,9 @@ function createHostCore(deps) {
         log(`[backend] slot ${key} is on a machine and no tunnel session could be started; not claiming a local session`);
         return null;
       }
-      // The slot named no machine, so this machine is the honest fallback: the
-      // SSH-tools degradation is a far host that takes commands but runs no
-      // session, and a window that cannot work THERE can still work here.
+      // The slot named no machine, so this machine is the honest fallback: a
+      // window that named no host has no host to fail on, and one that cannot
+      // work there can still work here.
       const local = executors.isLocal(ex.id) ? null : executors.get(LOCAL_ID);
       if (!local || !local.capabilities().supervisor) {
         log(`[backend] slot ${key} session failed: ${attempt.error}`);

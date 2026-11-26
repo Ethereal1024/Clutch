@@ -69,7 +69,6 @@ from agent.config import Config
 from agent.tools import catalog, channel, inst, prompt, registry, rendezvous, statement
 from agent.tools.envelope import Envelope
 from agent.tools.transport import CommandResult, TransportError
-from agent.tools.workspace import LocalWorkspace
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "fixtures" / "statement" / "expected.json"
@@ -527,50 +526,36 @@ def capture_client_run() -> list:
     return out
 
 
-# `prompt.module_blocked_reason` asks `isinstance(workspace, LocalWorkspace)`, so
-# the "local" cases need a workspace that really is one — without its __init__,
-# which would create a directory on this machine.
-class FakeLocal(LocalWorkspace):  # noqa: D401 -- a LocalWorkspace with no disk
-    def __init__(self) -> None:  # noqa: D107
-        self.root = PurePosixPath(ROOT)
-
-
 def capture_module_blocked() -> list:
+    """The three clauses of `prompt.module_blocked_reason`, one case each.
+
+    The workspace is not a dimension any more: this host builds a local root for
+    every project, so only the component's own answers decide.
+    """
     cases = [
         ("an unknown component says so",
-         {"local": False, "unavailable": "unknown component: ghost", "serves_here": False,
-          "serves_channel": False}, True),
+         {"unavailable": "unknown component: ghost", "serves_channel": False}),
         ("not installed on this host",
-         {"local": False, "unavailable": "clutch-probe is not installed on this host", "serves_here": False,
-          "serves_channel": True}, True),
+         {"unavailable": "clutch-probe is not installed on this host", "serves_channel": False}),
+        ("a client-side component cannot serve this host's root",
+         {"unavailable": "", "serves_channel": True}),
         ("drivable here",
-         {"local": False, "unavailable": "", "serves_here": False, "serves_channel": True}, True),
-        ("a process here cannot serve another machine's root",
-         {"local": False, "unavailable": "", "serves_here": True, "serves_channel": False}, False),
-        ("a client cannot serve a local root",
-         {"local": True, "unavailable": "", "serves_here": False, "serves_channel": True}, False),
-        ("drivable locally",
-         {"local": True, "unavailable": "", "serves_here": True, "serves_channel": False}, False),
+         {"unavailable": "", "serves_channel": False}),
     ]
     out = []
-    for name, fields, far_root in cases:
-        workspace = FakeLocal() if fields["local"] else FarWorkspace()
+    for name, fields in cases:
         with patched(
             rendezvous,
             unavailable_reason=lambda _name, _f=fields: _f["unavailable"],
-            # `serves_here` is `serves_workspace_fs`: this host starts the
-            # component's own process, so only a root on this machine can be served.
             # `serves_channel` is `serves_remote_workspace_fs`: the component's
-            # process is the CLIENT's, so the root has to be somewhere else.
-            serves_workspace_fs=lambda _name, _f=fields: _f["serves_here"],
+            # process is the CLIENT's, so no root this host builds is its subject.
             serves_remote_workspace_fs=lambda _name, _f=fields: _f["serves_channel"],
         ):
-            reason = prompt.module_blocked_reason(workspace, "clutch-probe")
+            reason = prompt.module_blocked_reason("clutch-probe")
         out.append(
             {
                 "name": name,
                 **fields,
-                "far_root": far_root,
                 "expect": reason,
             }
         )
@@ -654,7 +639,7 @@ def run_execute_case(case: dict, artifact, cfg) -> dict:
     tools = registry.ToolRegistry([tool])
     with patched(
         registry,
-        module_blocked_reason=lambda _ws, _name, _blocked=case.get("blocked", ""): _blocked,
+        module_blocked_reason=lambda _name, _blocked=case.get("blocked", ""): _blocked,
     ), patched(
         catalog,
         table=table_of(component),
