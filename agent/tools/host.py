@@ -14,7 +14,9 @@ of them is here for a reason a component could not be:
     is to poll, which spends a model call per look. A component could not declare
     it: a statement is run with the same command budget (that is the number the
     registry hands `Statement.execute`), so a declaration promising a longer wait
-    would be a promise its own runner would break. The clock is the host's.
+    would be a promise its own runner would break. The clock is the call's: the
+    model must say how long it waits (`timeout`, required, ceilinged at six
+    hours), and the deadline it gave is the one that wakes it.
   * `grep_memory` / `read_memory` — the readers of the project's own log (recall.py).
     The file they read is the one file this host writes, protects, and already
     holds open: the loop appends to its bytes, and reading it back means using the
@@ -124,10 +126,16 @@ _DECLARATIONS: tuple[Declaration, ...] = (
                     "command": {
                         "type": "string",
                         "description": "shell command string to run; the loop waits for it to finish "
-                        "(up to six hours) instead of the command tool's short budget",
+                        "instead of the command tool's short budget",
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "required: how many seconds the loop waits for the command, "
+                        "counted from the call. At that deadline the command is killed and you are "
+                        "woken with a trigger timeout (at most 21600 — six hours)",
                     },
                 },
-                "required": ["command"],
+                "required": ["command", "timeout"],
             },
             "access": "command",
             "ui": {"preview": "command", "summary": "trigger {command}"},

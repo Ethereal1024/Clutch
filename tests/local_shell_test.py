@@ -7,7 +7,7 @@ host's POSIX sh / a detected Git Bash / cmd.exe). These tests PIN that decision
   - split_command                    tokenizer flavor (backslash + quoting rules)
   - LocalTransport.run               spawn shape (argv vs shell=True, utf-8 decode)
   - shell.run_command/_blocked_reason  unparseable-command guard + REPL lexer
-  - shell.run_trigger                the same guards under a longer clock
+  - shell.run_trigger                the same guards, on the clock the call gives
   - PermissionEvaluator.escaped_paths  flavor comes from the WORKSPACE, which is
                                      the host's own shell decision
   - supervisor._SafeStdStream        the no-fcntl (Windows) stdio degradation
@@ -121,13 +121,16 @@ def test_run_command_guard() -> None:
 
 
 def test_trigger_deadline() -> None:
-    # ---- 4b. trigger: every guard, and a clock of its own ----
+    # ---- 4b. trigger: every guard, and a clock the CALL sets ----
     #
     # The one difference between run_command and trigger is the deadline: the
     # session's command_timeout is a budget for a command that should be short,
     # and trigger exists for the command whose LENGTH is the point (a build, a
     # clone, a suite). So the same line has to fail under the first and pass
-    # under the second, with nothing else changed.
+    # under the second, with nothing else changed. What trigger must not do is
+    # pick its own clock: `timeout` is the wait, and a call without one (or with
+    # one that is not a usable length of time) is refused by name — never
+    # answered with a guess, and never clamped to the ceiling.
     reset_cache(POSIX)
     with tempfile.TemporaryDirectory() as tmp:
         ws = LocalWorkspace(tmp)
@@ -135,11 +138,44 @@ def test_trigger_deadline() -> None:
         slow = "sleep 1; echo done"
         r = shell_mod.run_command(ws, cfg, slow)
         check(bool(r.error) and "timed out" in r.content, "run_command: the session's budget is the deadline")
-        t = shell_mod.run_trigger(ws, cfg, slow)
+
+        missing = shell_mod.run_trigger(ws, cfg, slow)
+        check(
+            bool(missing.error) and "trigger needs a timeout" in missing.content,
+            "trigger: a call with no timeout is refused, and the answer names the argument",
+        )
+        for bad, why in (
+            (0, "zero"),
+            (-5, "a negative"),
+            (float("nan"), "NaN"),
+            (shell_mod.TRIGGER_TIMEOUT_S + 1, "an ask above the ceiling"),
+            ("600", "a string, at the boundary where a number belongs"),
+        ):
+            refusal = shell_mod.run_trigger(ws, cfg, slow, bad)
+            check(
+                bool(refusal.error) and "trigger needs a timeout" in refusal.content,
+                f"trigger: {why} is refused, not replaced with a deadline of our choosing",
+            )
+
+        t = shell_mod.run_trigger(ws, cfg, slow, 10)
         check(not t.error and "done" in t.content, "trigger: the same command outlives command_timeout")
         check(
             shell_mod.TRIGGER_TIMEOUT_S >= 3600,
-            "and trigger's own deadline is measured in hours, not the session's seconds",
+            "and trigger's ceiling is measured in hours, not the session's seconds",
+        )
+
+        # the deadline the call gave is the one that wakes the loop: the command
+        # is killed there, and the answer is a TRIGGER timeout — not the
+        # command's own verdict, and not the session's budget in other words
+        killed = shell_mod.run_trigger(ws, cfg, "sleep 30; echo late", 1)
+        check(
+            bool(killed.error) and "trigger timed out" in killed.content,
+            "trigger: the call's own timeout ends the wait",
+        )
+        check("1s" in killed.content, "and the wake-up says which deadline it was")
+        check(
+            "command timed out" not in killed.content,
+            "in trigger's words, not the command budget's",
         )
 
 

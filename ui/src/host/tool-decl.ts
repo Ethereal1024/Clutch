@@ -116,18 +116,25 @@ const HOST_DECLARATIONS: any[] = [
   {
     // The same command text, waited on: `host: true` like run_command, because
     // the execution layer is what runs it (agent/tools/shell.py:run_trigger) —
-    // it is host code with a longer clock, not a client-side tool.
+    // it is host code with a clock the CALL sets, not a client-side tool.
     name: "trigger",
     parameters: {
       properties: {
         command: {
           type: "string",
           description:
-            "shell command string to run; the loop waits for it to finish (up to six hours) " +
+            "shell command string to run; the loop waits for it to finish " +
             "instead of the command tool's short budget",
         },
+        timeout: {
+          type: "number",
+          description:
+            "required: how many seconds the loop waits for the command, counted from the call. " +
+            "At that deadline the command is killed and you are woken with a trigger timeout " +
+            "(at most 21600 — six hours)",
+        },
       },
-      required: ["command"],
+      required: ["command", "timeout"],
     },
     access: "command",
     ui: { preview: "command", summary: "trigger {command}" },

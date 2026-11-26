@@ -49,13 +49,20 @@ class TransportError(RuntimeError):
         self.aborted = aborted
 
 
-def failure_envelope(err: TransportError, *, timeout_seconds: float) -> Envelope:
+def failure_envelope(
+    err: TransportError, *, timeout_seconds: float, template: str = "errors/command_timeout.md"
+) -> Envelope:
     """One rendering of a transport failure as the model's envelope.
 
     A transport verdict is not the command's: an abort is the user's Stop, a
     timeout is the budget, anything else means the command never ran. Every
     caller that turns one into a tool result (run_command, the statement layer)
     asks here, so the model reads the same prose wherever the command came from.
+
+    ``template`` is the caller's own wording of a timeout. The command budget is
+    the session's and the same sentence fits every tool whose deadline is that
+    number; a deadline the CALL asked for (trigger's) expires on the model's own
+    instruction, so it says so in its own words instead of blaming a budget.
     """
     from ..prompts import render  # local: the transport stays a leaf module
 
@@ -64,8 +71,11 @@ def failure_envelope(err: TransportError, *, timeout_seconds: float) -> Envelope
     if err.timeout:
         return Envelope(
             render(
-                "errors/command_timeout.md",
-                seconds=f"{timeout_seconds:.0f}s",
+                template,
+                # whole seconds stay whole; a fractional deadline (a test's
+                # half-second, a caller's 0.5) keeps its fraction instead of
+                # being reported as "0s"
+                seconds=f"{timeout_seconds:g}s",
                 hint=render("errors/interactive_hint.md"),
             ),
             error=True,

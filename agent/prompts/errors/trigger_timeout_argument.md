@@ -1,0 +1,1 @@
+ERROR: trigger needs a timeout: $detail. `timeout` is how many seconds the loop waits for this command, counted from the call; when it passes the command is killed and you are woken with a trigger timeout. It must be a number above 0 and at most $ceiling, and there is no default: give the longest the command may legitimately take, and this is what the wait is.

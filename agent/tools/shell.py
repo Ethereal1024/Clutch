@@ -207,19 +207,23 @@ def classify_command(command: str, posix: bool = True) -> tuple[str, str]:
     return "unknown", f"'{name}' cannot be proven read-only"
 
 
-# How long `trigger` waits for the command it was given, in seconds.
+# The ceiling on a `trigger` call's own deadline, in seconds.
 #
 # `run_command` is bounded by config.command_timeout (30 s by default) because it
 # is the loop's look-around tool: a command that outlives that budget is a
 # command the model should have started differently. `trigger` exists for the
 # opposite case — a build, a training run, a test suite whose length IS the
-# point — so the budget has to be the command's own, not the loop's.
+# point — so the deadline has to be the command's own, not the loop's; it is the
+# call's `timeout` argument, required, and this constant is only the ceiling
+# that argument may not pass.
 #
-# Not "unbounded", for three reasons that are all mechanical: the transport
-# computes a deadline (workspace.run), the remote one sends it in milliseconds
-# (int(timeout * 1000), so inf would raise), and a session must never be wedged
-# forever by a command that never ends. Six hours is a long build and a short
-# eternity; Stop is the way out of a real hang, and this is the backstop.
+# A ceiling rather than "unbounded", for three reasons that are all mechanical:
+# the transport computes a deadline (workspace.run), the remote one sends it in
+# milliseconds (int(timeout * 1000), so inf would raise), and a session must
+# never be wedged forever by a command that never ends. Six hours is a long build
+# and a short eternity; Stop is the way out of a real hang, and this is the
+# backstop. An ask above it is REFUSED, never clamped: a deadline that differs
+# from the one the model asked for is the whole bug this constant guards against.
 TRIGGER_TIMEOUT_S = 6 * 60 * 60.0
 
 
@@ -228,17 +232,70 @@ def run_command(workspace: Workspace, config: Config, command: str, cancel: thre
     return _run(workspace, config, command, config.command_timeout, cancel=cancel)
 
 
-def run_trigger(workspace: Workspace, config: Config, command: str, cancel: threading.Event | None = None) -> Envelope:
-    """`run_command` with a deadline for a command whose length is the point.
+def run_trigger(
+    workspace: Workspace,
+    config: Config,
+    command: str,
+    timeout: float | None = None,
+    cancel: threading.Event | None = None,
+) -> Envelope:
+    """`run_command` with the caller's own deadline for a command whose length is the point.
 
     Every guard is shared — the interactive-command block, chat mode's
     read-only classifier, the escape/protected-path check, the python syntax
     pre-check, Stop — because a trigger is a command this layer runs, judged by
-    this layer's policy exactly like any other. What is its own is the clock
-    (TRIGGER_TIMEOUT_S), and that is what the model waits on: this call does not
-    answer until the command has, so the loop makes no model call while it runs.
+    this layer's policy exactly like any other. What is its own is the clock, and
+    the clock is the CALL's: `timeout` is required (the declaration marks it so,
+    and this signature refuses a call without it), because only the model knows
+    whether the thing it is starting is a minute of tests or an hour of build.
+
+    This call does not answer until the command has, so the loop makes no model
+    call while it runs — the wait is suspended time, not spent turns. What ends
+    that suspension is either the command or the deadline: at the deadline the
+    transport kills the command and the model is woken with a trigger timeout,
+    in trigger's own words (errors/trigger_timeout.md), so it can ask for more
+    time instead of reading the wait as a failure of the command.
     """
-    return _run(workspace, config, command, TRIGGER_TIMEOUT_S, cancel=cancel)
+    seconds, refusal = _trigger_seconds(timeout)
+    if refusal is not None:
+        return refusal
+    return _run(
+        workspace,
+        config,
+        command,
+        seconds,
+        cancel=cancel,
+        timeout_template="errors/trigger_timeout.md",
+    )
+
+
+def _trigger_seconds(timeout: object) -> tuple[float, Envelope | None]:
+    """The deadline a trigger call asked for, or the answer that says why not.
+
+    There is no default and nothing is rounded: the argument IS the wait, so a
+    call that does not say it is refused by name rather than answered with a
+    guessed clock, and an ask above the ceiling is refused too — silencing a
+    twelve-hour ask down to six would be the same lie in a friendlier shape. The
+    ceiling is spelled out where the model reads the refusal, because that is the
+    number it has to change.
+    """
+    # both spellings: the model asks in seconds, and the promise it reads back
+    # should be the number it has to change
+    ceiling = f"{TRIGGER_TIMEOUT_S:g} s (six hours)"
+    detail: str
+    if timeout is None:
+        detail = "the call did not give one"
+    elif isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        detail = f"it is a number of seconds, and this is {timeout!r}"
+    elif timeout != timeout:  # NaN: every comparison below is false for it
+        detail = "NaN is not a length of time"
+    elif timeout <= 0:
+        detail = f"it must be greater than 0, and this is {timeout:g} s"
+    elif timeout > TRIGGER_TIMEOUT_S:
+        detail = f"this asks for {timeout:g} s, above the ceiling"
+    else:
+        return float(timeout), None
+    return 0.0, Envelope(render("errors/trigger_timeout_argument.md", detail=detail, ceiling=ceiling), error=True)
 
 
 def _run(
@@ -248,9 +305,11 @@ def _run(
     timeout: float,
     *,
     cancel: threading.Event | None = None,
+    timeout_template: str = "errors/command_timeout.md",
 ) -> Envelope:
     """One command, run under every guard this layer has, with `timeout` as its
-    deadline (run_command's config value, trigger's own far-out one)."""
+    deadline (run_command's config value, trigger's own argument) and
+    `timeout_template` as the words its expiry is reported in."""
     # the flavor of the shell that will PARSE this text: local host's decision
     # for local workspaces, always POSIX for a remote (SSH) workspace
     posix = workspace.exec_shell().posix
@@ -302,7 +361,7 @@ def _run(
         r = workspace.run(command, timeout, cancel=cancel)
     except TransportError as e:
         # one mapping, shared with the statement layer (transport.failure_envelope)
-        return failure_envelope(e, timeout_seconds=timeout)
+        return failure_envelope(e, timeout_seconds=timeout, template=timeout_template)
     except Exception as e:  # noqa: BLE001 -- tool boundary: report to model
         return Envelope(render("errors/execution_failed.md", error=e), error=True)
 

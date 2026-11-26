@@ -1,0 +1,1 @@
+ERROR: trigger timed out after $seconds: the loop waited that long, from the call, and then killed the command at the deadline the call asked for. Nothing it printed was collected, so this is the timeout and not the command's verdict. Call trigger again with a longer `timeout` when the work had further to go, or narrow what the command does.

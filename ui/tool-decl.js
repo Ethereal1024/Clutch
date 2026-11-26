@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tool-decl.ts and run `npm run build:host`.
-// source sha256: 3a14ca0431b9caf1feffbe0dfad6ee86ebfb1d9ca84a627afc3605dd78ddfed9
+// source sha256: e47a948367cb5d8ee272bb6316dc708fcca481694f899171e56b3948e5bda005
 
 "use strict";
 // The model-facing tool surface, derived HERE (host side), from declarations.
@@ -113,17 +113,23 @@ const HOST_DECLARATIONS = [
     {
         // The same command text, waited on: `host: true` like run_command, because
         // the execution layer is what runs it (agent/tools/shell.py:run_trigger) —
-        // it is host code with a longer clock, not a client-side tool.
+        // it is host code with a clock the CALL sets, not a client-side tool.
         name: "trigger",
         parameters: {
             properties: {
                 command: {
                     type: "string",
-                    description: "shell command string to run; the loop waits for it to finish (up to six hours) " +
+                    description: "shell command string to run; the loop waits for it to finish " +
                         "instead of the command tool's short budget",
                 },
+                timeout: {
+                    type: "number",
+                    description: "required: how many seconds the loop waits for the command, counted from the call. " +
+                        "At that deadline the command is killed and you are woken with a trigger timeout " +
+                        "(at most 21600 — six hours)",
+                },
             },
-            required: ["command"],
+            required: ["command", "timeout"],
         },
         access: "command",
         ui: { preview: "command", summary: "trigger {command}" },
