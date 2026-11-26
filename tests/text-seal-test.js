@@ -31,7 +31,7 @@
 // Like the other runners here this one drives the REAL addEvent/applyStreamEvent
 // and the real text-render path against stubs, so a silent edit fails it.
 
-const { check, summary, slicer, stateStub, runnableSnippet, uiSource, uiModules, installRecordLedger } = require("./harness.js");
+const { check, summary, slicer, stateStub, runnableSnippet, uiSource, uiModules, installRecordLedger, installCountdown } = require("./harness.js");
 
 const src = uiSource(); // the renderer, every module in page-load order
 const { fnBody } = slicer(src);
@@ -139,6 +139,9 @@ const textSlice = slicer(streamText);
 // the closed-block ledger (stream-events.ts): a cut KEEPS the block it closed and
 // files it with the record that still owes it, so that record writes it whole
 installRecordLedger();
+// the countdown meter the final settles: a run boundary clears it, so the final
+// this runner drives has to find the real module
+installCountdown();
 // ...and the record's own block (stream-events.ts rememberRecord): the final reads
 // it, so the runner drives the real one. Absent on the code before the fix, where
 // the checks below then fail on the duplicate they were written for.

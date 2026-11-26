@@ -63,6 +63,7 @@ const DEFAULT_UI = {
   collapse: "never",
   highlight: "",
   chrome: "",
+  countdown: "",
 };
 
 // `mutates` is not a default: the HOST derives it when the declaration leaves it
@@ -215,7 +216,17 @@ const CLIENT_NATIVE_DECLARATIONS: any[] = [
       required: ["seconds"],
     },
     access: "",
-    ui: { group: "time", form: "row", summary: "sleep {seconds}s", collapse: "never", chrome: "quiet" },
+    ui: {
+      group: "time",
+      form: "row",
+      summary: "sleep {seconds}s",
+      collapse: "never",
+      chrome: "quiet",
+      // the call waits for real seconds that are still passing while its row is
+      // on the page: the row shows a bar and the seconds left, counted from the
+      // live `tool_started` anchor (ui/src/renderer/countdown.ts)
+      countdown: "seconds",
+    },
   },
   {
     name: "start_tick",

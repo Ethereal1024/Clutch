@@ -12,6 +12,7 @@
 import "./bridge-shim";
 import "./app";
 import "./stream-view";
+import "./countdown";
 import "./tool-render";
 import "./stream-events";
 import "./stream-text";

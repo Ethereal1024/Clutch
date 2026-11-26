@@ -1345,6 +1345,24 @@ mjx-container[display="true"] {
 .tool-row.folded:hover .tool-label { color: var(--text); }
 .tool-args-btn { color: var(--muted); cursor: pointer; font-size: 12px; user-select: none; }
 .tool-args-btn:hover { color: var(--text); }
+/* the wait a declaration counts down (the `countdown` ui key): a short track and
+   the seconds still to go, in the row's own small mono voice. There is NO width
+   transition HERE, for the same reason the connection bars carry none: the fill
+   is painted from the wall clock every 250ms, and a transition would animate a
+   number the text beside it no longer shows. */
+.tool-countdown { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.tool-countdown-track {
+  width: 72px; height: 3px; background: var(--border);
+  border-radius: 2px; overflow: hidden;
+}
+.tool-countdown-fill { height: 100%; width: 0%; background: var(--accent); }
+.tool-countdown-text {
+  font-family: var(--font-mono); font-size: 12px;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+/* no real start yet (a replayed row, a call written but not entered): an empty
+   track in the border colour — a bar at zero is not a bar in motion */
+.tool-countdown.waiting .tool-countdown-fill { background: var(--border); }
 .tool-args-detail {
   background: var(--code-bg); padding: 6px 8px; border-radius: 0;
   border: 1px solid var(--border);

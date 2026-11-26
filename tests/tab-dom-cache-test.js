@@ -42,7 +42,7 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
-const { check, summary, slicer, runnableSnippet, stateStub } = require("./harness.js");
+const { check, summary, slicer, runnableSnippet, stateStub, installCountdown } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), "utf8");
@@ -190,6 +190,10 @@ function cacheContext(opts = {}) {
   vm.runInContext(runnableSnippet(fnBody("hasPicture")), ctx);
   vm.runInContext(runnableSnippet(fnBody("saveDomCache")), ctx);
   vm.runInContext(runnableSnippet(fnBody("restoreDomCache")), ctx);
+  // a restored view repaints the meters it carries (countdown.ts), so the page
+  // this context builds needs the real module: here it draws none, and the
+  // module's document answers "no meter on this page"
+  installCountdown(ctx);
   return { ctx, eventsEl, stream };
 }
 

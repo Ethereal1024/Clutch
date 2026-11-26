@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 7d42beea7e4bd7d837a86d37b60a3e66c4f9f2f9ae7c102da246f971a89cb51f
+// sources sha256: 126d2820f17ed105bd759dcea916bf6eb600c4e93d874a81168a9fa1c6a968b8
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -273,6 +273,131 @@
     // the block currently collecting consecutive tool_calls (for merging)
     toolGroupEl: null
   };
+
+  // src/renderer/countdown.ts
+  var TICK_MS = 250;
+  var METER = ".tool-countdown";
+  var anchors = /* @__PURE__ */ new Map();
+  var timer = null;
+  function meters() {
+    return Array.prototype.slice.call(document.querySelectorAll(METER));
+  }
+  function stopTimer() {
+    if (timer !== null) {
+      clearInterval(timer);
+      timer = null;
+    }
+  }
+  function ensureTimer() {
+    if (timer === null) timer = setInterval(tick, TICK_MS);
+  }
+  function tick() {
+    const all = meters();
+    for (const el of all) paintMeter(el);
+    if (!all.length) stopTimer();
+  }
+  function paintMeter(el) {
+    const total = Number(el.dataset.seconds) || 0;
+    const started = Number(el.dataset.started) || 0;
+    const fill = el.querySelector(".tool-countdown-fill");
+    const label = el.querySelector(".tool-countdown-text");
+    if (!(total > 0)) return;
+    if (!started) {
+      el.classList.add("waiting");
+      if (fill) fill.style.width = "0%";
+      if (label) label.textContent = "waiting\u2026";
+      el.setAttribute("aria-valuenow", "0");
+      el.setAttribute("aria-valuetext", "waiting for the call to start");
+      return;
+    }
+    el.classList.remove("waiting");
+    const elapsed = Math.min(total, Math.max(0, (Date.now() - started) / 1e3));
+    const left = total - elapsed;
+    if (fill) fill.style.width = elapsed / total * 100 + "%";
+    if (label) label.textContent = Math.ceil(left) + "s left";
+    el.setAttribute("aria-valuenow", String(Math.floor(elapsed)));
+    el.setAttribute("aria-valuetext", Math.ceil(left) + " seconds left");
+  }
+  function countdownSeconds(ui, raw) {
+    const key = ui && typeof ui.countdown === "string" ? ui.countdown : "";
+    if (!key) return 0;
+    let args = raw;
+    if (typeof raw === "string") {
+      try {
+        args = JSON.parse(raw || "{}");
+      } catch (e) {
+        return 0;
+      }
+    }
+    if (!args || typeof args !== "object") return 0;
+    const value = args[key];
+    const seconds = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+    return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+  }
+  function countdownMeter(ui, ev) {
+    const seconds = countdownSeconds(ui, ev && ev.arguments);
+    if (!(seconds > 0)) return null;
+    const el = document.createElement("span");
+    el.className = "tool-countdown";
+    el.dataset.seconds = String(seconds);
+    el.dataset.countdownId = String(ev && ev.tool_call_id || "");
+    const started = anchors.get(el.dataset.countdownId);
+    if (started) el.dataset.started = String(started);
+    el.setAttribute("role", "progressbar");
+    el.setAttribute("aria-valuemin", "0");
+    el.setAttribute("aria-valuemax", String(Math.round(seconds)));
+    el.setAttribute("aria-label", "wait remaining");
+    const track = document.createElement("span");
+    track.className = "tool-countdown-track";
+    const fill = document.createElement("span");
+    fill.className = "tool-countdown-fill";
+    track.appendChild(fill);
+    const label = document.createElement("span");
+    label.className = "tool-countdown-text";
+    el.appendChild(track);
+    el.appendChild(label);
+    paintMeter(el);
+    ensureTimer();
+    return el;
+  }
+  function noteToolStarted(ev) {
+    const id = String(ev && ev.tool_call_id || "");
+    if (!id) return;
+    const at = Number(ev.started_at);
+    anchors.set(id, Number.isFinite(at) && at > 0 ? at : Date.now());
+    for (const el of meters()) {
+      if (el.dataset.countdownId === id) el.dataset.started = String(anchors.get(id));
+    }
+    resumeCountdowns();
+  }
+  function settleCountdown(id) {
+    const key = String(id || "");
+    if (!key) return;
+    anchors.delete(key);
+    let removed = false;
+    for (const el of meters()) {
+      if (el.dataset.countdownId !== key) continue;
+      el.remove();
+      removed = true;
+    }
+    if (removed && !meters().length) stopTimer();
+  }
+  function settleAllCountdowns() {
+    anchors.clear();
+    for (const el of meters()) el.remove();
+    stopTimer();
+  }
+  function resumeCountdowns() {
+    const all = meters();
+    for (const el of all) paintMeter(el);
+    if (all.length) ensureTimer();
+    else stopTimer();
+  }
+  if (typeof document !== "undefined" && document.addEventListener) {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState !== "hidden") resumeCountdowns();
+    });
+  }
 
   // src/renderer/diagram-viewer.ts
   var dvOverlay = null;
@@ -1080,6 +1205,7 @@
       if (node.nodeType === 1) node.dataset.restored = "1";
     }
     eventsEl2.replaceChildren(cache.nodes);
+    resumeCountdowns();
     const end = Math.max(0, stream2.scrollHeight - stream2.clientHeight);
     stream2.scrollTop = Math.max(0, Math.min(cache.streamScrollTop, end));
     const s = cache.stateSnapshot;
@@ -1884,6 +2010,7 @@
     collapse: "never",
     highlight: "",
     chrome: "",
+    countdown: "",
     mutates: true,
     undo: false
   };
@@ -2046,8 +2173,11 @@
     return String(reason || "").replace(/\s+with args\b[\s\S]*$/, "");
   }
   function makeToolRow(ev) {
-    const row = makeToolRowBase(uiOf(ev), ev.name);
-    row.appendChild(argsButton(ev.arguments, uiOf(ev)));
+    const ui = uiOf(ev);
+    const row = makeToolRowBase(ui, ev.name);
+    const meter = countdownMeter(ui, ev);
+    if (meter) row.appendChild(meter);
+    row.appendChild(argsButton(ev.arguments, ui));
     return row;
   }
   function addToolCallRow(ev) {
@@ -2998,9 +3128,9 @@
     return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   }
   function followTailDuring(anim) {
-    let raf = requestAnimationFrame(function tick() {
+    let raf = requestAnimationFrame(function tick2() {
       if (state.followTail && !stream.classList.contains("loading")) autoScroll();
-      raf = requestAnimationFrame(tick);
+      raf = requestAnimationFrame(tick2);
     });
     const stop2 = () => cancelAnimationFrame(raf);
     anim.addEventListener("finish", stop2, { once: true });
@@ -5079,6 +5209,10 @@
     paint2();
   }
   function applyStreamEvent(ev) {
+    if (ev.type === "tool_started") {
+      noteToolStarted(ev);
+      return true;
+    }
     if (ev.type === "compaction_delta") {
       if (ev.done) {
         if (state.compactionEl) {
@@ -5153,6 +5287,7 @@
     if (ev.type === "final") {
       if (pendingPerm) closePerm();
       forgetAnsweredPerm();
+      settleAllCountdowns();
       clearStreamPreviews();
       clearRetryNote();
       if (!pageSink && !catchUp && ev.status === "completed" && String(ev.summary || "").trim()) {
@@ -5204,7 +5339,10 @@
         if (preview) preview.remove();
         const dots = st.row.querySelector(".muted");
         if (dots) dots.remove();
-        st.row.appendChild(argsButton(ev.arguments, uiOf(ev)));
+        const ui = uiOf(ev);
+        const meter = countdownMeter(ui, ev);
+        if (meter) st.row.appendChild(meter);
+        st.row.appendChild(argsButton(ev.arguments, ui));
         st.body = null;
         streamRows[ev.tool_call_id] = void 0;
         autoScroll();
@@ -5218,6 +5356,7 @@
       handleToolCallDelta(ev);
       return true;
     }
+    if (ev.type === "tool_result" && ev.tool_call_id) settleCountdown(ev.tool_call_id);
     if (ev.type === "tool_result" && toolCalls[ev.tool_call_id]) {
       const call = toolCalls[ev.tool_call_id];
       const ui = uiOfResult(ev);
@@ -6635,12 +6774,12 @@
     if (!connLost) return Promise.resolve(true);
     const deadline = Date.now() + ms;
     return new Promise((resolve) => {
-      const tick = () => {
+      const tick2 = () => {
         if (!connLost) return resolve(true);
         if (Date.now() >= deadline) return resolve(false);
-        setTimeout(tick, 250);
+        setTimeout(tick2, 250);
       };
-      tick();
+      tick2();
     });
   }
   if (typeof document !== "undefined" && document.addEventListener) {
@@ -6699,7 +6838,7 @@
   async function apiFetch(path, { method = "GET", body, base = state.apiBase, timeout = 3e4, signal } = {}) {
     if (!base) throw noBackend();
     const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), timeout);
+    const timer2 = setTimeout(() => ctl.abort(), timeout);
     const onAbort = () => {
       try {
         ctl.abort();
@@ -6719,7 +6858,7 @@
         signal: ctl.signal
       });
     } finally {
-      clearTimeout(timer);
+      clearTimeout(timer2);
       if (signal) signal.removeEventListener("abort", onAbort);
     }
     const data = await r.json().catch(() => ({}));

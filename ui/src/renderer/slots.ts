@@ -11,6 +11,7 @@
 // modules import it, and a cycle through the event pipeline is exactly the kind
 // of load-order dependency this refactor removes.
 
+import { resumeCountdowns } from "./countdown";
 import { paneShowsTab } from "./pane";
 import { state } from "./state";
 import type { Machine } from "./state";
@@ -807,6 +808,11 @@ export function restoreDomCache(slotId: string): boolean {
   }
   // Restore the events content.
   eventsEl.replaceChildren(cache.nodes);
+  // A call row put back may be waiting for seconds that are still passing while
+  // the tab was away: its meter carries the instant the call really began, so one
+  // repaint from the clock is the truth — and it may be the one that starts the
+  // page's meter clock again (countdown.ts).
+  resumeCountdowns();
   // Restore scroll position — the same pixel the tab was left on, clamped to what
   // the pane it just landed in can actually reach (a viewport that grew while the
   // tab was away, or a pane restored into a webview that had not laid out yet).

@@ -10,6 +10,7 @@
 // loads the page over file://, where Chromium refuses module scripts.
 
 import { autoFoldTurn } from "./auto-fold";
+import { countdownMeter, noteToolStarted, settleAllCountdowns, settleCountdown } from "./countdown";
 import { highlightCode, typesetMath } from "./markdown";
 import { closePerm, forgetAnsweredPerm, pendingPerm } from "./permissions";
 import { clearStream, pageSink, setOlderPill } from "./project";
@@ -484,6 +485,12 @@ export function addEvent(ev) {
 // to renderEvent() (user_message, tool_result, state_update, permission_request,
 // step_start — which only resets the stream blocks above — and unknown types).
 export function applyStreamEvent(ev) {
+  if (ev.type === "tool_started") {
+    // the call is being ENTERED now: the one anchor a countdown may count from
+    // (its durable record was written before the calls ahead of it ran)
+    noteToolStarted(ev);
+    return true;
+  }
   if (ev.type === "compaction_delta") {
     // live progress of an in-flight compaction (transient, not stored)
     if (ev.done) {
@@ -597,6 +604,9 @@ export function applyStreamEvent(ev) {
     // ...and forget the answers it collected: an id belongs to one run, and this
     // one can never ask again (see forgetAnsweredPerm)
     forgetAnsweredPerm();
+    // the run is over: no call is waiting any more, so no meter keeps counting
+    // one (a call aborted by Stop never gets a result to settle it)
+    settleAllCountdowns();
     clearStreamPreviews(); // an aborted turn may have left half-streamed calls
     clearRetryNote(); // a lost stream that never recovered leaves no chip behind
     // The divider below says "completed" and nothing else (render-events.ts
@@ -684,7 +694,10 @@ export function applyStreamEvent(ev) {
       if (preview) preview.remove();
       const dots = st.row.querySelector(".muted");
       if (dots) dots.remove();
-      st.row.appendChild(argsButton(ev.arguments, uiOf(ev)));
+      const ui = uiOf(ev);
+      const meter = countdownMeter(ui, ev);
+      if (meter) st.row.appendChild(meter);
+      st.row.appendChild(argsButton(ev.arguments, ui));
       st.body = null;
       streamRows[ev.tool_call_id] = undefined;
       autoScroll();
@@ -698,6 +711,10 @@ export function applyStreamEvent(ev) {
     handleToolCallDelta(ev);
     return true;
   }
+
+  // the call is over: its row stops counting down — the result row says how the
+  // wait ended, and a finished call must never keep a clock running
+  if (ev.type === "tool_result" && ev.tool_call_id) settleCountdown(ev.tool_call_id);
 
   // a row-form result lands beside its call, in the block their calls collect
   // in; every other result is its own block after the calls (renderEvent)

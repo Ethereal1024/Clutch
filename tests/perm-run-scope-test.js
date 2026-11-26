@@ -28,7 +28,7 @@
 //      and neither is a status frame: both are host-made and never persisted,
 //      so neither is ever part of a replay there is something to mute.
 
-const { check, summary, slicer, uiModules, rendererScript, stateStub, installRecordLedger } = require("./harness.js");
+const { check, summary, slicer, uiModules, rendererScript, stateStub, installRecordLedger, installCountdown } = require("./harness.js");
 
 const mods = uiModules();
 const src = mods.map((m) => m.code).join("\n");
@@ -180,6 +180,9 @@ const renderer = [
   slice.fnBody("renderEvent"),
 ].join("\n\n");
 installRecordLedger(); // the closed-block ledger stream-events.ts keeps a cut block in
+// ...and the countdown meter, whose frames this runner replays: the real module,
+// so the routing under test is the routing the page has
+installCountdown();
 (0, eval)(renderer);
 
 // the prompt is open iff #perm-modal lost its "hidden" class — the only signal

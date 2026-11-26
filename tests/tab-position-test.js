@@ -34,7 +34,7 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
-const { check, summary, slicer, runnableSnippet, stateStub } = require("./harness.js");
+const { check, summary, slicer, runnableSnippet, stateStub, installCountdown } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), "utf8");
@@ -156,6 +156,9 @@ function context(opts) {
     fnBody("restoreDomCache"),
   ].join("\n");
   vm.runInContext(runnableSnippet(code), ctx);
+  // a restored view repaints the meters it carries (countdown.ts): the real
+  // module, on a page that draws none
+  installCountdown(ctx);
   return { ctx, eventsEl, stream };
 }
 

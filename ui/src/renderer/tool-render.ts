@@ -11,6 +11,7 @@
 // loads the page over file://, where Chromium refuses module scripts.
 
 import { apiFetch } from "./app";
+import { countdownMeter } from "./countdown";
 import { highlightPreByPath } from "./diagram-viewer";
 import { pageSink } from "./project";
 import { renderDiff } from "./render-events";
@@ -70,6 +71,10 @@ import { refreshTree } from "./workspace-panel";
 //             equality, never interpreted.
 //   collapse  "always" folded, "long" folded past RESULT_FOLD_LINES, "never"
 //             whole (a block body's rest state).
+//   countdown the argument that names how many seconds this call waits for. The
+//             call row then shows a bar and the seconds still to go, counted
+//             from the instant the host says the call REALLY began — never from
+//             when the row was drawn (countdown.ts). "" = nothing to count.
 //   mutates   the call may change the file tree (host-derived when undeclared).
 //   undo      the host holds an undo record for this call (host-derived).
 // The HOST's own default `ui` block (GET /api/host), fetched once at boot: the
@@ -92,6 +97,7 @@ export const UI_DEFAULTS = {
   collapse: "never",
   highlight: "",
   chrome: "",
+  countdown: "",
   mutates: true,
   undo: false,
 };
@@ -290,8 +296,11 @@ export function permReason(reason) {
 // row — and the raw payload one click away; the call says what it is, its
 // result speaks for the outcome
 export function makeToolRow(ev) {
-  const row = makeToolRowBase(uiOf(ev), ev.name);
-  row.appendChild(argsButton(ev.arguments, uiOf(ev)));
+  const ui = uiOf(ev);
+  const row = makeToolRowBase(ui, ev.name);
+  const meter = countdownMeter(ui, ev);
+  if (meter) row.appendChild(meter);
+  row.appendChild(argsButton(ev.arguments, ui));
   return row;
 }
 

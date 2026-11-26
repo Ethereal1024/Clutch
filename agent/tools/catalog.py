@@ -111,6 +111,13 @@ click away, its result its own whole block.
               accent chip.
     collapse  "always" the body starts folded, "long" folded past a size
               threshold, "never" shown whole.
+    countdown the argument that names how many seconds this call waits for. The
+              call's row then shows a progress bar and the seconds still to go,
+              counted from the instant the host says the call REALLY began (the
+              live `tool_started` frame, which the loop emits as it enters the
+              call) — never from when the row was drawn, and never from the
+              durable call's `timestamp` (that is when the call was written,
+              before the calls ahead of it ran). "" = no wait to show.
     mutates   the call may change what the file tree shows. Optional: the host
               derives it from what it knows (a statement that overwrites a path,
               or the host's own command), and a component that changes the tree
@@ -186,6 +193,7 @@ DEFAULT_UI: dict[str, Any] = {
     "collapse": "never",
     "highlight": "",
     "chrome": "",
+    "countdown": "",
 }
 DEFAULTS: dict[str, Any] = hostconfig.ui(DEFAULT_UI)
 UI_KEYS = tuple(DEFAULTS) + ("mutates",)

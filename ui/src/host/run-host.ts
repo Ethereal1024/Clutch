@@ -212,6 +212,13 @@ function createRunHost(ports) {
     // tools are the exception — they are clocks and one log append, which the
     // loop answers itself (client-tools.ts) before the tool client sees the call.
     runTool: async ({ call, signal }) => {
+      // When the call REALLY begins — the one anchor a countdown may count from.
+      // The durable `tool_call` record cannot be it: run.js writes every call of
+      // a step before running the first, so its `timestamp` may be minutes early
+      // (the third call of three is stamped before the first two ran). This frame
+      // is display-only, like every other one here, and is sent for every call;
+      // what a declaration makes of the instant is its own `ui` (countdown).
+      emit({ type: "tool_started", tool_call_id: call.id, name: call.name, started_at: Date.now() });
       if (clientTools.has(call.name)) {
         let args: any = {};
         try {

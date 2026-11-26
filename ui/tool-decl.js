@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tool-decl.ts and run `npm run build:host`.
-// source sha256: e47a948367cb5d8ee272bb6316dc708fcca481694f899171e56b3948e5bda005
+// source sha256: 32a244495e91e7ad2c22806c2ec55042a34efdb65a99395f085fe4bc3fdff3a6
 
 "use strict";
 // The model-facing tool surface, derived HERE (host side), from declarations.
@@ -65,6 +65,7 @@ const DEFAULT_UI = {
     collapse: "never",
     highlight: "",
     chrome: "",
+    countdown: "",
 };
 // `mutates` is not a default: the HOST derives it when the declaration leaves it
 // out (a write, or one of the host's own tools), which is why it is a key the
@@ -209,7 +210,17 @@ const CLIENT_NATIVE_DECLARATIONS = [
             required: ["seconds"],
         },
         access: "",
-        ui: { group: "time", form: "row", summary: "sleep {seconds}s", collapse: "never", chrome: "quiet" },
+        ui: {
+            group: "time",
+            form: "row",
+            summary: "sleep {seconds}s",
+            collapse: "never",
+            chrome: "quiet",
+            // the call waits for real seconds that are still passing while its row is
+            // on the page: the row shows a bar and the seconds left, counted from the
+            // live `tool_started` anchor (ui/src/renderer/countdown.ts)
+            countdown: "seconds",
+        },
     },
     {
         name: "start_tick",

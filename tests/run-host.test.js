@@ -21,6 +21,7 @@ const DISPLAY_TYPES = new Set([
   "text_delta",
   "reasoning_delta",
   "tool_call_delta",
+  "tool_started",
   "compaction_delta",
   "llm_retry",
   "state_update",
@@ -509,7 +510,65 @@ async function main() {
     check(results[2] && /no ticker/.test(results[2].content) && results[2].is_error === false, "and end_tick with nothing running is not an error");
   }
 
-  // ------------------------- 9. a tick: appended here, and the session asked
+  // ------------------- 9. the call's real beginning, and why the stamp cannot be it
+  //
+  // A countdown is measured from the instant a call was ENTERED, so the host
+  // announces that instant itself: one `tool_started` frame per call, emitted as
+  // runTool begins it. The durable `tool_call` record cannot stand in for it —
+  // run.js writes every call of a step before running the first, so two calls of
+  // one step carry stamps taken together, and the second call's stamp is older
+  // than the first call's beginning.
+  {
+    const seen = [];
+    const push = (kind) => (ev) => {
+      seen.push({ kind, type: ev.type, id: ev.tool_call_id || "", at: Date.now(), seq: seen.length });
+    };
+    const onPage = push("page");
+    const log = byteLog();
+    const append = log.append;
+    log.append = async (ev) => {
+      push("log")(ev);
+      return append(ev);
+    };
+    const llm = fakeLlm([
+      {
+        content: "",
+        toolCalls: [
+          { id: "s1", name: "sleep", arguments: '{"seconds":0.05}' },
+          { id: "s2", name: "sleep", arguments: '{"seconds":0.01}' },
+        ],
+        finishReason: "tool_calls",
+      },
+      { content: "waited", finishReason: "stop" },
+    ]);
+    const { host } = hostWith({ log, llm, onEvent: onPage });
+    await host.start(TASK);
+    const out = await host.drive();
+    check(out.did === "final", "a step of two real waits still ends");
+
+    const started = seen.filter((e) => e.kind === "page" && e.type === "tool_started");
+    check(started.length === 2, `each call announces its own beginning (${started.length} frames)`);
+    check(started[0] && started[1] && started[0].id === "s1" && started[1].id === "s2", "in the order they RAN, each naming its call");
+    check(
+      started.length === 2 && started[1].at - started[0].at >= 40,
+      `and the gap between them is the first call's real 50ms wait (${started.length === 2 ? started[1].at - started[0].at : "?"}ms)`
+    );
+
+    const written = seen.filter((e) => e.kind === "log" && e.type === "tool_call");
+    check(written.length === 2, "both calls are on the log, as they must be");
+    check(
+      written.length === 2 && started.length === 2 && written[1].seq < started[0].seq,
+      "but the second call's record was written before the FIRST call began: a step is written whole, then run"
+    );
+    check(
+      written.length === 2 && started.length === 2 && written[1].at <= started[0].at,
+      "so its stamp is no later than a call that had not started — the record cannot be the countdown's anchor"
+    );
+    const results = log.events().filter((ev) => ev.type === "tool_result");
+    check(results.length === 2 && /slept for/.test(results[1].content), "and both waits really happened");
+  }
+
+  // ------------------------- 10. a tick: appended here, and the session asked
   {
     const wake = [];
     const llm = fakeLlm([

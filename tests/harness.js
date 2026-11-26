@@ -217,9 +217,30 @@ function installRecordLedger() {
   }
 }
 
+// The countdown meter (countdown.ts): stream-events.ts routes the host's live
+// `tool_started` frame to it and settles it on the result/final, and slots.ts
+// repaints from it when a cached tab comes back. A runner that slices those
+// functions therefore needs the meter's names, and this installs the REAL module
+// — the meter's own runner drives its arithmetic, so a stub here would only let
+// the routing rot unnoticed. Pass a vm context to install it on that page; with
+// no argument it goes on globalThis. A runner whose page draws no meter only
+// needs its document to answer "none", so a missing querySelectorAll is filled
+// with the truthful empty list instead of a fake meter.
+function installCountdown(ctx) {
+  const vm = require("vm");
+  const snippet = rendererScript("countdown");
+  const doc = ctx ? ctx.document : globalThis.document;
+  if (doc && typeof doc.querySelectorAll !== "function") doc.querySelectorAll = () => [];
+  if (ctx) {
+    vm.runInContext(snippet, ctx);
+    return ctx;
+  }
+  vm.runInThisContext(snippet, { filename: "ui/src/renderer/countdown.ts" });
+}
+
 module.exports = {
   check, summary, slicer, uiSource, uiModules,
   rendererScript, loadRendererModule, stripModuleSyntax, runnableSnippet, stateStub,
-  installRecordLedger,
+  installRecordLedger, installCountdown,
   get failures() { return failures; },
 };

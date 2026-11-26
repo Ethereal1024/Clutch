@@ -240,6 +240,10 @@ _CLIENT_NATIVE_DECLARATIONS: tuple[Declaration, ...] = (
                 "summary": "sleep {seconds}s",
                 "collapse": "never",
                 "chrome": "quiet",
+                # the call waits for real seconds that are still passing while
+                # its row is on the page: the row shows a bar and the seconds
+                # left, counted from the live `tool_started` anchor
+                "countdown": "seconds",
             },
         },
         None,

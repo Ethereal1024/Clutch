@@ -31,6 +31,7 @@ const fs = require("fs");
 const path = require("path");
 const {
   check, summary, slicer, uiSource, uiModules, runnableSnippet, stateStub, installRecordLedger,
+  installCountdown,
 } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
@@ -199,6 +200,9 @@ global.resetRollbackAnchors = () => {};
 
 // the closed-block ledger addEvent/applyStreamEvent touch (stream-events.ts)
 installRecordLedger();
+// the meter the final settles (countdown.ts): the real module, because a lost
+// run's final is exactly the frame that has to clear it
+installCountdown();
 
 for (const name of [
   "switchBackend", "dropStaleBackend", "escapeHtml", "renderMarkdown",
