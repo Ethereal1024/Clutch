@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tool-client.ts and run `npm run build:host`.
-// source sha256: adebdbccd61b06676f91a97ace793f759101ba33ebfc53df7da7f114544026cd
+// source sha256: 74c010f29b72a722bd7eb03b5d0e3b903e46f4b6c1dd981a2aa021bbcd72046d
 
 // One tool call, run where the tools are: POST /api/exec from the host half (P3).
 //
@@ -21,6 +21,17 @@
 // those into a tool result would feed the model a sentence about a session that
 // is not there.
 //
+// ONE 409 is not that: "a call with this tool_call_id is already in flight"
+// (agent/api/exec.py). It says the session is running THIS call right now —
+// under another wheel of the same turn, or under the request this window
+// dropped when the tunnel healed and the page resumed. The work exists and its
+// answer is coming; a throw here ended the turn and marked the tab idle while
+// the command kept running with nobody to read it, which is the "could not
+// resume the turn" the reader saw. So the client waits and asks again: the
+// answer is memoized under (tool_call_id, name, arguments) in the same lock
+// that drops the in-flight entry, so the repeat sees either "in flight" or the
+// answer itself — never a second run of the tool.
+//
 // Stop reaches a command that is still running: aborting the request's signal
 // sends `POST /api/exec/cancel {tool_call_id}` BEFORE dropping the connection,
 // because a client that walks away from a socket cannot kill a process group by
@@ -33,6 +44,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const CANCEL_TIMEOUT_MS = 10_000; // one tiny JSON call to the same machine
+const IN_FLIGHT_POLL_MS = 2_000; // how often to ask again while a call is still running
 const MODES = ["chat", "work"];
 /**
  * The session's base URL, normalized. `unknown` in, `string` out: this IS the
@@ -100,9 +112,41 @@ async function call(url, { method, body, timeoutMs, signal }) {
     return parsed;
 }
 /**
- * @param {{ base?: string, mode?: string, cancelTimeoutMs?: number }} [opts]
+ * Whether this refusal means "the call you are asking about is still running",
+ * which is the one 409 worth waiting on: the session keeps `tool_call_id` in
+ * `exec_cancels` for exactly as long as a call with it is on the wire.
  */
-function createToolClient({ base, mode, cancelTimeoutMs = CANCEL_TIMEOUT_MS, } = {}) {
+function alreadyInFlight(e) {
+    return Boolean(e && e.status === 409 && /already in flight/.test(String(e.message || "")));
+}
+/**
+ * Wait before asking again — and give the wait up the moment the caller's Stop
+ * arrives. A pause that ignored the abort would leave the turn open on a call
+ * nobody is reading, which is the bug this file is fixing.
+ */
+function pause(ms, signal) {
+    return new Promise((resolve, reject) => {
+        const stop = () => {
+            clearTimeout(timer);
+            reject((signal && signal.reason) || new Error("aborted"));
+        };
+        const timer = setTimeout(() => {
+            if (signal)
+                signal.removeEventListener("abort", stop);
+            resolve();
+        }, ms);
+        if (signal) {
+            if (signal.aborted)
+                stop();
+            else
+                signal.addEventListener("abort", stop, { once: true });
+        }
+    });
+}
+/**
+ * @param {{ base?: string, mode?: string, cancelTimeoutMs?: number, inFlightPollMs?: number }} [opts]
+ */
+function createToolClient({ base, mode, cancelTimeoutMs = CANCEL_TIMEOUT_MS, inFlightPollMs = IN_FLIGHT_POLL_MS, } = {}) {
     const root = sessionBase(base);
     if (mode !== undefined && !MODES.includes(mode)) {
         throw new TypeError(`tool-client: mode is ${MODES.join(" or ")}`);
@@ -154,10 +198,25 @@ function createToolClient({ base, mode, cancelTimeoutMs = CANCEL_TIMEOUT_MS, } =
             }
             let answer;
             try {
-                answer = await call(`${root}/api/exec`, {
-                    method: "POST",
-                    body: { name, arguments: one.arguments, tool_call_id: id, mode },
-                });
+                // A call the session says is ALREADY in flight is not a refusal to fix
+                // the turn over: it is this same call, running, with its answer coming.
+                // Waiting is what keeps the turn honest — the tab stays running, the
+                // command stays watched, and when it ends the memo hands the real
+                // result to this repeat instead of the tool running twice.
+                for (;;) {
+                    try {
+                        answer = await call(`${root}/api/exec`, {
+                            method: "POST",
+                            body: { name, arguments: one.arguments, tool_call_id: id, mode },
+                        });
+                        break;
+                    }
+                    catch (e) {
+                        if (!alreadyInFlight(e))
+                            throw e;
+                        await pause(inFlightPollMs, signal);
+                    }
+                }
             }
             finally {
                 if (signal)

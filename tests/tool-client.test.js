@@ -18,6 +18,9 @@
 //     cannot kill a process group.
 //  4. Nothing is guessed: a missing `content`, somebody else's `tool_call_id`,
 //     pre-parsed `arguments` — refused, not filled in.
+//  5. One 409 is not a failure: "already in flight" says this very call is
+//     running, so the client waits for the answer the session memoizes instead
+//     of ending the turn and leaving the command with nobody to read it.
 // Run: node tests/tool-client.test.js
 "use strict";
 
@@ -225,7 +228,52 @@ async function main() {
   const after = fake.requests.filter((r) => r.url === "/api/exec/cancel").pop();
   check(same(Object.keys(after.body), ["tool_call_id"]), "and that is all it sends");
 
-  // ---- 7. a client without a session has no address to fall back to --------
+  // ---- 7. a call that is already IN FLIGHT is waited for, not thrown -------
+  // The session answers 409 for as long as it holds this id (agent/api/exec.py
+  // `exec_cancels`): a resume after the tunnel healed, a Retry landing on work
+  // that is still running. Throwing there ended the turn and marked the tab
+  // idle while the command ran on with nobody to read it — the "could not
+  // resume the turn (a call with this tool_call_id is already in flight)" the
+  // reader saw. The client's job is to wait: the answer is memoized under this
+  // call's id, name and arguments, so a repeat gets it and the tool never runs
+  // twice.
+  const busy = { ...CALL, id: "call_busy" };
+  let asks = 0;
+  fake.setAnswer((req, body) => {
+    if (!body || body.tool_call_id !== "call_busy") return { status: 200, body: ANSWER };
+    asks += 1;
+    if (asks <= 2) return { status: 409, body: { error: "a call with this tool_call_id is already in flight" } };
+    return { status: 200, body: { ...ANSWER, tool_call_id: "call_busy", content: "the long answer" } };
+  });
+  const waiter = createToolClient({ base, mode: "work", inFlightPollMs: 5 });
+  const waited = await waiter.run({ call: busy });
+  check(asks === 3, "the client asks again while the call is in flight, and takes the answer when it comes");
+  check(waited.content === "the long answer", "the result is the one that call produced, not an error");
+  const repeats = fake.requests.filter((r) => r.url === "/api/exec").slice(-3);
+  check(
+    repeats.length === 3 && repeats.every((r) => r.body.tool_call_id === "call_busy" && r.body.arguments === busy.arguments),
+    "every repeat is the same call — same id, same raw arguments: the memo's key, so the tool does not run again"
+  );
+
+  // The endpoint's other 409s are refusals, not "wait for this one"
+  fake.setAnswer(() => ({ status: 409, body: { error: "no project open" } }));
+  const refused = await rejects(waiter.run({ call: { ...CALL, id: "call_noproj" } }));
+  check(
+    refused !== null && refused.status === 409 && /no project open/.test(refused.message),
+    "a 409 that is not 'already in flight' still throws — a refused request is not work"
+  );
+
+  // Stop reaches the wait: an abort mid-pause ends it instead of polling a call
+  // nobody will read
+  fake.setAnswer(() => ({ status: 409, body: { error: "a call with this tool_call_id is already in flight" } }));
+  const waitCtl = new AbortController();
+  const waiting = rejectCatcher(waiter.run({ call: { ...CALL, id: "call_stopwait" }, signal: waitCtl.signal }));
+  await new Promise((r) => setTimeout(r, 30));
+  waitCtl.abort();
+  const stoppedWait = await waiting;
+  check(stoppedWait !== null, "Stop ends the wait rather than polling a call nobody is reading");
+
+  // ---- 8. a client without a session has no address to fall back to --------
   let noBase = null;
   try {
     createToolClient({});
