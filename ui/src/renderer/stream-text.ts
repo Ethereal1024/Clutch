@@ -483,6 +483,39 @@ export function foldAnim(fold, open, onDone = null) {
   queueStuck();
 }
 
+// A move that is taken off the page lands HERE, now. `cancelFoldAnim` cancels,
+// and a cancelled animation never fires `onfinish` — the one place `wrapFold`
+// clears the inline `height` and the held-open `gridTemplateRows` it travels on.
+// So a fold interrupted by a tab switch kept an inline size for good, and the
+// cache gate read that as "an animation is still moving" from then on: every
+// later switch of that tab paid a replay. The class already carries the
+// destination (`wrapFold` toggles it before the move starts), so landing is:
+// stop the animation, drop the inline size, and hand the box back to the sheet.
+export function landFold(el) {
+  const open = el._foldTarget !== false; // an interrupted move knows where it was going
+  cancelFoldAnim(el);
+  el.style.height = "";
+  el.style.gridTemplateRows = "";
+  el.style.overflowY = "";
+  el._foldFrom = el._foldTo = 0;
+  el._scrollLag = 0;
+  if (el.classList.contains("fold")) {
+    el.classList.toggle("open", open);
+    el.classList.toggle("hidden", !open);
+  }
+}
+
+// ...and every move still in flight in one subtree. A diff `pre` has no
+// destination of its own (tool-render paints it collapsed and the toggle is a
+// click), so it lands OPEN — the state its animation was heading to in both
+// directions, and the one a click can undo. Cosmetic, and the only place this is
+// visible is a switch landing inside a diff's own 250ms move.
+export function landFoldsIn(root: ParentNode) {
+  for (const el of Array.from(root.querySelectorAll<HTMLElement>(".fold, pre"))) {
+    if (el.style.height || el.style.gridTemplateRows) landFold(el);
+  }
+}
+
 export function foldExpand(fold) {
   foldAnim(fold, true);
 }

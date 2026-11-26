@@ -11,7 +11,7 @@
 
 import { IS_ANDROID } from "./env";
 import {
-  dropStaleBackend, switchBackendResolved,
+  dropStaleBackend, refreshBrowsedMachine, switchBackendResolved,
 } from "./backend-lifecycle";
 import { connLostExitClear, connLostNeedsUser } from "./conn-lost";
 import {
@@ -23,6 +23,7 @@ import { $ } from "./dom";
 import { loadDir } from "./fs-browser";
 import { paneHopSettled, reportHopStage } from "./pane";
 import { closeModal, dismissOnOverlayPress } from "./settings";
+import { refreshHopMirror } from "./slots";
 import { state } from "./state";
 
 // restore the picker after a connect/disconnect: the bar's connect chrome is over,
@@ -34,7 +35,11 @@ import { state } from "./state";
 export function refreshPicker() {
   resetConnChrome();
   loadDir("", false); // re-list the (new) backend from home; keep the remembered dir
-  renderConnSelector();
+  // ...and draw the bar from the host's word about the session just adopted, not
+  // from the connect that was just attempted. Deferred so this redraw cannot land
+  // on top of the verdict the attempt wrote (a failed move keeps its own line and
+  // its Retry): the store's half follows, one ask later, and is right.
+  void refreshBrowsedMachine().then(() => renderConnSelector());
 }
 
 export function showPasswordPrompt(label) {
@@ -445,10 +450,18 @@ export async function handleSshConnect(host, user, port, statusEl) {
     if (!res.ok && (await hopLandedFor(host, user, port))) res = { ok: true, url: null };
     if (res.ok) {
       upsertConn(host, user, port);
-      localStorage.setItem("clutch_ssh_connected", "1");
+      // The standing intent is written only once this window is really ON that
+      // host's session. A hop can come up while the claim behind it does not (the
+      // far side fails to bootstrap its agent), and the flag used to be written
+      // before the ask: the next picker then named the host it had just dialled
+      // over the file system it was still browsing — the reported transfer of the
+      // same lie (「牛头不对马嘴」) by another route. No session, no intent: the
+      // picker asks the host which machine the base is on and draws that.
       // the tunnel URL is the supervisor control channel; the API base is the
       // per-window session, decided by the main process
-      await switchBackendResolved();
+      const claimed = await switchBackendResolved();
+      if (claimed) localStorage.setItem("clutch_ssh_connected", "1");
+      else localStorage.removeItem("clutch_ssh_connected");
       refreshPicker();
       return true;
     } else {
@@ -567,6 +580,25 @@ export async function connectTabMachine(machine): Promise<string> {
 // again (connConnect refuses to "connect" where it believes it already is). So a
 // failed move drops the stale base and redraws the picker: no ✓, no old listing,
 // and the host it left is a choice that can be dialled again.
+// The picker's own Disconnect, and the one thing it must do around it. The shell's
+// teardown is caller-managed and announces NOTHING (tunnel-lifecycle.ts
+// stopTunnel(notify = false): the renderer asked, and re-claims in the same turn),
+// which is right for the tunnel and wrong for the record this window keeps of it:
+// `hopUpFor` (slots.ts) answers from the hop mirror while the cached-view decision
+// is being made, and a machine that was just dropped would still be "up" there —
+// so every tab on it takes the cached path and paints a transcript over a hop
+// nobody serves. The mirror is only ever written from an ANSWER, so ask: the shell
+// has one, now that the teardown has landed.
+async function dropTunnel() {
+  if (!window.clutchTunnel) return;
+  try {
+    await window.clutchTunnel.disconnect();
+  } catch (e) {
+    /* the host is gone or unreachable: the list below is still the honest one */
+  }
+  await refreshHopMirror();
+}
+
 export async function connSwitch(host, user, port, statusEl) {
   // a request with nothing to dial (or no engine to dial it with, or an attempt
   // already in flight) is not a move: the flow answers it in place, and the host
@@ -579,20 +611,14 @@ export async function connSwitch(host, user, port, statusEl) {
     // the intent goes FIRST, so the teardown below is the user leaving on purpose
     // and is not announced as a lost session (backend-lifecycle.ts)
     localStorage.removeItem("clutch_ssh_connected");
-    if (window.clutchTunnel) await window.clutchTunnel.disconnect();
+    await dropTunnel();
   }
   const ok = await handleSshConnect(host, user, port, statusEl);
   if (!ok && leaving) {
     // the attempt may have left a partial dial (a hop the failure path could not
     // tear down): the move is over either way, so nothing of it may outlive the
     // verdict
-    if (window.clutchTunnel) {
-      try {
-        await window.clutchTunnel.disconnect();
-      } catch (e) {
-        /* the host is gone or unreachable: the state below is still the honest one */
-      }
-    }
+    await dropTunnel();
     dropStaleBackend(); // API_BASE names a session whose forward died with the hop
     if (doorOf(statusEl) === "popup") {
       // nothing of the popup's attempt is drawn on the picker: it folds, forgets
@@ -644,7 +670,7 @@ export async function connConnect(v) {
       // but a hop that dies while the move is in flight must not arrive as
       // "lost the remote connection".
       localStorage.removeItem("clutch_ssh_connected");
-      await window.clutchTunnel.disconnect();
+      await dropTunnel();
     }
     // this machine's own session, by asking the host for it: with no session yet
     // the honest answer is still "not connected", never a guessed local port

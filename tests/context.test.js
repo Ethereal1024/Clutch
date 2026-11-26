@@ -92,6 +92,39 @@ function main() {
 
     check(toMessages([]).length === 0, "no events is no messages");
     check(toMessages(null).length === 0, "nothing at all is no messages");
+
+    // The reported HTTP 400 on resume: an aborted turn left a durable call whose
+    // `arguments` declares `new_string` twice (and no `old_string`). A strict
+    // provider re-parses it and refuses the whole request, and because the line
+    // is replayed every turn the project could not run again. The projection
+    // re-emits valid JSON, last value winning, so the paired result still
+    // answers a call the wire accepts.
+    const duplicate = toMessages([
+      user("q"),
+      said("", [
+        {
+          id: "c1",
+          name: "edit_file",
+          arguments: '{"new_string":"a","new_string":"b","path":"f"}',
+        },
+      ]),
+      result("c1", "missing field: old_string"),
+    ]);
+    const replayArgs = duplicate[1].tool_calls[0].function.arguments;
+    check(
+      replayArgs === '{"new_string":"b","path":"f"}' && duplicate.length === 3,
+      "a call whose arguments declare a key twice is replayed as valid JSON (last value wins), still paired with its result"
+    );
+
+    const unparsable = toMessages([
+      user("q"),
+      said("", [{ id: "c1", name: "t", arguments: '{"a":' }]),
+      result("c1", "Argument parse failed"),
+    ]);
+    check(
+      unparsable[1].tool_calls[0].function.arguments === "{}" && unparsable.length === 3,
+      "a call whose arguments are not JSON is replayed as an empty object, never as text the wire cannot parse"
+    );
   }
 
   // ---- 3. the pairing repair ----

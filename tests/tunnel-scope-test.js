@@ -44,7 +44,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { check, summary, uiSource } = require("./harness.js");
+const { check, summary, slicer, uiSource } = require("./harness.js");
 const { createHostCore } = require("../ui/host-core");
 const { createExecutors, LOCAL_ID } = require("../ui/executors");
 
@@ -129,6 +129,26 @@ check(/refreshHopMirror\(\)/.test(onEndSrc) &&
   onEndSrc.indexOf("refreshHopMirror()") < onEndSrc.indexOf("info.lost === false") &&
   onEndSrc.indexOf("refreshHopMirror()") < onEndSrc.indexOf('getItem("clutch_ssh_connected")'),
   "and the hop list is re-read before the handler decides anything about this window: a hop ended, whichever window owned it");
+
+// ---- 3b. the picker's own Disconnect: caller-managed, but the MIRROR is not ----
+//
+// The shell keeps the user's own Disconnect caller-managed — stopTunnel(notify =
+// false), because the renderer asked and re-claims in the same turn — so NO
+// `tunnel:ended` ever reaches this window for it. That is right for the tunnel and
+// wrong for the record the window keeps of it: `hopUpFor` (slots.ts) answers from
+// the hop mirror while the cached-view decision is being made, so the machine the
+// user just left would stay "up" there and every tab on it would paint its cached
+// picture over a hop nobody serves. The flow therefore asks the shell for the list
+// itself, once the teardown has landed, on every door that drops a tunnel.
+const FLOW = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "conn-flow.ts"), "utf8");
+const drop = slicer(FLOW).fnBody("dropTunnel");
+check(/await window\.clutchTunnel\.disconnect\(\)/.test(drop) &&
+  drop.indexOf("await window.clutchTunnel.disconnect()") < drop.indexOf("await refreshHopMirror()"),
+  "the picker's Disconnect re-reads the hop list AFTER the shell's teardown landed: a mirror is only ever written from an answer");
+check(!/\.disconnect\(\)/.test(FLOW.replace(drop, "")),
+  "…and no door in the flow calls the shell's disconnect around it: the move, the failed move and the one to this machine all go through the re-read");
+check(/import \{[^}]*refreshHopMirror[^}]*\} from "\.\/slots"/.test(FLOW),
+  "the list it re-reads is the mirror slots.ts answers hopUpFor from — one record, not a second opinion");
 
 // ---- 4. the session URL is remembered per window ----
 check(/sessionStorage\.setItem\("clutch_api_url"/.test(APP) &&

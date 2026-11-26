@@ -476,6 +476,13 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 }: any = {
       connect: (cfg) =>
         ladder.userConnect(cfg, (stage) => bus.broadcast("tunnel:progress", stage)),
       status: async () => tunnel.tunnelStatus(),
+      // WHICH hops are up, for the page's own record of them (slots.ts
+      // refreshHopMirror): `hopUpFor` answers the cached-view question from that
+      // mirror, so the page re-reads it after every hop end — including the one the
+      // user asked for, which no `tunnel:ended` announces. A surface with no `list`
+      // leaves the page remembering the machine it just left, and every tab on it
+      // paints its cached picture over a hop nobody serves.
+      list: async () => tunnel.listTunnels(),
       disconnect: async () => {
         // stop window backends first, while the tunnel/bridge is still alive
         ladder.noteUserLeft(); // the user leaving: the standing intent goes with them

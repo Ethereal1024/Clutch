@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 80b584730f6967f0d9a12dd5d3eb863b446ef5d93463aede029f7b3b8f62ba97
+// sources sha256: f520fe9997f5782ac311aa6bf60f8dec9fbe0dab4735a3b24c552ee31a90bdf4
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -1027,22 +1027,18 @@
     stream2.scrollTop = Math.max(0, Math.min(m.scroll, end));
     return stream2.scrollTop;
   }
-  function viewIsSettled(eventsEl2) {
-    if (!eventsEl2.children.length) return false;
-    if (eventsEl2.querySelector(".stream, .live")) return false;
-    for (const el of Array.from(eventsEl2.querySelectorAll(".fold, pre"))) {
-      if (el.style.height || el.style.gridTemplateRows) return false;
-    }
-    return true;
+  function hasPicture(eventsEl2) {
+    return !!eventsEl2.children.length;
   }
-  function saveDomCache(slotId) {
+  function saveDomCache(slotId, settle) {
     if (!slotId) return;
     const eventsEl2 = document.getElementById("events");
     const stream2 = document.getElementById("stream");
-    if (!eventsEl2 || !stream2 || !paneShowsTab(slotId) || !viewIsSettled(eventsEl2)) {
+    if (!eventsEl2 || !stream2 || !paneShowsTab(slotId) || !hasPicture(eventsEl2)) {
       domCaches.delete(slotId);
       return;
     }
+    if (settle) settle();
     const streamScrollTop = stream2.scrollTop;
     const nodes = document.createDocumentFragment();
     while (eventsEl2.firstChild) nodes.appendChild(eventsEl2.firstChild);
@@ -1360,8 +1356,9 @@
       notice("could not reach the backend: " + (e && e.message ? e.message : e));
       return null;
     });
-    settled.then((url) => {
+    settled.then(async (url) => {
       if (url) switchBackend(url);
+      await refreshBrowsedMachine();
       renderConnSelector();
       loadDir(localStorage.getItem("clutch_fs_last_dir") || "");
     });
@@ -3097,6 +3094,24 @@
     if (open) followTailDuring(anim);
     queueStuck();
   }
+  function landFold(el) {
+    const open = el._foldTarget !== false;
+    cancelFoldAnim(el);
+    el.style.height = "";
+    el.style.gridTemplateRows = "";
+    el.style.overflowY = "";
+    el._foldFrom = el._foldTo = 0;
+    el._scrollLag = 0;
+    if (el.classList.contains("fold")) {
+      el.classList.toggle("open", open);
+      el.classList.toggle("hidden", !open);
+    }
+  }
+  function landFoldsIn(root) {
+    for (const el of Array.from(root.querySelectorAll(".fold, pre"))) {
+      if (el.style.height || el.style.gridTemplateRows) landFold(el);
+    }
+  }
   function foldExpand(fold) {
     foldAnim(fold, true);
   }
@@ -4383,7 +4398,7 @@
         forgetDomCache(prev.id);
         dismissBlocked();
       } else {
-        saveDomCache(prev.id);
+        saveDomCache(prev.id, pruneTransient);
       }
       if (prev.running) watchTab(prev);
     }
@@ -4888,6 +4903,15 @@
       delete streamRows[id];
     }
   }
+  function pruneTransient() {
+    clearStreamPreviews();
+    clearRetryNote();
+    if (state.compactionEl) {
+      state.compactionEl.remove();
+      state.compactionEl = null;
+    }
+    landFoldsIn(eventsEl);
+  }
   function discardLivePartial() {
     if (state.textRenderRaf) {
       cancelAnimationFrame(state.textRenderRaf);
@@ -5003,14 +5027,14 @@
     if (ev && ev.type === "user_message") {
       if (state.sseRunLostPending) announceRunLost();
       state.runSettled = false;
-      if (state.textSealed) {
+      if (!busy) {
         state.lastTextEl = null;
         state.lastTextContent = "";
         state.textSealed = false;
+        state.lastRecordEl = null;
+        state.lastRecordText = "";
+        awaiting.length = 0;
       }
-      state.lastRecordEl = null;
-      state.lastRecordText = "";
-      awaiting.length = 0;
       forgetAnsweredPerm();
       noteUserMessage(ev.content);
     } else if (ev && ev.type === "final") {
@@ -5811,6 +5835,10 @@
   function connLabel(c) {
     return `${c.user}@${c.host}:${c.port}`;
   }
+  var browsedOn = null;
+  function noteBrowsedOn(base, machine) {
+    browsedOn = base ? { base: String(base).replace(/\/+$/, ""), machine: machine || null } : null;
+  }
   var connOnValue = "";
   function connTarget() {
     const chosen = connSelect.value;
@@ -5827,11 +5855,8 @@
     updateConnConnect();
   }
   function renderConnSelector() {
-    const override = sessionStorage.getItem("clutch_api_url");
-    const connected = !!(override && localStorage.getItem("clutch_ssh_connected") && state.apiBase);
-    const cHost = localStorage.getItem("clutch_ssh_host");
-    const cUser = localStorage.getItem("clutch_ssh_user");
-    const cPort = localStorage.getItem("clutch_ssh_port");
+    const base = state.apiBase ? String(state.apiBase).replace(/\/+$/, "") : "";
+    const on = browsedOn && base && browsedOn.base === base ? browsedOn.machine : void 0;
     const hosts = sshConns();
     connSelect.innerHTML = "";
     if (!IS_ANDROID) {
@@ -5843,7 +5868,7 @@
     let connectedValue = null;
     for (const c of hosts) {
       const label = connLabel(c);
-      const isConnected = connected && c.host === cHost && c.user === cUser && String(c.port) === String(cPort);
+      const isConnected = !!on && c.host === on.host && c.user === on.user && String(c.port) === String(on.port);
       const opt = document.createElement("option");
       opt.value = "ssh:" + label;
       opt.textContent = label;
@@ -5852,13 +5877,13 @@
       if (isConnected) connectedValue = opt.value;
     }
     let onValue = "";
-    if (connected) {
+    if (on) {
       if (connectedValue) {
         connSelect.value = connectedValue;
       } else {
         const opt = document.createElement("option");
         opt.value = "ssh:__connected__";
-        opt.textContent = cHost ? cUser + "@" + cHost + (cPort ? ":" + cPort : "") : "SSH: " + override;
+        opt.textContent = connLabel(on);
         opt.mark = "\u2713";
         connSelect.appendChild(opt);
         connSelect.value = "ssh:__connected__";
@@ -5873,14 +5898,14 @@
     connOnValue = onValue;
     connSelect.disabled = IS_ANDROID && !hosts.length;
     updateConnConnect();
-    connStatus.textContent = connected ? "Connected: " + override : state.apiBase ? "Using " + state.apiBase : "Not connected \u2014 no backend";
+    connStatus.textContent = on ? "Connected: " + state.apiBase : state.apiBase ? "Using " + state.apiBase : "Not connected \u2014 no backend";
   }
 
   // src/renderer/conn-flow.ts
   function refreshPicker() {
     resetConnChrome();
     loadDir("", false);
-    renderConnSelector();
+    void refreshBrowsedMachine().then(() => renderConnSelector());
   }
   function showPasswordPrompt(label) {
     return new Promise((resolve) => {
@@ -6105,8 +6130,9 @@
       if (!res.ok && await hopLandedFor(host, user, port)) res = { ok: true, url: null };
       if (res.ok) {
         upsertConn(host, user, port);
-        localStorage.setItem("clutch_ssh_connected", "1");
-        await switchBackendResolved();
+        const claimed2 = await switchBackendResolved();
+        if (claimed2) localStorage.setItem("clutch_ssh_connected", "1");
+        else localStorage.removeItem("clutch_ssh_connected");
         refreshPicker();
         return true;
       } else {
@@ -6160,6 +6186,14 @@
       syncConnConnect();
     }
   }
+  async function dropTunnel() {
+    if (!window.clutchTunnel) return;
+    try {
+      await window.clutchTunnel.disconnect();
+    } catch (e) {
+    }
+    await refreshHopMirror();
+  }
   async function connSwitch(host, user, port, statusEl) {
     if (!host || !user || !window.clutchTunnel || connBusy) {
       return await handleSshConnect(host, user, port, statusEl);
@@ -6167,16 +6201,11 @@
     const leaving = Boolean(localStorage.getItem("clutch_ssh_connected"));
     if (leaving) {
       localStorage.removeItem("clutch_ssh_connected");
-      if (window.clutchTunnel) await window.clutchTunnel.disconnect();
+      await dropTunnel();
     }
     const ok = await handleSshConnect(host, user, port, statusEl);
     if (!ok && leaving) {
-      if (window.clutchTunnel) {
-        try {
-          await window.clutchTunnel.disconnect();
-        } catch (e) {
-        }
-      }
+      await dropTunnel();
       dropStaleBackend();
       if (doorOf(statusEl) === "popup") {
         refreshPicker();
@@ -6198,7 +6227,7 @@
     if (v === "local") {
       if (localStorage.getItem("clutch_ssh_connected")) {
         localStorage.removeItem("clutch_ssh_connected");
-        await window.clutchTunnel.disconnect();
+        await dropTunnel();
       }
       await switchBackendResolved();
       refreshPicker();
@@ -6303,6 +6332,36 @@
       return false;
     }
   }
+  async function refreshBrowsedMachine(slot = activeSlotId()) {
+    const clean = (v) => v ? String(v).replace(/\/+$/, "") : "";
+    const base = clean(state.apiBase);
+    if (!base || !(window.clutchApi && window.clutchApi.slotStatus)) {
+      noteBrowsedOn(null, null);
+      return;
+    }
+    let st;
+    try {
+      st = await window.clutchApi.slotStatus(slot);
+    } catch (e) {
+      noteBrowsedOn(null, null);
+      return;
+    }
+    const url = st && st.claimed ? clean(st.url) : "";
+    if (clean(state.apiBase) !== base || url !== base) {
+      noteBrowsedOn(null, null);
+      return;
+    }
+    if (!st.remote) {
+      noteBrowsedOn(base, null);
+      return;
+    }
+    const machine = asMachine(st.target);
+    if (!machine) {
+      noteBrowsedOn(null, null);
+      return;
+    }
+    noteBrowsedOn(base, machine);
+  }
   async function reconciledBackendUrl(slot = "") {
     if (!window.clutchTunnel) return null;
     if (connLostExitPending()) return null;
@@ -6318,6 +6377,10 @@
       return null;
     }
     if (flag) {
+      if (await claimedByTunnel(slot)) {
+        const target = await hostSessionUrl(slot);
+        return target && override !== target ? target : null;
+      }
       if (IS_ANDROID) {
         return null;
       }
@@ -6360,8 +6423,10 @@
       if (url) {
         switchBackend(url);
         if (!fsModal.classList.contains("hidden")) {
-          renderConnSelector();
-          loadDir(fsPath, false);
+          void refreshBrowsedMachine(slotId).then(() => {
+            renderConnSelector();
+            loadDir(fsPath, false);
+          });
         }
       } else connectionLost("the host has no session for this window");
     });

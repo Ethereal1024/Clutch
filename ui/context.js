@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/context.ts and run `npm run build:host`.
-// source sha256: a01409f7975fd1ea28d022326b77d63b01635afddea3f7cec76e42423bb94301
+// source sha256: c92348d6c788d7ae597e14dbc75cbe1b818451420ed1270bcadf9dc420c209c1
 
 "use strict";
 // The messages the model is asked with, derived from the event log.
@@ -50,6 +50,28 @@ function parseArguments(raw) {
     catch (e) {
         return null;
     }
+}
+// Canonical arguments for the wire. The model's call is replayed on every later
+// turn, so whatever the log holds must be JSON a strict provider will accept —
+// and one is not: an Anthropic shim in front of a Claude endpoint re-parses this
+// string into a tool_use `input`, and a key declared twice is refused there
+// ("Request body declares field \"...input.new_string\" more than once (HTTP
+// 400)"). A turn cut off mid-stream can record exactly that (two `new_string`
+// keys, no `old_string`), and because the record is durable it poisoned every
+// request in the project afterwards. JSON.parse already resolves a duplicate
+// key to its last value, so re-emitting an object string is the repair; a
+// string that is not a JSON object becomes `{}` and its paired result still
+// answers a well-formed call.
+function wireArguments(raw) {
+    try {
+        const v = JSON.parse(String(raw == null ? "" : raw) || "{}");
+        if (v && typeof v === "object" && !Array.isArray(v))
+            return JSON.stringify(v);
+    }
+    catch (e) {
+        /* not JSON: the call still needs a string the wire can parse */
+    }
+    return "{}";
 }
 // Distinct file paths the model was reading/writing in the window (most recent
 // first), so a post-compaction context can tell it to re-read them.
@@ -105,7 +127,7 @@ function toMessages(events) {
                     type: "function",
                     function: {
                         name: String((tc && tc.name) || ""),
-                        arguments: String((tc && tc.arguments) || ""),
+                        arguments: wireArguments(tc && tc.arguments),
                     },
                 }));
             }

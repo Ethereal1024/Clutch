@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit android/host/src/android-host.ts and run `node android/build-host.js`.
-// source sha256: 0b554804114e3e0f55d8a059acd51d427e73f79dadd0aaac814a75aff14a72d4
+// source sha256: 1fde40360486ece614dcc537efad019027e72141c1365c633c77c057610466f8
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -459,6 +459,13 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
             // the ladder may redial on the next hop loss (ui/tunnel-ladder.js)
             connect: (cfg) => ladder.userConnect(cfg, (stage) => bus.broadcast("tunnel:progress", stage)),
             status: async () => tunnel.tunnelStatus(),
+            // WHICH hops are up, for the page's own record of them (slots.ts
+            // refreshHopMirror): `hopUpFor` answers the cached-view question from that
+            // mirror, so the page re-reads it after every hop end — including the one the
+            // user asked for, which no `tunnel:ended` announces. A surface with no `list`
+            // leaves the page remembering the machine it just left, and every tab on it
+            // paints its cached picture over a hop nobody serves.
+            list: async () => tunnel.listTunnels(),
             disconnect: async () => {
                 // stop window backends first, while the tunnel/bridge is still alive
                 ladder.noteUserLeft(); // the user leaving: the standing intent goes with them

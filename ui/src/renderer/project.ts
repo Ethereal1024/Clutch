@@ -28,7 +28,7 @@ import { endSend, resumeTurn } from "./render-events";
 import { notice } from "./settings";
 import { closeSSE, connectSSE } from "./sse-stream";
 import { state, type Machine } from "./state";
-import { addEvent, dropOrphanLive, settleCatchUp } from "./stream-events";
+import { addEvent, dropOrphanLive, pruneTransient, settleCatchUp } from "./stream-events";
 import { endCatchUp, nearBottom, setClaimed, setJumpVisible, setReadOnly, setStatus } from "./stream-view";
 import { eventsEl, stream } from "./els";
 import { refreshRollbackAnchors, resetRollbackAnchors } from "./task-rollback";
@@ -1171,8 +1171,13 @@ export async function activateTab(tab, readOnly = false) {
       forgetDomCache(prev.id);
       dismissBlocked();
     } else {
-      // Cache the previous tab's complete DOM and render state for instant restoration
-      saveDomCache(prev.id);
+      // Cache the previous tab's complete DOM and render state for instant
+      // restoration. What the pane holds but no record can complete — a
+      // half-streamed call, a reconnect chip, a compaction still running, a fold
+      // whose move was cancelled — comes off first (stream-events
+      // pruneTransient): a switch that lands in the middle of one must cost a
+      // cache write, not the whole transcript read back through the tunnel.
+      saveDomCache(prev.id, pruneTransient);
     }
     if (prev.running) watchTab(prev);
   }

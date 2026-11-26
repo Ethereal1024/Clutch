@@ -18,12 +18,12 @@ import { SSE_RUN_LOST } from "./sse-stream";
 import { state } from "./state";
 import {
   appendThinkingRow, buildThinkingBlock, createAgentTextBlock,
-  flushTextRender, flushThinkingRender, paintTextBlock, scheduleTextRender,
+  flushTextRender, flushThinkingRender, landFoldsIn, paintTextBlock, scheduleTextRender,
   scheduleThinkingRender,
 } from "./stream-text";
 import { eventsEl } from "./els";
 import {
-  autoScroll, beginCatchUp, catchUp, endCatchUp, toolCallGroups, toolCalls,
+  autoScroll, beginCatchUp, busy, catchUp, endCatchUp, toolCallGroups, toolCalls,
 } from "./stream-view";
 import { refreshRollbackAnchors } from "./task-rollback";
 import {
@@ -72,6 +72,27 @@ export function clearStreamPreviews() {
     if (streamRows[id]) streamRows[id].row.remove();
     delete streamRows[id];
   }
+}
+
+// Take the page down to the part of itself that is a PICTURE: the rows a live
+// attempt draws beside its text are not. A half-streamed call has no record that
+// will ever complete it (deltas are never stored), the reconnect chip belongs to
+// a connection that is over, and a compaction still running has no `compaction`
+// record yet — so a replay of the log would not show any of them either.
+//
+// The restore already does this: dropOrphanLive → dropScaffold/clearRetryNote is
+// the first thing paintCachedView runs on the way back. What this export adds is
+// the same teardown on the way OUT, so that a switch which happens to land while
+// one of them is up costs a cache write instead of a replay — slots.ts hands this
+// to saveDomCache as its `settle` (project.ts activateTab).
+export function pruneTransient() {
+  clearStreamPreviews(); // the half-streamed call rows, and their in-memory handles
+  clearRetryNote(); // "connection lost — retrying"
+  if (state.compactionEl) {
+    state.compactionEl.remove();
+    state.compactionEl = null;
+  }
+  landFoldsIn(eventsEl); // a fold/diff whose move will never finish (stream-text)
 }
 
 // a mid-stream retry (the attempt died after streaming part of the turn): the
@@ -300,24 +321,34 @@ export function addEvent(ev) {
     if (state.sseRunLostPending) announceRunLost();
     state.runSettled = false;
     // A task opens a NEW run: the block the run before it left is CLOSED, and its
-    // text is on the log, so it is not this run's answer and no record of this run
-    // may be mistaken for a continuation of it. A task queued INTO the run now
-    // writing leaves the streaming block alone — that step has not finished, and
-    // its next delta belongs to the block already on the page.
-    if (state.textSealed) {
+    // text is on the log, so it is not this run's answer — no record of this run
+    // may be mistaken for a continuation of it, and no block of that run is still
+    // owed a record (its records are in the log AHEAD of this message, so every
+    // one of them already had its chance to arrive; an entry left here could only
+    // be matched by a later run's text).
+    //
+    // A turn boundary, though — never a step boundary. `step_start` is the only
+    // step boundary (run-host.ts emits it before every model() call, on the SAME
+    // ordered feed as the deltas); this record cannot stand in for one, because
+    // the durable log feed and the IPC event feed are UNORDERED, and a step's own
+    // assistant_message can reach this sink AHEAD of that step's remaining
+    // deltas. Unsealing the block here would then hand that tail a block of its
+    // own, holding only the END of the answer — the "whole answer, then the last
+    // few lines" duplicate (orin).
+    //
+    // `busy` is what tells the two apart: a task queued INTO a run that is still
+    // drawing arrives with the view busy, and there the pointers and the ledger
+    // belong to the step in flight. A message that opens the pane's NEXT run
+    // arrives once nothing is running, and there they are the finished turn's
+    // leftovers.
+    if (!busy) {
       state.lastTextEl = null;
       state.lastTextContent = "";
       state.textSealed = false;
+      state.lastRecordEl = null;
+      state.lastRecordText = "";
+      awaiting.length = 0;
     }
-    // ...and the answer the run before it already drew is not this run's: a final
-    // of this run must not complete that block, even if its text happens to extend
-    // it (lastRecordEl, stream-events.ts)
-    state.lastRecordEl = null;
-    state.lastRecordText = "";
-    // ...and no block of that run is still owed a record: its records are in the
-    // log AHEAD of this message, so every one of them has already had its chance
-    // to arrive — an entry left here could only be matched by a later run's text
-    awaiting.length = 0;
     // ...and every ask id the run before it handed out is dead
     forgetAnsweredPerm();
     // The composer's outbox (render-events.ts): the row this window's own send

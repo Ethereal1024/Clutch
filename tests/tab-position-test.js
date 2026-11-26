@@ -151,7 +151,7 @@ function context(opts) {
     fnBody("forgetMemento"),
     fnBody("restoreMemento"),
     "var domCaches = new Map();",
-    fnBody("viewIsSettled"),
+    fnBody("hasPicture"),
     fnBody("saveDomCache"),
     fnBody("restoreDomCache"),
   ].join("\n");

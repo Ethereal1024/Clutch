@@ -16,13 +16,13 @@ import { SUPERVISOR_BASE, hostSessionUrl } from "./app";
 import { IS_ANDROID } from "./env";
 import { refreshPicker } from "./conn-flow";
 import { connLostExitPending, connectionLost } from "./conn-lost";
-import { renderConnSelector } from "./conn-store";
+import { renderConnSelector, noteBrowsedOn } from "./conn-store";
 import { fsModal, fsPath, loadDir } from "./fs-browser";
 import { reconnectSSE } from "./sse-stream";
 import { state } from "./state";
 import { busy } from "./stream-view";
 import { eventsEl } from "./els";
-import { activeTab, adoptBase, claimTab, refreshHopMirror, rewatchTab, tabForSlot, unwatchAll } from "./slots";
+import { activeSlotId, activeTab, adoptBase, asMachine, claimTab, refreshHopMirror, rewatchTab, tabForSlot, unwatchAll } from "./slots";
 
 // Switch the active backend in place without a full page reload. The
 // supervisor's lifecycle port is refused: it is not a backend, and letting it
@@ -101,8 +101,56 @@ async function claimedByTunnel(slot) {
   }
 }
 
+// Tell the picker WHICH machine the session it is browsing runs on — the fact the
+// ✓, the selected entry and the "Connected:" line are drawn from (conn-store.ts,
+// browsedOn). The session is the one this window's BASE is, so the answer only
+// counts while it is still about that base: a host may take a moment to answer,
+// and a base that moved in the meantime makes the answer about a session nobody is
+// browsing. Which slot to ask about is the caller's to name, because only the
+// caller knows which session the body will list (the active tab's, a tab whose
+// session the host just announced, or the window's own default "").
+//
+// Nothing is drawn here: the callers redraw once this settles, so a picker that is
+// mid-attempt keeps the line that attempt put on it. An unanswerable ask (a build
+// with no slotStatus, a thrown IPC, a remote with no named target) clears the
+// record rather than guessing — the safe half: no ✓ is a smaller lie than a ✓ on
+// the wrong machine.
+export async function refreshBrowsedMachine(slot = activeSlotId()) {
+  const clean = (v) => (v ? String(v).replace(/\/+$/, "") : "");
+  const base = clean(state.apiBase);
+  if (!base || !(window.clutchApi && window.clutchApi.slotStatus)) {
+    noteBrowsedOn(null, null);
+    return;
+  }
+  let st;
+  try {
+    st = await window.clutchApi.slotStatus(slot);
+  } catch (e) {
+    noteBrowsedOn(null, null);
+    return;
+  }
+  // the answer is only worth anything while it still describes what is browsed
+  const url = st && st.claimed ? clean(st.url) : "";
+  if (clean(state.apiBase) !== base || url !== base) {
+    noteBrowsedOn(null, null);
+    return;
+  }
+  if (!st.remote) {
+    noteBrowsedOn(base, null); // this machine's session: no host to tick
+    return;
+  }
+  const machine = asMachine(st.target);
+  if (!machine) {
+    noteBrowsedOn(null, null);
+    return;
+  }
+  noteBrowsedOn(base, machine);
+}
+
 // reconcile the stored URL with the tunnel's real state; a live tunnel is
-// authoritative, a dead-tunnel leftover falls back to the local backend
+// authoritative, and a dead-tunnel leftover falls back to the local backend only
+// for a slot whose own claim is not remote — the flag alone says where this window
+// once connected, never where the SLOT it is reconciling is.
 //
 // `slot` is the session this reconcile is FOR, and it defaults to the window's own
 // (""). A caller that is acting for one tab passes that tab's slot: the ask claims
@@ -124,18 +172,33 @@ export async function reconciledBackendUrl(slot = "") {
     // live tunnel: the main process owns this window's session URL — ask it
     const target = await hostSessionUrl(slot);
     if (target && override !== target) {
-      // The ✓ the picker draws means "this window is ON the saved host", and it is
-      // read off this flag. So the flag may only be written for a claim that really
-      // is the tunnel's: a slot that fell back to a session on THIS machine is
-      // working here, and marking it SSH-connected is how the picker came to offer
-      // a host it could not dial (the ✓ it would not move off). Where the claim
-      // cannot be asked about, nothing is claimed on its behalf either.
+      // The standing intent is written only for a claim that really is the
+      // tunnel's: a slot that fell back to a session on THIS machine is working
+      // here, and marking it SSH-connected is how the picker came to offer a host
+      // it could not dial (the ✓ it would not move off). It is not the ✓ itself —
+      // the picker asks the host which machine its session is on (conn-store.ts
+      // browsedOn) — but it is what a lost hop is announced by and what a fresh
+      // connect spends. Where the claim cannot be asked about, nothing is claimed
+      // on its behalf either.
       if (await claimedByTunnel(slot)) localStorage.setItem("clutch_ssh_connected", "1");
       return target;
     }
     return null;
   }
   if (flag) {
+    // The flag is the standing intent of a window that once connected — it is not
+    // evidence about the session `slot` holds. With one named hop per TAB the
+    // window's own tunnel can be down while the tab's session is up and remote, and
+    // this branch used to answer that by asking for the WINDOW's default slot
+    // (switchBackendResolved → hostSessionUrl("")): that CLAIMS a session on this
+    // machine and adopts it, which is how a picker opened on a remote host listed
+    // this machine's files and moved the whole window off the tab's session. So ask
+    // the slot this reconcile is for first: if its claim really is remote, that is
+    // the session to browse and the intent is still true — keep the flag.
+    if (await claimedByTunnel(slot)) {
+      const target = await hostSessionUrl(slot);
+      return target && override !== target ? target : null;
+    }
     if (IS_ANDROID) {
       // device report #2: "fall back to the local backend" is not a fallback on
       // the phone — there is no agent behind 127.0.0.1, so that branch pointed
@@ -247,8 +310,13 @@ if (window.clutchApi && window.clutchApi.onBaseChanged) {
       // base instead of a timer polling for it (the picker opens folded — see
       // openFsBrowser in fs-browser.ts — and unfolds on this first listing)
       if (!fsModal.classList.contains("hidden")) {
-        renderConnSelector();
-        loadDir(fsPath, false);
+        // the announcement is the answer to the same question a connect asks, so
+        // ask WHICH machine this session is on before drawing the bar: the ✓ names
+        // that machine, never the one the standing SSH record remembers
+        void refreshBrowsedMachine(slotId).then(() => {
+          renderConnSelector();
+          loadDir(fsPath, false);
+        });
       }
     } else connectionLost("the host has no session for this window");
   });

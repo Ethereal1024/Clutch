@@ -239,6 +239,11 @@ async function main() {
   };
   global.resetBackendLocal = async () => done.push("resetBackendLocal");
   global.refreshPicker = () => done.push("refreshPicker");
+  // the hop mirror's reader (slots.ts): dropTunnel asks it, after the shell has
+  // answered, what hops are up — the cached-view decision (hopUpFor) reads that
+  // mirror, and a machine just dropped would still be "up" in it otherwise. Stubbed
+  // as a recorder so the sequence below proves the order.
+  global.refreshHopMirror = async () => done.push("refreshHopMirror");
   // the failed move's clean-up (js/backend-lifecycle.js): the base names a session
   // whose forward died with the hop it left, so the stub does the one thing the
   // real one does that the picker reads back — it lets go of the base
@@ -250,6 +255,12 @@ async function main() {
   // it validates: that note belongs to its own runner, and this one only needs the
   // call to exist and to stay out of the sequence it is counting
   global.connLostExitClear = () => {};
+  // the picker's own teardown (conn-flow.ts dropTunnel): the shell's Disconnect is
+  // caller-managed and announces nothing, so the flow re-reads the hop mirror right
+  // after it. Its body comes with the two doors that call it, and the reader it waits
+  // for (slots.ts refreshHopMirror) is stubbed below — what the stub records is the
+  // proof that the re-read happens AFTER the shell's answer and not before it.
+  (0, eval)(fnBody("dropTunnel"));
   // the tunnel's own answer, and the two bodies that read it: the door below asks
   // the hop which host it is for before it believes the ✓ (section 11)
   (0, eval)(fnBody("hopLandedFor"));
@@ -289,6 +300,11 @@ async function main() {
     global.connOnValue = "";
     global.connBusy = false;
     global.fsListing = false;
+    // what the host answered about the machine of the session being browsed
+    // (conn-store.ts `browsedOn`, written in the app by refreshBrowsedMachine). No
+    // answer here: a section that wants a ✓ seeds it, because the record the picker
+    // used to read (clutch_ssh_connected) is no longer what draws it.
+    global.browsedOn = null;
     tunnelTarget = null;
     dialOk = true;
     done.length = 0;
@@ -339,6 +355,8 @@ async function main() {
   // ---- 3) choosing a host in the list IS the connection ----
   global.state.apiBase = "http://127.0.0.1:31001";
   seed(HOSTS, SESSION);
+  // ...and the host says the session it is browsing runs on the saved host
+  global.browsedOn = { base: "http://127.0.0.1:31001", machine: { host: "new.example.com", user: "me", port: "22" } };
   renderConnSelector();
   check(connSelect.value === "ssh:me@new.example.com:22",
     `a live session shows the host this window is on (got ${JSON.stringify(connSelect.value)})`);
@@ -355,6 +373,8 @@ async function main() {
     "and does nothing else itself: the connect path owns what follows it");
   check(done[0] === "disconnect",
     `leaving one remote for another drops the tunnel first (got ${done.join(",")})`);
+  check(done[1] === "refreshHopMirror" && done[2] === 'dial:"old.example.com" "me" "2222"',
+    `and the hop mirror is re-read after that drop, before the new host is dialled — the shell's teardown announces nothing, so the record of what is up has to be asked again (got ${done.join(",")})`);
   check(!store.has("clutch_ssh_connected"),
     "the standing intent goes before the drop, so the move is not announced as a loss");
   global.state.apiBase = null;
@@ -371,6 +391,7 @@ async function main() {
   // — no intent, no base, no ✓, and the host it left is a choice again.
   global.state.apiBase = "http://127.0.0.1:31001";
   seed(HOSTS, SESSION);
+  global.browsedOn = { base: "http://127.0.0.1:31001", machine: { host: "new.example.com", user: "me", port: "22" } };
   renderConnSelector();
   check(connOnValue === "ssh:me@new.example.com:22" && connSelect.value === connOnValue,
     `the window is on new.example.com before the move (got ${JSON.stringify(connOnValue)})`);
@@ -379,8 +400,9 @@ async function main() {
   const moved = await connSwitch("gone.example.com", "me", "22", moveStatus);
   check(moved === false, `a move to a host that is not there reports the failure (got ${JSON.stringify(moved)})`);
   check(done.join(",") ===
-    'disconnect,dial:"gone.example.com" "me" "22",disconnect,dropStaleBackend,refreshPicker',
-    `the move drops the old hop first, dials the new host, and then cleans up after itself (got ${done.join(",")})`);
+    'disconnect,refreshHopMirror,dial:"gone.example.com" "me" "22",' +
+      "disconnect,refreshHopMirror,dropStaleBackend,refreshPicker",
+    `the move drops the old hop first, re-reads what is up, dials the new host, and then cleans up after itself (got ${done.join(",")})`);
   check(!store.has("clutch_ssh_connected"),
     "the standing intent is spent by the move and not put back: this window is on nothing");
   check(global.state.apiBase === null,
@@ -421,6 +443,50 @@ async function main() {
     `and the attempt's verdict is still the bar's line (got ${JSON.stringify(connStatus.textContent)})`);
   check(!connSelect.opts.some((o) => o.mark) && connOnValue === "",
     "with no ✓ and nothing this window is on: the bar offers the host it left as the next move");
+  global.state.apiBase = null;
+
+  // ---- 3d) the ✓ names the machine the BODY is listing, not the last connect ----
+  // The report: the bar read `root@region-46…:31943` and the list under it was THIS
+  // machine's directories (「牛头不对马嘴」). One named hop per TAB (slots.ts) is what
+  // makes it reachable: the window is on a local tab's session while the standing SSH
+  // record still names the remote, and the ✓ — and connOnValue with it — was read off
+  // that record. So the picker draws the host's word about the session it browses:
+  // this machine means no saved host is ticked, and the remembered host is a choice.
+  global.state.apiBase = "http://127.0.0.1:31001";
+  seed(HOSTS, SESSION); // the record still says new.example.com is connected
+  global.browsedOn = { base: "http://127.0.0.1:31001", machine: null }; // ...the host says: this machine
+  renderConnSelector();
+  check(!connSelect.opts.some((o) => o.mark),
+    "a session on THIS machine ticks no saved host, whatever the standing record says");
+  check(connStatus.textContent === "Using http://127.0.0.1:31001",
+    `and the line says which session is in use, not that a host is connected (got ${JSON.stringify(connStatus.textContent)})`);
+  check(connOnValue === "" && connTarget() === "ssh:me@new.example.com:22",
+    `the remembered host is a choice again, so it can be dialled (got connOnValue=${JSON.stringify(connOnValue)}, target=${JSON.stringify(connTarget())})`);
+  done.length = 0;
+  connSelect.fire();
+  await flush();
+  check(/dial:"new\.example\.com" "me" "22"/.test(done.join("|")),
+    `and choosing it dials it — the host the bar used to refuse as "already here" (got ${done.join(",")})`);
+
+  // an answer about ANOTHER session says nothing about what is browsed now
+  global.state.apiBase = "http://127.0.0.1:31001";
+  seed(HOSTS, SESSION);
+  global.browsedOn = { base: "http://127.0.0.1:31002", machine: { host: "new.example.com", user: "me", port: "22" } };
+  renderConnSelector();
+  check(!connSelect.opts.some((o) => o.mark) && connOnValue === "",
+    "an answer about a session the window is no longer on draws no ✓");
+
+  // a machine the saved list does not hold is still named — by the host's word about
+  // the session, never by the record of where this profile last connected
+  global.state.apiBase = "http://127.0.0.1:31001";
+  seed(HOSTS, SESSION);
+  global.browsedOn = { base: "http://127.0.0.1:31001", machine: { host: "10.221.31.227", user: "qianli", port: "22" } };
+  renderConnSelector();
+  const synth = connSelect.opts.find((o) => o.value === "ssh:__connected__");
+  check(synth && synth.mark === "✓" && synth.textContent === "qianli@10.221.31.227:22",
+    `a machine the list does not hold is the machine the bar names (got ${synth ? JSON.stringify(synth.textContent) : "no entry"})`);
+  check(connOnValue === "ssh:__connected__" && connectBtn.disabled === true,
+    "and there is nowhere to move to: the window is already there");
   global.state.apiBase = null;
 
   // ---- 3b) a session URL in the SHARED storage is not this window's session ----
@@ -510,6 +576,26 @@ async function main() {
   check(/setConnBusy\(true\);/.test(fnBody("handleSshConnect")) &&
     /finally \{\s*setConnBusy\(false\);/.test(fnBody("handleSshConnect")),
     "the one place that runs an attempt is what flags it, and clears it either way");
+
+  // ---- 7b) the standing intent follows the CLAIM, not the hop ----
+  // `clutch_ssh_connected` was written as soon as the tunnel came up, before the
+  // window had a session on that host. A hop can come up while the claim behind it
+  // does not (the far side fails to bootstrap), and the flag then named a host the
+  // window was NOT on — the reported 「牛头不对马嘴」 reached by another road: the
+  // picker drew that host's ✓ over the listing the window still had. No session, no
+  // intent: the flag is written only once the claim resolved, and taken back when
+  // it did not.
+  const dial = fnBody("handleSshConnect");
+  check(dial.indexOf("upsertConn(") < dial.indexOf("switchBackendResolved("),
+    "the host joins the list when the dial lands — before the claim, which is the attempt's next step");
+  check(
+    /const claimed = await switchBackendResolved\(\);\s*\n?\s*if \(claimed\) localStorage\.setItem\("clutch_ssh_connected", "1"\);\s*\n?\s*else localStorage\.removeItem\("clutch_ssh_connected"\);/.test(
+      dial
+    ),
+    "the standing intent is written after the claim resolved, and only when it did"
+  );
+  check((dial.match(/"clutch_ssh_connected"/g) || []).length === 2,
+    "…and nowhere else in the attempt: there is no write of it before the ask");
 
   // ---- 8) the folded bar's door: the welcome state, never the fold alone ----
   // The state functions are driven for real, against the bar's own nodes seeded as
@@ -978,6 +1064,7 @@ async function main() {
   global.IS_ANDROID = true;
   global.state.apiBase = "http://127.0.0.1:31001";
   seed(HOSTS, SESSION);
+  global.browsedOn = { base: "http://127.0.0.1:31001", machine: { host: "new.example.com", user: "me", port: "22" } };
   renderConnSelector();
   check(connOnValue === "ssh:me@new.example.com:22",
     `the ticked entry is the host the picker believes this window is on (got ${JSON.stringify(connOnValue)})`);

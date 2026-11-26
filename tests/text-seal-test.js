@@ -19,10 +19,14 @@
 // which repeats the last one (run-state.ts foldRun closes a turn with it). A
 // record whose content EXTENDS the block writes it whole, in place, and closes it;
 // deltas still in flight for that step are text the block already says and are
-// dropped. step_start (and a new user_message) open the seal again — the seal is
-// per model step, never a mute. A cut (a reconnect, a tab switch) CLOSES the block
-// it can no longer feed instead of taking it off the page, and files it with the
-// record that still owes it (the `awaiting` ledger).
+// dropped. step_start opens the seal again, and step_start only: it is the one
+// boundary that rides the same ordered feed as the deltas, while a
+// `user_message` — the record that opens the next turn — rides the log's feed and
+// may land in the middle of the step still writing (a task queued into it). So a
+// task's message ends the TURN (`busy` false: nothing is drawing) and never the
+// step. The seal is per model step, never a mute. A cut (a reconnect, a tab
+// switch) CLOSES the block it can no longer feed instead of taking it off the
+// page, and files it with the record that still owes it (the `awaiting` ledger).
 //
 // Like the other runners here this one drives the REAL addEvent/applyStreamEvent
 // and the real text-render path against stubs, so a silent edit fails it.
@@ -115,6 +119,10 @@ global.clearStream = () => {};
 // the replay bracket (stream-view.ts): the evals below run as classic scripts, so
 // the real functions resolve this free name against the global scope
 global.catchUp = false;
+// ...and so does the view's own "a run is drawing into this pane right now"
+// (stream-view.ts), which decides whether a task's message may touch the
+// streaming pointers (stream-events.ts)
+global.busy = false;
 
 // ---- load the real code ----
 // the coalesced text render (stream-text.ts): renderTextBlock is what paints the
@@ -162,6 +170,7 @@ function freshPane() {
   state.runSettled = false;
   state.sseRunLostPending = false;
   global.catchUp = false; // the replay bracket (stream-view.ts)
+  global.busy = false; // a run drawing into this pane (stream-view.ts)
   global.awaiting.length = 0; // a fresh pane holds no block a record still owes
 }
 
@@ -217,12 +226,50 @@ check(textBlocks().length === 2 && textBlocks()[0]._body.innerHTML === "<p>step 
 check(textBlocks()[1]._body.innerHTML !== "<p>step one's text</p>",
   "the newer step's block keeps its own text: two steps are never merged into one answer");
 
-// ---- 6. a new task opens the seal; so does a discarded partial ----
+// ---- 6. a finished run's pointers end with the turn, not with a step ----
+//
+// The orin duplicate: a task queued INTO a run that is still drawing arrives while
+// that step is mid-answer, and the step's own record can reach this sink AHEAD of
+// its remaining deltas. The old branch unsealed the block on that message, so the
+// tail opened a SECOND block holding only the end of the answer ("…拔掉 micro-USB
+// 线"). `busy` (stream-view.ts) is what separates such a message from one that
+// opens the pane's next run.
 freshPane();
 addEvent({ type: "text_delta", content: "answer" });
 addEvent({ type: "assistant_message", content: "answer" });
 addEvent({ type: "user_message", content: "next task" });
-check(state.textSealed === false, "a new task is a new run: nothing of the last one is still collecting text");
+check(state.textSealed === false, "a new task, once nothing is running, is a new turn: nothing of the last one is still collecting text");
+
+// the reported shape, in order: a record that leads its own tail, and the task the
+// user queued into that same step
+freshPane();
+global.busy = true; // a run is drawing into this pane
+addEvent({ type: "text_delta", content: OPEN });
+addEvent({ type: "assistant_message", content: OPEN + TAIL }); // the record, ahead of its own tail
+addEvent({ type: "user_message", content: "继续" }); // ...and a task queued into the same step
+check(state.textSealed === true && state.lastTextEl === textBlocks()[0],
+  "a task queued into a running step does not unseal the block that step is finishing");
+addEvent({ type: "text_delta", content: TAIL }); // the step's leftover deltas
+check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 1,
+  "the leftover tail adds no block and repeats nothing: one answer, one block, whole");
+check(state.lastTextContent === OPEN + TAIL,
+  "…and the pointer still holds the step's whole text, so what follows can complete it");
+
+// ...and the run's final, which repeats the whole answer, completes THAT block
+addEvent({ type: "final", status: "completed", summary: OPEN + TAIL });
+check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 1,
+  "the final completes the one block in place: no second whole-answer copy under the tail");
+check(state.lastRecordEl === textBlocks()[0] && state.lastRecordText === OPEN + TAIL,
+  "…and the ledger the task did NOT wipe still names it: the step's record was never orphaned");
+
+// the same message with nothing running DOES wipe it: that run is over
+freshPane();
+addEvent({ type: "text_delta", content: "answer" });
+addEvent({ type: "assistant_message", content: "answer" });
+check(state.lastRecordEl !== null, "a record the pane holds is in the ledger");
+addEvent({ type: "user_message", content: "next task" });
+check(state.lastRecordEl === null && state.lastRecordText === "" && global.awaiting.length === 0,
+  "a new task, once nothing is running, forgets the block the run before it drew");
 
 freshPane();
 addEvent({ type: "text_delta", content: "answer" });
@@ -461,6 +508,10 @@ check(!/if \(state\.lastTextEl && state\.lastTextEl\.isConnected\) \{\s*state\.l
   "the one-way latch that dropped the pointer is gone: a live block is never abandoned mid-step");
 check(/if \(state\.textSealed\) return true;/.test(fnBody("applyStreamEvent")),
   "a closed block takes no more deltas: what follows a cut cannot be appended to the half");
+check(/if \(!busy\) \{\s*state\.lastTextEl = null;\s*state\.lastTextContent = "";\s*state\.textSealed = false;/.test(fnBody("addEvent")),
+  "a task's message unseals only once nothing is drawing: a step's own leftover tail keeps the block it belongs to");
+check(!/if \(state\.textSealed\) \{\s*state\.lastTextEl = null;/.test(fnBody("addEvent")),
+  "…and never unconditionally: the feeds are unordered, so that message can land inside the step writing now");
 check(/const owed = !\(state\.textSealed \|\| state\.runSettled\);/.test(fnBody("dropOrphanLive")) &&
   /awaitRecord\(live, state\.lastTextContent\)/.test(fnBody("dropOrphanLive")) &&
   /state\.textSealed = true;/.test(fnBody("dropOrphanLive")),

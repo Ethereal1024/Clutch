@@ -23,7 +23,9 @@
 //
 // Run: node tests/backend-reconcile-test.js
 
-const { check, summary, slicer, uiModules } = require("./harness.js");
+const { check, summary, slicer, uiModules, runnableSnippet } = require("./harness.js");
+const fs = require("fs");
+const path = require("path");
 
 async function main() {
   const mods = uiModules();
@@ -35,7 +37,10 @@ async function main() {
   const APP = src("app.ts");
   const LIFECYCLE = src("backend-lifecycle.ts");
   const PICKER = src("fs-browser.ts");
-  const { fnBody } = slicer(APP + "\n" + LIFECYCLE);
+  // slots.ts is imported, not a step of the page's load order (uiModules lists the
+  // side-effect chain), so its two leaf helpers are read from the tree directly
+  const SLOTS = fs.readFileSync(path.join(__dirname, "..", "ui", "src", "renderer", "slots.ts"), "utf8");
+  const { fnBody } = slicer(APP + "\n" + LIFECYCLE + "\n" + SLOTS);
 
   // ---- the page's stores, and the three facts the ask is made of ----
   const store = new Map();
@@ -68,7 +73,7 @@ async function main() {
   // What the main process would answer. `asks` records the SLOT each ask was
   // made for, because that is the half that used to be wrong.
   const asks = [];
-  let claim = { claimed: true, remote: true, url: "http://127.0.0.1:40555" };
+  let claim = { claimed: true, remote: true, url: "http://127.0.0.1:40555", target: null };
   let tunnel = { active: true, url: "http://127.0.0.1:41000" };
   global.window = {
     clutchApi: {
@@ -78,7 +83,7 @@ async function main() {
       },
       slotStatus: async (slotId) => {
         asks.push("status:" + (slotId === undefined ? "<undefined>" : String(slotId)));
-        return { claimed: claim.claimed, remote: claim.remote, url: claim.url };
+        return { claimed: claim.claimed, remote: claim.remote, url: claim.url, target: claim.target };
       },
     },
     clutchTunnel: { status: async () => tunnel },
@@ -94,10 +99,10 @@ async function main() {
     asks.length = 0;
     switches = 0;
     note = false;
-    claim = { claimed: true, remote: true, url: "http://127.0.0.1:40555" };
+    claim = { claimed: true, remote: true, url: "http://127.0.0.1:40555", target: null };
     global.window.clutchApi.slotStatus = async (slotId) => {
       asks.push("status:" + (slotId === undefined ? "<undefined>" : String(slotId)));
-      return { claimed: claim.claimed, remote: claim.remote, url: claim.url };
+      return { claimed: claim.claimed, remote: claim.remote, url: claim.url, target: claim.target };
     };
     tunnel = { active: true, url: "http://127.0.0.1:41000" };
   };
@@ -188,6 +193,10 @@ async function main() {
   check(!/reconciledBackendUrl\(\)/.test(openFn),
     "never the empty one: that call is what started a second session (this machine's, with no tunnel URL yet) " +
     "and adopted it under the tab's feet");
+  check(/await refreshBrowsedMachine\(\)/.test(openFn) &&
+    openFn.indexOf("refreshBrowsedMachine()") < openFn.indexOf("renderConnSelector()"),
+    "and it asks WHICH machine that session is on before the picker's bar is drawn: the ✓ is the host's answer, " +
+    "not the standing SSH record's");
 
   // The ask names the session it is for, and in the page's own load order there is
   // ONE of it: the window's (hostSessionUrl). A tab's claim is the other door, in
@@ -203,8 +212,117 @@ async function main() {
     hostFn.indexOf("connLostExitPending()") < hostFn.indexOf("baseUrl("),
     "which reads the note before it asks, and passes the slot on");
 
-  summary("backend-reconcile");
-}
+  // ---- 7) a stale flag does not send the reconcile to ANOTHER session ----
+  // Same lie by another route. With one named hop per TAB (slots.ts) the window's
+  // own tunnel can be down while the tab's session is up and remote; a stale
+  // clutch_ssh_connected used to send this branch to switchBackendResolved() — the
+  // WINDOW's default slot, which with no URL claims a session on THIS machine and
+  // adopts it. That is how a picker opened on a remote tab listed this machine's
+  // files, and how the whole window was moved off the tab's session.
+  reset();
+  tunnel = { active: false, url: "" }; // the window's own hop is not up...
+  claim = {
+    claimed: true,
+    remote: true,
+    url: "http://127.0.0.1:40555",
+    target: { host: "region-46.seetacloud.com", user: "root", port: 31943 },
+  };
+  store.set("clutch_ssh_connected", "1"); // ...but the standing intent still names a host
+  session.set("clutch_api_url", "http://127.0.0.1:39999");
+  const kept = await reconciledBackendUrl("tab-7");
+  check(kept === "http://127.0.0.1:40555",
+    `the reconcile hands back the TAB's own live remote session instead of claiming another (got ${JSON.stringify(kept)})`);
+  check(switches === 0,
+    "and nothing is switched behind the caller's back: no session of the window's own was manufactured");
+  check(store.get("clutch_ssh_connected") === "1",
+    "the standing intent is kept: the claim it stood for is still up, and still on that machine");
+  check(asks.join(",") === "status:tab-7,tab-7",
+    `and every question in it is about the TAB (asked ${JSON.stringify(asks)})`);
+
+  reset();
+  tunnel = { active: false, url: "" };
+  store.set("clutch_ssh_connected", "1");
+  session.set("clutch_api_url", "http://127.0.0.1:40555");
+  check((await reconciledBackendUrl("tab-7")) === null && switches === 0,
+    "a slot whose live claim is already the base is not moved at all");
+
+  // the fallback is not gone — it is about the SLOT's claim, not the flag's word
+  reset();
+  tunnel = { active: false, url: "" };
+  claim = { claimed: true, remote: false, url: "http://127.0.0.1:40555", target: null };
+  store.set("clutch_ssh_connected", "1");
+  check((await reconciledBackendUrl("tab-7")) === null && switches === 1,
+    "a slot whose claim really is on THIS machine still falls back to the window's own session, once");
+  check(!store.has("clutch_ssh_connected"),
+    "and the flag that named a host nobody is on goes with it");
+
+  // ---- 8) the picker's ✓ comes from the host, about the session it BROWSES ----
+  // conn-store.ts draws the ✓ / the "Connected:" line from `browsedOn`, and this is
+  // its only writer. It answers one question — WHICH machine is the session this
+  // window's base is on — and records nothing when the answer is not about that
+  // session: a moved base, an unaskable host or a remote with no name is no name to
+  // tick (no ✓ is a smaller lie than a ✓ on the wrong machine).
+  let noted = "<never asked>";
+  global.noteBrowsedOn = (base, machine) => {
+    noted = base ? { base: String(base), machine: machine || null } : null;
+  };
+  (0, eval)(runnableSnippet(fnBody("activeSlotId")));
+  (0, eval)(runnableSnippet(fnBody("asMachine")));
+  (0, eval)(runnableSnippet(fnBody("refreshBrowsedMachine")));
+  global.state.activeTabId = "tab-7";
+
+  reset();
+  global.state.apiBase = "http://127.0.0.1:40555/";
+  claim = {
+    claimed: true,
+    remote: true,
+    url: "http://127.0.0.1:40555",
+    target: { host: "region-46.seetacloud.com", user: "root", port: "31943" },
+  };
+  await refreshBrowsedMachine();
+  check(noted && noted.base === "http://127.0.0.1:40555" && noted.machine &&
+    noted.machine.host === "region-46.seetacloud.com" && noted.machine.user === "root" &&
+    noted.machine.port === "31943",
+    `the answer names the machine the browsed session is on, by its own name (got ${JSON.stringify(noted)})`);
+  check(asks.join(",") === "status:tab-7",
+    `asked about the tab the picker browses — and about nothing else (asked ${JSON.stringify(asks)})`);
+
+  reset();
+  global.state.apiBase = "http://127.0.0.1:40555";
+  claim = { claimed: true, remote: false, url: "http://127.0.0.1:40555", target: null };
+  await refreshBrowsedMachine("tab-7");
+  check(noted && noted.machine === null,
+    "a session on THIS machine is recorded as this machine (null), not as a host");
+
+  reset();
+  global.state.apiBase = "http://127.0.0.1:40555";
+  global.window.clutchApi.slotStatus = async () => {
+    // the base moves while the host is answering
+    global.state.apiBase = "http://127.0.0.1:40556";
+    return {
+      claimed: true,
+      remote: true,
+      url: "http://127.0.0.1:40555",
+      target: { host: "region-46.seetacloud.com", user: "root", port: "31943" },
+    };
+  };
+  await refreshBrowsedMachine("tab-7");
+  check(noted === null,
+    "an answer about a session the window has already left is not recorded: the ✓ cannot move to the new base");
+
+  reset();
+  global.state.apiBase = "http://127.0.0.1:40555";
+  claim = { claimed: true, remote: true, url: "http://127.0.0.1:40555", target: null };
+  await refreshBrowsedMachine("tab-7");
+  check(noted === null, "a remote with no named target is no name to tick either");
+
+  reset();
+  global.state.apiBase = "http://127.0.0.1:40555";
+  delete global.window.clutchApi.slotStatus;
+  await refreshBrowsedMachine("tab-7");
+  check(noted === null, "and a host that cannot be asked records nothing: no ✓ is the safe half");
+
+  summary("backend-reconcile");}
 
 main().catch((e) => {
   console.error("FAIL:", (e && e.stack) || e.message || e);

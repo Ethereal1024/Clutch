@@ -9,7 +9,7 @@
 // loads the page over file://, where Chromium refuses module scripts.
 
 import { apiFetch } from "./app";
-import { reconciledBackendUrl, switchBackend, switchBackendResolved } from "./backend-lifecycle";
+import { reconciledBackendUrl, refreshBrowsedMachine, switchBackend, switchBackendResolved } from "./backend-lifecycle";
 import { hidePickerBody, setFsListing, showPickerBody } from "./conn-flow";
 import { connStatus, renderConnSelector } from "./conn-store";
 import { $ } from "./dom";
@@ -237,8 +237,14 @@ export function openFsBrowser(mode) {
         notice("could not reach the backend: " + (e && e.message ? e.message : e));
         return null;
       });
-  settled.then((url) => {
+  settled.then(async (url) => {
     if (url) switchBackend(url);
+    // The ✓ and the "Connected:" line are claims about the session this body is
+    // about to list, so they are asked for first — the host's word about the slot
+    // the picker browses (backend-lifecycle.ts refreshBrowsedMachine), never the
+    // standing SSH record. An unaskable host draws no claim at all and the listing
+    // still starts: no ✓ is a smaller lie than a ✓ on the wrong machine.
+    await refreshBrowsedMachine();
     renderConnSelector();
     // reopen where the user last left the browser instead of the home directory
     loadDir(localStorage.getItem("clutch_fs_last_dir") || "");

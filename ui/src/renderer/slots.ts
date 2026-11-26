@@ -689,7 +689,7 @@ export function restoreMemento(slotId: string): number | null {
 
 // ---- DOM cache: save and restore per-tab rendered content --------------------
 
-/** Is this transcript a picture worth taking, or is a run still drawing into it?
+/** Does this transcript hold anything worth keeping at all?
  *
  *  Read off the DOM rather than off a status flag, because the flag describes the
  *  tab the window is SHOWING and this question is always asked about the tab it is
@@ -704,48 +704,49 @@ export function restoreMemento(slotId: string): number | null {
  *  the live pointers back (stateSnapshot) and normalise them once the pane is up
  *  (dropOrphanLive, project.ts) — the same teardown a reconnect performs.
  *
- *  What is still refused is what no record can ever complete, or what a recorded
- *  frame of it would freeze:
+ *  Only an EMPTY pane is refused: nothing to keep, and the replay is one request.
  *
- *  * an empty pane: nothing to keep, and the replay is one request;
- *  * a `.stream` row: a tool call whose arguments are still being generated. Half
- *    an argument list is never written to the .clc, so the picture could only
- *    come back as a call that never happened — and its in-memory handle
- *    (streamRows) may not even be the window's any more;
- *  * a `.live` row: the run talking ABOUT itself (a reconnect chip, a compaction
- *    in progress). Those exist for seconds and no durable record retires a
- *    restored one, so it would sit in the pane for good;
- *  * a fold caught mid-move: it carries the animation's own inline height, and a
- *    picture of that is a box frozen at a random size with its content clipped —
- *    the reported "a fold that ends halfway and cannot be opened".
+ *  Three more things used to be refused here — a `.stream` row (a tool call whose
+ *  arguments are still being generated), a `.live` row (the run talking ABOUT
+ *  itself), and a `.fold`/`pre` caught mid-move (its inline height). Each refusal
+ *  also DELETED the picture the tab already had, and all three are momentary
+ *  states a running tab is in constantly: "switched away while a call was
+ *  streaming", "switched away during a compaction", "switched away during a fold"
+ *  each cost a full rebuild from the network on the way back — the reported "it
+ *  still reloads, now and then". They were also not what made the picture safe:
+ *  the restore's own teardown (dropOrphanLive) removes those rows anyway, because
+ *  no durable record ever completes them. So the caller that owns the modules that
+ *  DRAW them takes them off the page before this picture is taken (`settle`,
+ *  project.ts activateTab) and the pane is cached.
  *
  *  A view that fails is not cached at all: the tab falls back to
  *  restoreTabView/openInTab, which rebuild the same range out of the log — the one
  *  place a complete transcript can come from. */
-function viewIsSettled(eventsEl: HTMLElement): boolean {
-  if (!eventsEl.children.length) return false;
-  // a call whose arguments are still streaming, and the run's own transient news
-  if (eventsEl.querySelector(".stream, .live")) return false;
-  // a fold (or a diff) whose close/open animation has not landed yet
-  for (const el of Array.from(eventsEl.querySelectorAll<HTMLElement>(".fold, pre"))) {
-    if (el.style.height || el.style.gridTemplateRows) return false;
-  }
-  return true;
+function hasPicture(eventsEl: HTMLElement): boolean {
+  return !!eventsEl.children.length;
 }
 
 /** Save the current #events DOM tree and render state for a tab so it can be
  *  instantly restored when the tab is re-activated, without re-rendering. */
-export function saveDomCache(slotId: string) {
+export function saveDomCache(slotId: string, settle?: () => void) {
   if (!slotId) return;
   const eventsEl = document.getElementById("events");
   const stream = document.getElementById("stream");
-  if (!eventsEl || !stream || !paneShowsTab(slotId) || !viewIsSettled(eventsEl)) {
+  if (!eventsEl || !stream || !paneShowsTab(slotId) || !hasPicture(eventsEl)) {
     // Nothing in the pane is this tab's picture of a finished transcript. Drop
     // whatever was cached for it: a picture taken of an EARLIER state is worse
     // than none — it would come back missing everything since.
     domCaches.delete(slotId);
     return;
   }
+  // Whatever is on this page that no durable record can ever complete — a
+  // half-streamed call, a reconnect chip, a compaction still running, a fold whose
+  // move was cancelled and will never fire its landing — is the owner's to take
+  // off before the picture is taken. Refusing the whole cache for them is what
+  // turned "switched away mid-call" into a replay from the network (stream-events
+  // pruneTransient). Nothing is repainted in between: this runs in the same task
+  // as the move below, so the reader never sees those rows go.
+  if (settle) settle();
   // The place is read BEFORE any row moves: emptying the pane shrinks the
   // scrollable area, and the browser clamps scrollTop with it (that clamp is the
   // trusted "content shrank" scroll stream-view.ts learns to ignore). A cache

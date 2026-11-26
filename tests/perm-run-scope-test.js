@@ -129,6 +129,7 @@ global.textRenderRaf = 0;
 global.thinkingRenderRaf = 0;
 global.compactionEl = null;
 global.retryNoteEl = null;
+global.busy = false; // a run drawing into this pane (stream-view.ts)
 global.catchUp = false;
 global.followTail = true;
 global.gliding = false;

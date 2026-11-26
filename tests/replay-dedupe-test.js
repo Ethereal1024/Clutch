@@ -112,6 +112,7 @@ global.highlightCode = () => {};
 global.typesetMath = () => {};
 // the catch-up bracket (js/stream-view.js): the runner drives the real pair AND
 // the real autoScroll, so the guard is exercised and not re-implemented
+global.busy = false; // a run drawing into this pane (stream-view.ts)
 global.catchUp = false;
 global.followTail = true;
 global.gliding = false;
