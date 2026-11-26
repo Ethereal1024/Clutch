@@ -22,7 +22,7 @@ import { reconnectSSE } from "./sse-stream";
 import { state } from "./state";
 import { busy } from "./stream-view";
 import { eventsEl } from "./els";
-import { activeTab, adoptBase, claimTab, rewatchTab, tabForSlot, unwatchAll } from "./slots";
+import { activeTab, adoptBase, claimTab, refreshHopMirror, rewatchTab, tabForSlot, unwatchAll } from "./slots";
 
 // Switch the active backend in place without a full page reload. The
 // supervisor's lifecycle port is refused: it is not a backend, and letting it
@@ -196,6 +196,11 @@ export function dropStaleBackend() {
 // re-dialling the host another window was on — was the innocent-window bug.
 if (window.clutchTunnel) {
   window.clutchTunnel.onEnd((info) => {
+    // The hop list just changed, and the change is the shell's word, not a question
+    // this window asked: re-read it BEFORE the early returns below, because a window
+    // whose session was not on that hop still has tabs that point at it — and those
+    // tabs must stop taking the cached path (slots.ts hopUpFor).
+    void refreshHopMirror();
     // the host's verdict for THIS window: false = its session was never on the
     // hop, so there is no lost session here to announce
     if (info && info.lost === false) return;

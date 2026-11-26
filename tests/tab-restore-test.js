@@ -751,7 +751,9 @@ function machineWorld(opts) {
   });
   for (const fn of [
     "machineLabel", "asMachine", "sameMachine", "tunnelTarget", "tunnelNow",
-    "pinSlot", "rememberedMachine", "dialMachine", "autoConnect",
+    // the hop mirror a claim notes into (slots.ts liveHops / noteHop): the real
+    // cells and the real writer, so tunnelNow's answer lands where hopUpFor reads
+    "noteHop", "pinSlot", "dialMachine", "autoConnect",
     "prepareTabMachine", "noteTabMachine", "noSessionThere", "localClaimHasNoFile",
     "claimTab", "releaseTab", "unwatchTab",
   ]) {
@@ -771,6 +773,9 @@ function machineWorld(opts) {
   // machine asks for — this runner is about the store, not the strip
   vm.runInContext(
     "let dialing = false; let persistTabs = null; function announceTabState() {}" +
+    // the hop mirror tunnelNow notes into and hopUpFor reads: module cells, so the
+    // slices read them from this context (a claim that lands leaves a live hop here)
+    "\nconst liveHops = [];" +
     // slots.ts names this machine in the same id space as a hop (executors.ts
     // LOCAL_ID): it is a module const, so the slices read it from this context
     '\nconst LOCAL_EXECUTOR = "local";' +

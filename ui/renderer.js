@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 52426c0181580589d336dbf06c2ada28f6a77a8010e383b52a29375542f2362d
+// sources sha256: 80b584730f6967f0d9a12dd5d3eb863b446ef5d93463aede029f7b3b8f62ba97
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -767,7 +767,10 @@
       const s = await window.clutchTunnel.status(
         m ? { host: m.host, user: m.user, port: Number(m.port) || 22 } : void 0
       );
-      return { active: !!(s && s.active), target: tunnelTarget(s) };
+      const target = tunnelTarget(s);
+      const active = !!(s && s.active);
+      if (m) noteHop(m, active && sameMachine(target, m));
+      return { active, target };
     } catch (e) {
       return { active: false, target: null };
     }
@@ -780,38 +783,31 @@
     } catch (e) {
     }
   }
-  function rememberedMachine() {
+  var liveHops = [];
+  function noteHop(m, up) {
+    const i = liveHops.findIndex((x) => sameMachine(x, m));
+    if (up && i < 0) liveHops.push(m);
+    if (!up && i >= 0) liveHops.splice(i, 1);
+  }
+  async function refreshHopMirror() {
+    if (!(window.clutchTunnel && window.clutchTunnel.list)) return;
+    let rows;
     try {
-      const list = JSON.parse(localStorage.getItem("clutch_ssh_connections") || "[]");
-      const first = Array.isArray(list) ? list.find((c) => c && c.host) : null;
-      if (first) return asMachine(first);
+      rows = await window.clutchTunnel.list();
     } catch (e) {
+      return;
     }
-    try {
-      const host = localStorage.getItem("clutch_ssh_host");
-      if (!host) return null;
-      return {
-        host,
-        user: localStorage.getItem("clutch_ssh_user") || "",
-        port: String(localStorage.getItem("clutch_ssh_port") || 22)
-      };
-    } catch (e) {
-      return null;
+    if (!Array.isArray(rows)) return;
+    liveHops.length = 0;
+    for (const row of rows) {
+      const m = asMachine(row && row.target);
+      if (m && row.url) liveHops.push(m);
     }
   }
   function hopUpFor(tab) {
     if (!tab || !tab.machine) return true;
     if (!tab.base) return false;
-    try {
-      if (localStorage.getItem("clutch_ssh_connected") !== "1") return false;
-      const list = JSON.parse(localStorage.getItem("clutch_ssh_connections") || "[]");
-      if (Array.isArray(list)) {
-        return list.some((c) => c && sameMachine(asMachine(c), tab.machine));
-      }
-    } catch (e) {
-      return false;
-    }
-    return sameMachine(rememberedMachine(), tab.machine);
+    return liveHops.some((m) => sameMachine(m, tab.machine));
   }
   var dialing = false;
   async function dialMachine(m) {
@@ -867,6 +863,7 @@
     const name = tab.name || tab.path;
     const why = await autoConnect(m);
     if (why) return `${name} lives on ${machineLabel(m)} \u2014 ${why}`;
+    await tunnelNow(m);
     await pinSlot(tab.id, { kind: "executor", target: m });
     return "";
   }
@@ -6339,6 +6336,7 @@
   }
   if (window.clutchTunnel) {
     window.clutchTunnel.onEnd((info) => {
+      void refreshHopMirror();
       if (info && info.lost === false) return;
       if (typeof unwatchAll === "function") unwatchAll();
       if (!localStorage.getItem("clutch_ssh_connected")) return;

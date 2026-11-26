@@ -122,6 +122,13 @@ check(onEndSrc.indexOf("info.lost === false") < onEndSrc.indexOf('getItem("clutc
   "and the verdict is read BEFORE the standing intent: that intent is a global key, which is exactly why it cannot decide this alone");
 check(onEndSrc.indexOf('getItem("clutch_ssh_connected")') < onEndSrc.indexOf('connectionLost("lost the remote connection")'),
   "the intent is still the second word, unchanged: a disconnect the user asked for is not a loss");
+// the hop list is re-read FIRST, before either early return: a window whose session
+// was not on that hop still has tabs that name that machine, and their cached
+// views must stop being offered (slots.ts hopUpFor reads the mirror this refreshes)
+check(/refreshHopMirror\(\)/.test(onEndSrc) &&
+  onEndSrc.indexOf("refreshHopMirror()") < onEndSrc.indexOf("info.lost === false") &&
+  onEndSrc.indexOf("refreshHopMirror()") < onEndSrc.indexOf('getItem("clutch_ssh_connected")'),
+  "and the hop list is re-read before the handler decides anything about this window: a hop ended, whichever window owned it");
 
 // ---- 4. the session URL is remembered per window ----
 check(/sessionStorage\.setItem\("clutch_api_url"/.test(APP) &&
@@ -202,6 +209,13 @@ let pickerPaints = 0;
 global.refreshPicker = () => {
   pickerPaints++;
 };
+// the hop mirror's refresh: the REAL one asks the shell for its hop list, and this
+// runner has no shell — what it has to prove is that the handler asks, for EVERY
+// window, before it decides whether this window lost anything
+let hopRefreshes = 0;
+global.refreshHopMirror = () => {
+  hopRefreshes++;
+};
 global.fsModal = { classList: { contains: () => false } };
 
 async function main() {
@@ -236,6 +250,8 @@ async function main() {
     "the innocent window raises no dialog and repaints no picker: it still has its session, its stream and its work");
   check(store.get("clutch_ssh_connected") === "1",
     "and it does not touch what the hop implied: degrade mode died with the exec bridge, and the standing intent is the user's");
+  check(hopRefreshes === 1,
+    "but it DOES re-read the shell's hop list before returning: its own tabs may name the machine that just went away");
 
   await onEnd(theirs.sent[0][1]);
   check(losts === 1,

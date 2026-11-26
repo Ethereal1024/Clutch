@@ -121,7 +121,13 @@ async function tunnelNow(m: Machine | null = null): Promise<{ active: boolean; t
     const s = await window.clutchTunnel.status(
       m ? { host: m.host, user: m.user, port: Number(m.port) || 22 } : undefined
     );
-    return { active: !!(s && s.active), target: tunnelTarget(s) };
+    const target = tunnelTarget(s);
+    const active = !!(s && s.active);
+    // The one place a claim asks the shell about a MACHINE, so the one place the
+    // mirror learns the answer: `hopUpFor` (the cached-view gate) has to be able to
+    // answer synchronously on the next switch.
+    if (m) noteHop(m, active && sameMachine(target, m));
+    return { active, target };
   } catch (e) {
     return { active: false, target: null }; // an unanswerable question is not a live hop
   }
@@ -148,59 +154,68 @@ async function pinSlot(slotId: string, target: any): Promise<void> {
   }
 }
 
-// The machine this window was last working on: the live picker's first entry
-// (upsertConn unshifts, so it is the most recent), else the flat clutch_ssh_*
-// triple an older build wrote.
-export function rememberedMachine(): Machine | null {
+// ---- the hops this shell actually HAS ---------------------------------------------
+//
+// `hopUpFor` is asked SYNCHRONOUSLY (the cached view is painted before anything is
+// awaited), so it cannot ask the shell itself at that moment — but it must not
+// answer from a record either. It did, and both records lied:
+//
+//   * `clutch_ssh_connected` is the WINDOW's standing intent, and only about the
+//     window's OWN tunnel. A tab's hop is a named one (`endpoint: true`, one bound
+//     instance per machine), so a reconcile that finds the window's own tunnel
+//     inactive clears this flag while every tab's hop is up — after which no remote
+//     tab could ever take the cached path again: the reported "every time I open a
+//     remote tab it loads from scratch".
+//   * `clutch_ssh_connections` is the picker's list of machines the user has
+//     DIALED, and nothing removes an entry when a hop ends — the other direction of
+//     the same lie (a cached picture painted over a dial that then has no card to
+//     report into).
+//
+// So the mirror below holds the answer the HOST gave, kept current by the two
+// places that learn one: a claim (tunnelNow asks the shell for THAT machine) and a
+// hop the shell announces as ended (`tunnel:list`, refreshHopMirror). It is read
+// synchronously; it is only ever written from an answer.
+const liveHops: Machine[] = [];
+
+function noteHop(m: Machine, up: boolean) {
+  const i = liveHops.findIndex((x) => sameMachine(x, m));
+  if (up && i < 0) liveHops.push(m);
+  if (!up && i >= 0) liveHops.splice(i, 1);
+}
+
+// Re-read the shell's own list of live hops. Called when the shell announces that a
+// hop ended: the mirror cannot learn that from a claim (a hop ending is news from
+// the other side, not a question we asked), and a stale "yes" here is how a cached
+// picture gets painted over a machine nobody is talking to.
+// An unanswerable question is NOT a hop that ended — the mirror is left as it was.
+export async function refreshHopMirror(): Promise<void> {
+  if (!(window.clutchTunnel && window.clutchTunnel.list)) return;
+  let rows;
   try {
-    const list = JSON.parse(localStorage.getItem("clutch_ssh_connections") || "[]");
-    const first = Array.isArray(list) ? list.find((c) => c && c.host) : null;
-    if (first) return asMachine(first) as Machine;
+    rows = await window.clutchTunnel.list();
   } catch (e) {
-    /* a broken list is not a machine */
+    return;
   }
-  try {
-    const host = localStorage.getItem("clutch_ssh_host");
-    if (!host) return null;
-    return {
-      host,
-      user: localStorage.getItem("clutch_ssh_user") || "",
-      port: String(localStorage.getItem("clutch_ssh_port") || 22),
-    };
-  } catch (e) {
-    return null;
+  if (!Array.isArray(rows)) return;
+  liveHops.length = 0;
+  for (const row of rows) {
+    const m = asMachine(row && row.target);
+    // a row without a forward serves nothing: no base, no hop to promise
+    if (m && row.url) liveHops.push(m);
   }
 }
 
 // Is the hop that serves this tab's file ALREADY up, so that claiming its slot
 // costs no dial? Synchronous on purpose: the cached-view decision (project.ts
-// paintCachedView) runs BEFORE anything is awaited — that is the whole point of
-// it — so it cannot ask the host.
+// paintCachedView) must land in the same task as the switch.
 //
 // Two facts, both of which a dial would change: the tab HAS a base from this life
-// (it was claimed here, so the hop was serving it), and this window holds a live
-// hop for that machine (`clutch_ssh_connected`, which connectTabMachine sets on a
-// landing and a Disconnect clears; `clutch_ssh_connections`, the full list of
-// machines with a live hop). A tab that names no machine never dials at all.
-//
-// The check scans the WHOLE connections list, not just its first entry. With one
-// hop per machine (multi-hop), several endpoints can be live at the same time.
-// `upsertConn` pushes the newest machine to the front, so `rememberedMachine()`
-// (first-entry only) stopped matching tab A the moment tab B connected — the
-// reported "every switch back to a remote tab triggers a full reload".
+// (it was claimed here, so the hop was serving it), and the shell holds a live hop
+// for that machine (the mirror above). A tab that names no machine never dials.
 export function hopUpFor(tab: Tab): boolean {
   if (!tab || !tab.machine) return true;
   if (!tab.base) return false; // never claimed in this life: that claim may dial
-  try {
-    if (localStorage.getItem("clutch_ssh_connected") !== "1") return false;
-    const list = JSON.parse(localStorage.getItem("clutch_ssh_connections") || "[]");
-    if (Array.isArray(list)) {
-      return list.some((c) => c && sameMachine(asMachine(c), tab.machine));
-    }
-  } catch (e) {
-    return false; // a page that forbids storage cannot promise a hop is up
-  }
-  return sameMachine(rememberedMachine(), tab.machine);
+  return liveHops.some((m) => sameMachine(m, tab.machine));
 }
 
 let dialing = false;
@@ -316,6 +331,12 @@ async function prepareTabMachine(tab: Tab): Promise<string> {
   // hop a STEP of opening the tab.
   const why = await autoConnect(m);
   if (why) return `${name} lives on ${machineLabel(m)} — ${why}`;
+  // The dial just answered the question, but the answer the mirror keeps is the
+  // SHELL's: ask it again for this machine (one round trip, once per machine per
+  // life) so the way back to this tab is already the cached one. Without this the
+  // mirror would still say "down" from the ask above and the tab would replay from
+  // the network the first time the user came back to it.
+  await tunnelNow(m);
   // same promise as above, now that the hop is up: the file is on that machine,
   // so no claim of this slot may land on this one
   await pinSlot(tab.id, { kind: "executor", target: m });

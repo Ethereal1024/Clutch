@@ -287,50 +287,136 @@ function ruleBody(sel) {
     "and that is the order the boot makes: the card goes up before the claim that reports into it");
 }
 
-// ---- 5) a cached remote tab is instant when nothing has to be dialled ---------
-{
-  // the REAL hopUpFor and the real machine helpers it reads
-  const src = ["asMachine", "sameMachine", "rememberedMachine", "hopUpFor"].map(slotsFn).join("\n");
-  function world(store) {
-    const mem = new Map(Object.entries(store || {}));
-    const ctx = vm.createContext({
-      console,
-      localStorage: {
-        getItem: (k) => (mem.has(k) ? mem.get(k) : null),
-        setItem: (k, v) => mem.set(k, String(v)),
-        removeItem: (k) => mem.delete(k),
-      },
-    });
-    vm.runInContext(runnableSnippet(src), ctx);
-    return ctx;
-  }
+// ---- 5) a cached remote tab is instant when the shell says its hop is up ------
+//
+// The bug this part pins down: the gate used to read the PICKER's records, and both
+// of them lied about a TAB's hop — `clutch_ssh_connected` is the window's own
+// standing intent (a reconcile that finds the window's own tunnel idle clears it
+// while every tab's named hop is up, which is why EVERY switch to a remote tab
+// replayed from the network), and `clutch_ssh_connections` is the list of machines
+// the user has DIALED (nothing removes an entry when a hop ends). The gate now reads
+// a mirror of the shell's own answers, so that is what this drives.
+async function hopsAreAsked() {
+  // the REAL hopUpFor, the REAL mirror, and the REAL writers of it: the claim's
+  // question (tunnelNow) and the announcement of an end (refreshHopMirror)
+  const src = [
+    slotsFn("asMachine"),
+    slotsFn("sameMachine"),
+    (slots.match(/const liveHops[^;]+;/) || [""])[0],
+    slotsFn("noteHop"),
+    slotsFn("refreshHopMirror"),
+    slotsFn("tunnelTarget"),
+    slotsFn("tunnelNow"),
+    slotsFn("hopUpFor"),
+  ].join("\n");
+
   const FAR = { host: "124.220.181.209", user: "fanshu", port: "6001" };
   const OTHER = { host: "10.0.0.9", user: "fanshu", port: 22 };
-  const up = world({
-    clutch_ssh_connected: "1",
-    clutch_ssh_connections: JSON.stringify([FAR]),
-  });
   const tab = (over) => Object.assign({ id: "t1", path: "/w/a.clc", machine: FAR, base: "http://127.0.0.1:44521" }, over);
 
-  const answer = up.hopUpFor(tab());
-  check(answer === true,
-    "a remote tab that was claimed in this life while the window is on its machine needs NO dial — it is the " +
-    "instant path, exactly like a local tab");
+  // A shell: `hops` is what the process really holds, so it is the only thing that
+  // decides an answer. `refuse` makes every ask fail (the host is gone).
+  function world(hops) {
+    const shell = { hops: (hops || []).map((h) => ({ url: h.url, target: { ...h.target } })), refuse: false, asks: [] };
+    const ctx = vm.createContext({ console });
+    ctx.window = {
+      clutchTunnel: {
+        list: async () => {
+          if (shell.refuse) throw new Error("the host is gone");
+          return shell.hops.map((h) => ({ url: h.url, target: { ...h.target } }));
+        },
+        status: async (target) => {
+          shell.asks.push(target || null);
+          if (shell.refuse) throw new Error("the host is gone");
+          const row = target ? shell.hops.find((h) => ctx.sameMachine(h.target, target)) : shell.hops[0];
+          return row ? { active: true, url: row.url, target: row.target } : { active: false, url: null, target: null };
+        },
+      },
+    };
+    vm.runInContext(runnableSnippet(src), ctx);
+    return { ctx, shell };
+  }
+
+  // nothing asked yet: the mirror is empty, so the card stays. This is the boot
+  // case — a page that just loaded has no answer of its own and no cached view.
+  const cold = world([{ url: "http://127.0.0.1:44521", target: FAR }]);
+  check(cold.ctx.hopUpFor(tab()) === false,
+    "a remote tab whose hop this page has not been told about keeps the card: the claim may have to dial");
+  const answer = cold.ctx.hopUpFor(tab());
   check(typeof answer === "boolean" && !/await |Promise/.test(slotsFn("hopUpFor")),
     "and the answer is SYNCHRONOUS: the cached view is painted before anything is awaited, so this question " +
     "cannot be asked of the host");
+  check(!/localStorage|clutch_ssh/.test(slotsFn("hopUpFor")),
+    "nor is it read off a picker record: `clutch_ssh_connected` is the WINDOW's own intent (a reconcile clears " +
+    "it while a tab's named hop is up) and `clutch_ssh_connections` outlives its hop — both made the gate lie");
 
-  check(up.hopUpFor(tab({ machine: null })) === true,
+  // the shell names the hop: from here the cached path is allowed, synchronously
+  await cold.ctx.refreshHopMirror();
+  check(cold.ctx.hopUpFor(tab()) === true,
+    "a hop the shell says it holds for this machine needs NO dial — the instant path, exactly like a local tab");
+  check(cold.ctx.hopUpFor(tab({ machine: null })) === true,
     "a tab that names no machine never dials: nothing to wait for");
-  check(up.hopUpFor(tab({ base: null })) === false,
+  check(cold.ctx.hopUpFor(tab({ base: null })) === false,
     "a remote tab with no base from this life keeps the card: its claim may have to dial, and that attempt " +
     "belongs in the card");
-  check(world({ clutch_ssh_connections: JSON.stringify([FAR]) }).hopUpFor(tab()) === false,
-    "no standing connection (a Disconnect, or a move to another host) means the claim may dial again: the card stays");
-  check(world({ clutch_ssh_connected: "1", clutch_ssh_connections: JSON.stringify([OTHER]) }).hopUpFor(tab()) === false,
-    "and a window on ANOTHER machine cannot promise this tab's hop: it would have to be re-dialled, so the card stays");
+  check(cold.ctx.hopUpFor(tab({ machine: OTHER })) === false,
+    "and a hop to ANOTHER machine cannot promise this tab's: it would have to be re-dialled, so the card stays");
   check(!/async/.test(slotsFn("hopUpFor")),
     "hopUpFor itself is not async — a promise here would silently make the cache gate always-true");
+
+  // the claim's own question is what teaches the mirror (the first tab of a machine
+  // is claimed before any list is read, and a claim is an answer too)
+  const claim = world([{ url: "http://127.0.0.1:44521", target: FAR }]);
+  const now = await claim.ctx.tunnelNow(FAR);
+  check(now.active === true && claim.ctx.hopUpFor(tab()) === true,
+    "the claim asks the shell about ITS machine and the answer is kept: the next switch back is the instant path");
+  check(claim.shell.asks[0] && claim.shell.asks[0].host === FAR.host && String(claim.shell.asks[0].port) === FAR.port,
+    "the question names the tab's machine (the shell derives the hop's id from the triple; the page never builds one)");
+  claim.shell.hops = [];
+  const gone = await claim.ctx.tunnelNow(FAR);
+  check(gone.active === false && claim.ctx.hopUpFor(tab()) === false,
+    "and the same question with the hop gone takes it back out: no stale 'yes' can outlive its hop");
+  claim.shell.hops = [{ url: "http://127.0.0.1:44521", target: FAR }];
+  await claim.ctx.tunnelNow(null);
+  check(claim.ctx.hopUpFor(tab()) === false,
+    "a question about the WINDOW's own tunnel says nothing about a tab's hop — that is exactly the confusion that " +
+    "cleared the flag and made every remote switch reload");
+
+  // a dial is not an answer; the shell's word after it is. Without the second ask
+  // the mirror keeps the "down" from before the dial, and the first switch back to
+  // the tab that just dialled replays from the network anyway.
+  check(/const why = await autoConnect\(m\);[\s\S]{0,900}tunnelNow\(m\)/.test(slotsFn("prepareTabMachine")),
+    "and the tab that had to DIAL asks the shell again once it is through: the hop it just opened is on record " +
+    "for the way back");
+
+  // the end of a hop is news, not an answer to a question we asked
+  const ended = world([{ url: "http://127.0.0.1:44521", target: FAR }]);
+  await ended.ctx.refreshHopMirror();
+  check(ended.ctx.hopUpFor(tab()) === true, "the announcement path starts from a live hop");
+  ended.shell.hops = [];
+  await ended.ctx.refreshHopMirror();
+  check(ended.ctx.hopUpFor(tab()) === false,
+    "when the shell says the hop is over, the cached picture is refused: it cannot be painted over a machine " +
+    "nobody is talking to");
+
+  // an unanswerable question is NOT an end: a page that loses a round trip must not
+  // throw away the one thing it knows and reload everything
+  ended.shell.hops = [{ url: "http://127.0.0.1:44521", target: FAR }];
+  await ended.ctx.refreshHopMirror();
+  ended.shell.refuse = true;
+  await ended.ctx.refreshHopMirror();
+  check(ended.ctx.hopUpFor(tab()) === true,
+    "and a list() that cannot answer leaves the mirror as it was — silence is not a hop that ended");
+
+  // the shell's list is also read when a hop ends: `tunnel:ended` names neither the
+  // machine nor what survived it (`{ lost, slots }`), so the page re-reads the list
+  const life = read("ui/src/renderer/backend-lifecycle.ts");
+  const handler = life.slice(life.indexOf(".onEnd("), life.indexOf(".onEnd(") + 700);
+  check(/refreshHopMirror\(\)/.test(handler),
+    "the tunnel-ended broadcast re-reads the hop list (the mirror has no other way to hear an end)");
+  check(handler.indexOf("refreshHopMirror()") < handler.indexOf("info.lost === false"),
+    "and it does so BEFORE the handler's own early return: a window whose session was not on that hop still has " +
+    "tabs pointing at it");
 
   // and the gate is what project.ts asks, before the cache is read
   const paint = projectFn("paintCachedView");
@@ -343,4 +429,6 @@ function ruleBody(sel) {
     "and it re-binds it to the log the tab names (the scope belongs to the stream, not to whoever opened before)");
 }
 
-summary("tab-load-bar-test.js");
+// part 5's questions are put to a shell, so the verdict waits for it (every other
+// part is synchronous and has already printed by now)
+hopsAreAsked().then(() => summary("tab-load-bar-test.js"));
