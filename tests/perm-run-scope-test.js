@@ -24,8 +24,9 @@
 //      while a different id is not muted by it;
 //   2. a run's end dismisses the prompt it left waiting — and forgets the ids it
 //      answered, so the next run's ask prompts again;
-//   3. a live ask is never dropped because the pane happens to be "loading",
-//      while the loading guard still drops a replayed status frame.
+//   3. a live ask is never dropped because the pane happens to be "loading" —
+//      and neither is a status frame: both are host-made and never persisted,
+//      so neither is ever part of a replay there is something to mute.
 
 const { check, summary, slicer, uiModules, rendererScript, stateStub, installRecordLedger } = require("./harness.js");
 
@@ -238,13 +239,15 @@ async function main() {
   await respondPerm(true);
   check(posts.length === 4, "and that ask is answerable too");
 
-  // ---- 6) "loading" (the /api/project/open reconstruction) drops replayed
-  //         status frames, but NEVER a live prompt ----
+  // ---- 6) the pane's shape mutes nothing the host says about this window's
+  //         session: a "loading" reconstruction drops neither a live ask nor a
+  //         status frame (neither is a record, so neither can be a replay) ----
   addEvent({ type: "final", status: "completed" });
   loading = true;
   const before = statuses.length;
   addEvent({ type: "state_update", key: "execution_status", value: "running" });
-  check(statuses.length === before, "a status frame during the loading reconstruction is still dropped");
+  check(statuses.length === before + 1 && statuses[statuses.length - 1] === "running",
+    "a status frame still lands while the pane is loading");
   addEvent(ask("perm-abc-3", "write_file"));
   check(promptOpen(), "a live ask is shown even while the pane is loading");
   check(promptTool() === "Tool: write_file — permission ask", "with its own call attached");
@@ -280,8 +283,8 @@ async function main() {
   );
   check(/forgetAnsweredPerm\(\);/.test(userBranch), "a task frame forgets them as well");
   check(
-    /if \(stream\.classList\.contains\("loading"\) && ev\.type === "state_update"\)/.test(streamSrc),
-    "the loading guard covers replayed status frames only — never a live prompt",
+    !/classList\.contains\("loading"\)[\s\S]{0,60}?ev\.type === "state_update"/.test(streamSrc),
+    "no status frame is dropped for the shape of the pane — it is never a replay",
   );
 
   summary("perm-run-scope-test", "a new run's prompt is never muted by an id the last one used");

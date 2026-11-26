@@ -816,7 +816,7 @@ async function main() {
   check(/connLostExitPending\(\)\) return null;/.test(reconciledFn) &&
     reconciledFn.indexOf("connLostExitPending()") < reconciledFn.indexOf("hostSessionUrl("),
   "the second claim entry (a tunnel that still answers) refuses for the same note, also before it asks");
-  check(/if \(!state\.apiBase\) return;/.test(fnBody("connectSSE")),
+  check(/if \(!state\.apiBase\) return;/.test(fnBody("openStream")),
   "and the stream the boot opens next refuses to open on nothing: no null/api/events ever leaves the window");
   const connConnectFn = fnBody("connConnect");
   check(connConnectFn.indexOf("connLostExitClear()") > -1 &&

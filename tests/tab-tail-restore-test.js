@@ -29,10 +29,13 @@ const { check, summary, slicer, runnableSnippet } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
 const PROJECT = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "project.ts"), "utf8");
-const { region } = slicer(PROJECT);
+const { region, fnBody } = slicer(PROJECT);
 
-// the real restore AND the real page budgets it walks with
+// the real restore AND the real page budgets it walks with, plus the one helper it
+// names the log with (project.ts projectOf): a runner that invented either would
+// be testing its own copy
 (0, eval)(runnableSnippet(region("const RESTORE_MAX_PAGES", "restoreTabView")));
+(0, eval)(runnableSnippet(fnBody("projectOf")));
 
 const MEMENTO = {
   scroll: 40, high: 100, oldest: 40, older: 0, workdir: "/p",
@@ -51,6 +54,7 @@ let progress;
 let pills;
 let placed;
 let opened;
+let adopted;
 let stale;
 
 function world({ session, pages, staleAfter }) {
@@ -60,6 +64,7 @@ function world({ session, pages, staleAfter }) {
   pills = [];
   placed = [];
   opened = 0;
+  adopted = null;
   stale = false;
   let n = 0;
   global.mementoOf = () => MEMENTO;
@@ -82,7 +87,7 @@ function world({ session, pages, staleAfter }) {
   // where the reader stands is the tab's own place, and it is put back by the
   // one helper both open paths share (tests/tab-position-test.js drives that one)
   global.placeRestored = (id) => { placed.push(id); };
-  global.finishOpen = () => { opened++; };
+  global.finishOpen = (project) => { opened++; adopted = project; };
   global.stream = { scrollTop: 0, scrollHeight: 1234 };
   global.eventsEl = {};
 }
@@ -118,9 +123,14 @@ async function main() {
     "the bar moves by bytes that actually arrived, and ends the parse phase full (" + parse.join(",") + ")");
   check(progress.some((p) => p[0] === "typeset" && p[1] === 1),
     "and it closes on the typeset phase, like every other open path");
-  check(placed.join(",") === "t" && opened === 1,
-    "then the tab's OWN place is put back (placeRestored) — not the log's tail, which is further " +
-    "down than the reader left it — and the open is finished exactly once");
+  check(placed.length === 0 && opened === 1,
+    "…and it finishes the open exactly once, without putting the reader's place back: the pane is " +
+    "still the load card's here, and the card's end is where it SETTLES (auto-fold folds the turn " +
+    "this tail is cut in the middle of). The place is a pixel of the pane that landing leaves, so " +
+    "activateTab puts it back after it — the same way openInTab places its own right after its apply");
+  check(adopted === "/p/x.clc",
+    "and the open names the log it restored: this tab's project, adopted by the stream from here (" +
+    adopted + ")");
 
   // ---- 2. a host that cannot say how big the log is falls back to the memento ----
   world({

@@ -1193,6 +1193,141 @@ check(bodyOf(foldOf(p)).children.length === 2 && bodyOf(foldOf(p)).children[1] =
 delete ctx.MutationObserver;
 ctx.busy = false;
 
+// ---- 11) the turn a replay swallowed. The report: after an abort the events that
+// followed it stayed outside every fold — "abort 之后的事件仍无法被归入折叠块中（sleep
+// 标签页中间那段）". A row drawn while the pane is being rebuilt (`loading`: the
+// project-open card) or while a reconnect replays its window over it (catchUp) is a
+// row foldLiveRow refuses, and rightly: those rows are data being restored. A turn
+// that ENDS inside such a stretch still folds, because its ending goes through
+// autoFoldTurn; one that does not end never did, and the live path after it only
+// folds the segment it is drawing into — so the restored rows stayed expanded above
+// the block the live rows made, for the rest of the run. The end of a replay is
+// therefore a fold moment of its own (foldSettledPane), announced as
+// `clutch:pane-settled`.
+streamNode.classList.remove("loading");
+ctx.busy = false;
+ctx.catchUp = false;
+ctx.pageSink = null;
+
+// 11a) the project-open card: the rows land under it, and the run is still going
+const prev11 = row("completion", "completed");
+const t11 = row("event user", "继续");
+const w11 = row("event tool_group", "run_command …");
+const w11b = row("event tool_group", "grep …");
+const w11c = row("event tool_group", "read_file …");
+const p11 = pane([prev11, t11, w11, w11b, w11c]);
+ctx.eventsEl = p11;
+setLoading(true);
+ctx.busy = true; // the run that drew these rows is still drawing
+for (const el of [w11, w11b, w11c]) ctx.foldLiveRow(el);
+check(foldOf(p11) === undefined && p11.children.length === 5,
+      "a row drawn while the open card is up is not folded as it arrives: it is data being restored, " +
+      "not a run drawing");
+const slides11 = collapseCalls;
+setLoading(false);
+ctx.foldSettledPane();
+const f11 = foldOf(p11);
+check(collapseCalls === slides11,
+      "and the block lands closed IN PLACE, with no slide: a replay's rows were not watched " +
+      "arriving, and the reader's place is put back on the pane this fold leaves");
+check(f11 !== undefined && p11.children.length === 3 && p11.children[0] === prev11 &&
+      p11.children[1] === t11 && p11.children[2] === f11,
+      "the card comes down and the turn it swallowed folds under the instruction that started it, " +
+      "the divider it stopped on and that instruction staying in plain sight (" +
+      JSON.stringify(p11.children.map((c) => c.className)) + ")");
+check(f11 !== undefined && bodyOf(f11).children.length === 3 &&
+      bodyOf(f11).children[0] === w11 && bodyOf(f11).children[1] === w11b &&
+      bodyOf(f11).children[2] === w11c,
+      "every step the restore drew is inside the block, in file order");
+check(f11 !== undefined && f11.dataset.turnOpen === "1" && f11.dataset.turnLive === "1",
+      "the turn has no ending yet, so the block stays open — and the run is still drawing, so it is " +
+      "marked live: the row arriving next joins it and its head goes on saying it is filling in");
+check(t11.dataset.turnFolded === "1" && w11.dataset.turnFolded === undefined,
+      "the fold is marked on the task row, never on a row it hides");
+
+// 11b) the run carries on after the settle: its next steps join that block
+const w11d = row("event tool_group", "write_file …");
+p11.appendChild(w11d);
+ctx.foldLiveRow(w11d);
+check(foldOf(p11) === f11 && bodyOf(f11).children.length === 4 &&
+      bodyOf(f11).children[3] === w11d,
+      "the next step the run draws joins the SAME block instead of starting a second one: the block " +
+      "the settle left open is the run's own");
+const a11 = row("event text", "Done: the fixture path was wrong.");
+p11.appendChild(a11);
+ctx.foldLiveRow(a11); // prose ends the segment: the block stops filling in
+const d11 = row("completion", "completed");
+p11.appendChild(d11);
+ctx.autoFoldTurn();
+check(foldOf(p11) === f11 && f11.dataset.turnOpen === undefined &&
+      f11.dataset.turnLive === undefined && d11.dataset.turnFolded === "1" &&
+      bodyOf(f11).children.length === 4 && p11.children.length === 5 &&
+      p11.children[3] === a11 && p11.children[4] === d11,
+      "the ending it finally lands on closes the block and takes the ring off, and the answer the " +
+      "run spoke stays in plain sight above its divider — the turn a restore cut in half reads like " +
+      "the same turn watched live");
+
+// 11c) the same turn, replayed by a reconnect instead of the open card
+const t11c = row("event user", "task");
+const wc1 = row("event tool_group", "bash …");
+const wc2 = row("event tool_group", "read_file …");
+const p11c = pane([t11c, wc1, wc2]);
+ctx.eventsEl = p11c;
+ctx.busy = true;
+ctx.catchUp = true;
+for (const el of [wc1, wc2]) ctx.foldLiveRow(el);
+check(foldOf(p11c) === undefined,
+      "a row replayed into a catch-up block is not folded as it lands either");
+ctx.catchUp = false;
+ctx.foldSettledPane();
+const f11c = foldOf(p11c);
+check(f11c !== undefined && p11c.children.length === 2 && p11c.children[0] === t11c &&
+      p11c.children[1] === f11c && bodyOf(f11c).children.length === 2,
+      "the catch-up block ends and the turn it replayed folds: the open card was never the bug, the " +
+      "replay was");
+
+// 11d) the run stopped before the pane finished settling: the fold lands, no ring
+const t11d = row("event user", "fix it");
+const wd1 = row("event tool_group", "read_file …");
+const wd2 = row("event tool_group", "edit_file …");
+const p11d = pane([t11d, wd1, wd2]);
+ctx.eventsEl = p11d;
+ctx.busy = false;
+setLoading(true);
+for (const el of [wd1, wd2]) ctx.foldLiveRow(el);
+setLoading(false);
+ctx.foldSettledPane();
+const f11d = foldOf(p11d);
+check(f11d !== undefined && f11d.dataset.turnOpen === "1" && f11d.dataset.turnLive === undefined,
+      "nothing is drawing any more, so the block folds but carries no ring: a turn with no ending " +
+      "is left open for the ending — or the reader's next message — that carries it on");
+check(p11d.children.length === 2 && p11d.children[0] === t11d,
+      "and the instruction the turn started with stays where the reader left it");
+
+// 11e) the ordinary open: a turn that ended under the card was folded by its ending
+const t11e = row("event user", "task");
+const w11e = row("event tool_group", "bash …");
+const d11e = row("completion", "completed");
+const p11e = pane([t11e, w11e, d11e]);
+ctx.eventsEl = p11e;
+ctx.busy = false;
+setLoading(true);
+setLoading(false);
+ctx.foldSettledPane();
+check(p11e.children.length === 3 && p11e.children[0] === t11e && p11e.children[1] === w11e &&
+      p11e.children[2] === d11e,
+      "a pane whose last turn already ended on a divider is left exactly as that ending folded it: " +
+      "the settle only folds a turn still in flight");
+
+// 11f) and it stays out of the pager's off-DOM sink
+const ps11 = pane([row("event user", "task"), row("event tool_group", "bash …")]);
+ctx.eventsEl = ps11;
+ctx.pageSink = pane([]);
+ctx.foldSettledPane();
+check(foldOf(ps11) === undefined,
+      "while the pager owns the sink, the settle folds nothing: the rows are not in the pane");
+ctx.pageSink = null;
+
 // ---- 8) the wiring the page has to carry ----
 const uiDir = path.join(__dirname, "..", "ui");
 const events = fs.readFileSync(path.join(uiDir, "src", "renderer", "stream-events.ts"), "utf8");
@@ -1303,6 +1438,19 @@ check(/addEventListener\("clutch:turn-interrupted", \(\) => \{\s*clearRunLive\(\
 check(/addEventListener\("clutch:page-prepended", \(\) => foldClosedRegions\(eventsEl\)\)/.test(selfSrc),
       "and the file that knows how to fold listens for it — it loads after the pager, so the " +
       "pager may not name it (load order is the contract)");
+const paneSrc = fs.readFileSync(path.join(uiDir, "src", "renderer", "pane.ts"), "utf8");
+const streamViewSrc = fs.readFileSync(path.join(uiDir, "src", "renderer", "stream-view.ts"), "utf8");
+check(/const was = pane;[\s\S]{0,900}if \(was\.view === "load" && next\.view !== "load"\)[\s\S]{0,200}new CustomEvent\("clutch:pane-settled"\)/.test(paneSrc),
+      "the project-open card coming down announces that the pane has stopped being a replay's " +
+      "target: the rows it swallowed are the reader's now, and the turn they carry is folded in " +
+      "auto-fold, which this file loads after and may not name");
+check(/catchUp = false;[\s\S]{0,600}new CustomEvent\("clutch:pane-settled"\)[\s\S]{0,120}autoScroll\(\)/.test(streamViewSrc),
+      "the catch-up block's end announces the same thing, and before its scroll: the merge changes " +
+      "the pane's height, so the one scroll a catch-up is allowed has to land on the tail the fold " +
+      "leaves");
+check(/addEventListener\("clutch:pane-settled", \(\) => foldSettledPane\(\)\)/.test(selfSrc),
+      "and auto-fold answers both announcements, folding the turn the replay swallowed at the moment " +
+      "the pane stops taking one");
 check(/const onTop = anchor\.getClientRects\(\)\.length \? anchor : anchor\.closest\("\.turn-fold"\)/.test(project),
       "the view is re-anchored on the fold when the row that was on top ended up inside one: " +
       "a hidden row has no box, so its own rect cannot be the anchor");

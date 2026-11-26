@@ -52,6 +52,9 @@ function shell() {
       contains: (c) => set.has(c),
     },
     addEventListener() {},
+    // the pane announces its own moments through events (auto-fold listens for them
+    // in the page; this stub has no listeners, so announcing is all a record does)
+    dispatchEvent() {},
     removeEventListener() {},
     matches() { return false; },
     getAttribute() { return null; },
@@ -250,11 +253,15 @@ async function main() {
   // ---- 6) the paths that end a catch-up outside this file settle it ----
   // (source contracts: these modules cannot be executed without the whole app)
   const sse = renderer("sse-stream");
-  const connect = sse.slice(sse.indexOf("export function connectSSE"), sse.indexOf("export function closeSSE"));
-  check(/settleCatchUp\(\)/.test(connect),
-    "connectSSE() settles the block of the stream it replaces (a queued row is never stranded)");
-  const close = sse.slice(sse.indexOf("export function closeSSE"));
-  check(/settleCatchUp\(\)/.test(close), "closeSSE() does too");
+  // the ONE function that ends a socket settles the block first, so nothing that
+  // closes a stream — a new adoption, a heal, a dropped base, the welcome page —
+  // can strand a queued row: every one of them goes through closeSocket
+  const socket = sse.slice(sse.indexOf("function closeSocket("), sse.indexOf("function openStream("));
+  check(/settleCatchUp\(\)/.test(socket),
+    "the one way a socket ends settles the block it was still delivering (a queued row is never stranded)");
+  check((sse.match(/es\.close\(\)/g) || []).length === 1 &&
+    sse.indexOf("es.close()") > sse.indexOf("function closeSocket("),
+    "and it is the only close the stream has: the three doors cannot each remember their own teardown");
   check(/onerror[\s\S]{0,600}settleCatchUp\(\)/.test(sse),
     "es.onerror settles it: the browser retries the SAME ?since=, so a queued row would be dropped forever");
   const project = renderer("project");

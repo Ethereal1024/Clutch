@@ -50,6 +50,9 @@ export function switchBackend(url) {
   sessionStorage.setItem("clutch_api_url", state.apiBase);
   // notify status-bar.ts
   document.dispatchEvent(new CustomEvent("clutch:backend-changed", { detail: state.apiBase }));
+  // The base moved; the LOG did not. This heals the stream onto the new session —
+  // and cannot name a project, so a window that has adopted none (a boot with no
+  // tab, a pane on a card or the welcome page) opens nothing here.
   reconnectSSE();
   return true;
 }
@@ -78,6 +81,8 @@ export async function switchBackendActiveSlot() {
   const base = await claimTab(tab);
   if (!base) return false;
   adoptBase(base);
+  // the visible tab's log is still what this window reads: re-open it on the
+  // session that just answered (the pane adopted that scope when the tab opened)
   reconnectSSE();
   await reapplyDegradeIfNeeded();
   return true;
@@ -241,7 +246,10 @@ export function dropStaleBackend() {
   if (busy && eventsEl) eventsEl.dispatchEvent(new CustomEvent("clutch:turn-interrupted"));
   state.apiBase = null;
   sessionStorage.removeItem("clutch_api_url");
-  reconnectSSE(); // closes the dead stream; connectSSE bails on a null base
+  // The dead socket ends here and the SCOPE stays: no base is not "no log". The
+  // session URL the host announces next (switchBackend -> reconnectSSE) brings the
+  // same read back, which is exactly what a tunnel redial has to do.
+  reconnectSSE();
 }
 
 // The tunnel died mid-session. A dropped remote is neither a reason to quietly

@@ -26,7 +26,7 @@ import {
 } from "./pane";
 import { endSend, resumeTurn } from "./render-events";
 import { notice } from "./settings";
-import { closeSSE, reconnectSSE } from "./sse-stream";
+import { closeSSE, connectSSE } from "./sse-stream";
 import { state, type Machine } from "./state";
 import { addEvent, dropOrphanLive, settleCatchUp } from "./stream-events";
 import { endCatchUp, nearBottom, setClaimed, setJumpVisible, setReadOnly, setStatus } from "./stream-view";
@@ -372,7 +372,7 @@ function claimIdentity(project: string, owner: any): string {
 async function settleAnnouncedClaim(owner: any): Promise<void> {
   const tab = activeTab();
   if (!tab || !tab.path) return;
-  const project = tab.projectKey || tab.path;
+  const project = projectOf(tab);
   const key = claimIdentity(project, owner);
   if (!key || settledClaims.has(key) || settlingClaim) return;
   const api = (window as any).clutchApi;
@@ -463,6 +463,9 @@ export function showWelcome() {
   } catch (e) {
     /* file:// restrictions: the base is gone either way */
   }
+  // The stream goes with the panels: closing it DROPS THE SCOPE too (sse-stream.ts),
+  // so the welcome page holds no log — and nothing that heals a socket on its own
+  // can bring a stream back until an open adopts one again.
   closeSSE();
   // the welcome page is the pane's view now, and pane.ts is the ONE writer of
   // #stream: a load card, a bar or a failure panel a closed tab left standing
@@ -683,6 +686,14 @@ function tabLabel(tab) {
   return (tab && (tab.name || (tab.path ? String(tab.path).split("/").pop() : ""))) || "project";
 }
 
+// The LOG a tab stands for: the host's canonical path once the tab is open (that
+// is its resource identity), the picker's spelling before that. This is what the
+// live stream adopts when the tab's open ends — the same value the memento and the
+// tab's own record use, so a read and its tab can never name different files.
+function projectOf(tab) {
+  return (tab && (tab.projectKey || tab.path)) || "";
+}
+
 // A tab is being opened. Every load begins here: the stream is emptied, the card
 // names the tab, and the bar starts unmeasured before the claim (a hop, a session
 // spawn) has anything to number. conn-flow.ts then REPORTS its stages into that
@@ -824,7 +835,7 @@ async function openInTab(tab, base, readOnly = false, seq = openSeq, retried = f
     // it one way or the other.
     if (started) await noteTabMachine(tab, base);
     if (isStale(seq)) return null;
-    finishOpen();
+    finishOpen(projectOf(tab));
     return null; // it opened: the pane is this tab's, and nothing else to show
   } catch (e) {
     if (isStale(seq, e)) return null; // a superseded open says nothing and paints nothing
@@ -902,13 +913,20 @@ function placeRestored(tabId: string): void {
   setJumpVisible(!state.followTail);
 }
 
-// The ending every open path shares (full replay and tail restore alike):
-// re-scope the live stream to this project, then let the host continue a turn
-// the log still has open. One place, so the orders cannot drift.
-function finishOpen() {
+// The ending every open path shares (full replay and tail restore alike): adopt
+// the live stream onto the log that was just opened, then let the host continue a
+// turn the log still has open. One place, so the orders cannot drift.
+//
+// `project` is the log ITSELF, named by the open that produced it — never read off
+// `currentProject`: adopting is a decision, and a decision needs its input, not a
+// global another path may have moved. It is also what makes the stream's scope
+// bounded by the open: nothing has been adopted since closeSSE at the start of the
+// switch, so every automatic heal in between was a no-op (sse-stream.ts), and this
+// is the ONE moment a pane says which log it is showing.
+function finishOpen(project: string) {
   // the watermark (streamHighOffset) holds this project's tail after the replay,
   // so the stream resumes exactly there
-  reconnectSSE();
+  connectSSE(project);
   refreshTree();
   refreshRollbackAnchors(); // the rows just replayed can be rolled back; ask the journal
   // What was replayed may END with an open turn — a host that died before the
@@ -947,7 +965,7 @@ async function restoreTabView(tab, base, seq: number): Promise<boolean> {
   }
   if (isStale(seq)) return false;
   const openPath = info && info.memory && typeof info.memory.path === "string" ? info.memory.path : "";
-  if (!openPath || openPath !== (tab.projectKey || tab.path)) return false;
+  if (!openPath || openPath !== projectOf(tab)) return false;
 
   const pages: any[][] = [];
   // WHERE THE RANGE ENDS: at the log's tail, not at the offset the tab was left
@@ -1004,7 +1022,7 @@ async function restoreTabView(tab, base, seq: number): Promise<boolean> {
   }
   if (!pages.length) return false;
 
-  const project = tab.projectKey || tab.path;
+  const project = projectOf(tab);
   clearStream();
   setProjectInfo({
     project,
@@ -1034,16 +1052,21 @@ async function restoreTabView(tab, base, seq: number): Promise<boolean> {
   // placement honest (a taller row would otherwise put the tail above the fold)
   await typesetProgressively(eventsEl, (f) => paneReplayProgress("typeset", f));
   if (isStale(seq)) return true; // a newer tab is taking the pane
-  // the tail is painted up to the LOG's end, which may be past where this tab was
-  // left: its own place is what the reader comes back to, so it is put back here
-  // and the latch follows it (placeRestored)
-  placeRestored(tab.id);
+  // The tail is painted up to the LOG's end, which may be past where this tab was
+  // left; its own place is what the reader comes back to, and the caller puts it
+  // back once the card is down — see activateTab, and note that openInTab places
+  // its own the same way, right after its apply. It cannot be put back here: the
+  // card's end is where the pane SETTLES (auto-fold folds the turn this tail is cut
+  // in the middle of), and a place put back before that fold is a pixel of a taller
+  // pane — the reader would land above the tail they left, and the latch would read
+  // "scrolled up" on a pane that is at its end.
+  //
   // the tail is painted and the card is about to go: the bar closes on the same
   // phase the full replay uses, so no path ends a load with the bar short of it
   paneReplayProgress("typeset", 1);
   // the tail is painted and the pane is still the LOAD card's: the caller ends
   // the load (apply(paneTab)) in the same place every other open path does
-  finishOpen();
+  finishOpen(project);
   return true;
 }
 
@@ -1103,7 +1126,7 @@ function paintCachedView(tab): boolean {
   // the workdir from the memento belongs to THIS tab, not to whatever the
   // workspace element still shows from the tab we just left
   const m = mementoOf(tab.id);
-  const projectPath = tab.projectKey || tab.path;
+  const projectPath = projectOf(tab);
   setProjectInfo({
     project: projectPath,
     name: tab.name || projectPath.split("/").pop() || projectPath,
@@ -1127,7 +1150,7 @@ export async function activateTab(tab, readOnly = false) {
     await opening.promise;
     return;
   }
-  const here = tab.projectKey || tab.path;
+  const here = projectOf(tab);
   if (same && !opening && currentProject && currentProject === here) return;
 
   const prev = activeTab();
@@ -1156,7 +1179,10 @@ export async function activateTab(tab, readOnly = false) {
   const seq = supersedeOpen();
   // the stream that is open right now belongs to the tab we are leaving; letting
   // it live through the next replay is how one project's records landed in the
-  // other tab's pane
+  // other tab's pane. Closing it drops the SCOPE as well, so from here until this
+  // activation's own open finishes (finishOpen) there is no log to read: the
+  // automatic heals in between (a new base, a dropped one) are no-ops by
+  // construction rather than by a rule each of them has to remember.
   closeSSE();
   // ...and that stream is the one fact that would have confirmed a send in
   // flight (render-events.ts outbox): the wait ends here, with the message still
@@ -1184,13 +1210,16 @@ export async function activateTab(tab, readOnly = false) {
   // a remote project, which is the "the tab and the workspace disagree" report).
   // The root we can already name is this tab's own record; the host's answer
   // replaces it the moment the claim lands (refreshTree below).
-  const projectHere = tab.projectKey || tab.path || "";
   const hereMemo = mementoOf(tab.id);
-  enterWorkspace(projectHere, (hereMemo && hereMemo.workdir) || dirOf(projectHere));
+  enterWorkspace(here, (hereMemo && hereMemo.workdir) || dirOf(here));
 
   // What this activation must SHOW when it is over. Every path below decides
   // that and paints nothing, so a state can only land once — at the end, and
   // only while this is still the current activation.
+  // A tail rebuilt from the log (`restoreTabView`) is the one path whose place is
+  // put back after that landing: the card's end settles the pane, and a place is a
+  // pixel of the pane it is put back on.
+  let restored = false;
   const run = async (): Promise<PaneState | null> => {
     const base = await claimTab(tab);
     if (isStale(seq)) return null;
@@ -1224,14 +1253,18 @@ export async function activateTab(tab, readOnly = false) {
     // stream reconnects at the offsets that cache restored (finishOpen), which is
     // what makes switching back instant instead of a replay.
     if (cached) {
-      finishOpen();
+      finishOpen(projectOf(tab));
       return paneTab(tab.id); // the cached view IS this tab's pane again
     }
 
     // No DOM cache: fall back to replaying from disk. Try restoring just the
     // painted range (if this session still has the same project open), then
     // the full open if needed.
-    if (await restoreTabView(tab, base, seq)) return isStale(seq) ? null : paneTab(tab.id);
+    if (await restoreTabView(tab, base, seq)) {
+      if (isStale(seq)) return null;
+      restored = true;
+      return paneTab(tab.id);
+    }
     if (isStale(seq)) return null;
     return await openInTab(tab, base, readOnly, seq);
   };
@@ -1239,7 +1272,7 @@ export async function activateTab(tab, readOnly = false) {
   opening = mine;
   let next: PaneState | null = null;
   try {
-    next = await run();
+    next = await mine.promise;
   } finally {
     if (opening === mine) opening = null;
   }
@@ -1247,7 +1280,14 @@ export async function activateTab(tab, readOnly = false) {
   // that is still current: one superseded has already painted its own card, and
   // applying this one would paint over it (the reported "two tabs, both showing
   // the other project").
-  if (next && !isStale(seq)) apply(next);
+  if (next && !isStale(seq)) {
+    apply(next);
+    // …and back where a rebuilt tail was left, on the pane the card left: the
+    // settle above folds the turn that tail is cut in the middle of, so the height
+    // this place is a pixel of is the settled one. openInTab does the same, inside
+    // its own apply.
+    if (restored) placeRestored(tab.id);
+  }
 }
 
 // An explicit Open from the picker: a project is a TAB, and a tab is its own
@@ -1282,6 +1322,9 @@ export async function createProject(dir, name) {
   // the new project needs a session before it has a path: claim the tab's slot
   // first, then create the file on THAT session.
   const seq = supersedeOpen();
+  // same act as leaving a tab (activateTab): the stream — and with it the SCOPE —
+  // is dropped, and the new project adopts its own log when the create succeeds
+  // (finishOpen at the end of this function).
   closeSSE();
   const tab = ensureTab("", name);
   state.activeTabId = tab.id;
@@ -1309,7 +1352,7 @@ export async function createProject(dir, name) {
     clearStream();
     setProjectInfo(data);
     apply(paneTab(tab.id)); // a new project is empty, but it IS the pane's view now
-    finishOpen(); // new empty project: the watermark resets with the stream
+    finishOpen(projectOf(tab)); // new empty project: the watermark resets with the stream
   } catch (e) {
     if (isStale(seq)) return;
     // a create that hits another window's file is the same conflict as an open:

@@ -14,7 +14,7 @@
 //
 // Run: node tests/sse-liveness-test.js
 
-const { check, summary, slicer, uiSource, stateStub } = require("./harness.js");
+const { check, summary, slicer, uiSource, stateStub, runnableSnippet } = require("./harness.js");
 
 const src = uiSource(); // the renderer, every module in page load order
 const { fnBody } = slicer(src);
@@ -78,7 +78,6 @@ global.state = stateStub();
 global.EventSource = FakeEventSource;
 global.setInterval = () => 1; // the watchdog timer is driven by hand below
 global.state.apiBase = "http://127.0.0.1:43761";
-global.currentProject = "/tmp/demo.clc";
 global.es = null;
 global.busy = false;
 // how far this window has painted (js/project.js): a fresh window has nothing
@@ -171,21 +170,23 @@ global.window = {
 };
 
 // ---- load the real code ----
-// settleCatchUp is here because connectSSE/closeSSE/es.onerror end the catch-up
-// block before they let go of a stream; what a drain paints, and when it must
-// happen, is tests/catch-up-paint-test.js's subject, not this runner's.
-for (const name of ["hostCall", "sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchdog", "connectSSE", "settleCatchUp", "sseSuspend", "sseResume", "stop"]) {
-  (0, eval)(fnBody(name));
+// connectSSE ADOPTS a log and openStream opens the socket; closeSocket is the one
+// function that ends one, and it settles the catch-up block first — what a drain
+// paints, and when it must happen, is tests/catch-up-paint-test.js's subject.
+for (const name of ["hostCall", "sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchdog",
+  "connectSSE", "closeSocket", "openStream", "settleCatchUp", "sseSuspend", "sseResume", "stop"]) {
+  (0, eval)(runnableSnippet(fnBody(name)));
 }
 
 (async () => {
   // ---- 1) a stream is armed: one stream, keepalive listened for BY NAME ----
-  connectSSE();
+  // the pane adopts the log it shows, and that adoption is what names the stream
+  connectSSE("/tmp/demo.clc");
   const es1 = instances[instances.length - 1];
   check(es1 && es1.url.includes("/api/events?"), "connectSSE opens the events stream");
   check((es1.listeners.ping || []).length === 1, "the named keepalive is listened for by name");
   check(!/replay/.test(es1.url) && !/[?&]since=/.test(es1.url),
-    "a window that has painted nothing asks for the resident window, not an offset");
+    "a window that has painted nothing asks for the log it adopted, not an offset");
 
   // ---- 2) half-open stream: silent past three keepalives, no ES error at all --
   es1.fireOpen();
@@ -222,7 +223,7 @@ for (const name of ["hostCall", "sseFrame", "sseDegrade", "sseWatchdogTick", "st
     "a live stream triggers nothing");
 
   // ---- 5) a base that is GONE: EventSource retries forever in silence ----
-  connectSSE();
+  connectSSE("/tmp/demo.clc");
   const es3 = instances[instances.length - 1];
   es3.fireOpen();
   check(global.sseErrorsSince === 0, "a connect opens a fresh failure window");
@@ -304,16 +305,16 @@ for (const name of ["hostCall", "sseFrame", "sseDegrade", "sseWatchdogTick", "st
   // that answer closes instead (js/stream-events.js `replayed`, driven for real
   // by replay-dedupe-test.js).
   const opened = treeRefreshes;
-  connectSSE();
+  connectSSE("/tmp/demo.clc");
   instances[instances.length - 1].fireOpen();
   check(treeRefreshes === opened,
     "onopen does not read the tree for a named project: it would race the session's own open");
-  // no project named: the tree cannot race anything, and it is still read here
-  global.currentProject = "";
-  connectSSE();
+  // the session's own resident window ("", what a boot with no tab adopts) names
+  // no project, so the tree cannot race anything and it is still read here
+  connectSSE("");
   instances[instances.length - 1].fireOpen();
   check(treeRefreshes === opened + 1,
-    "a window with no project still resyncs the tree on open, as it always did");
+    "the session's resident window still resyncs the tree on open, as it always did");
 
   summary("sse-liveness");
 })();

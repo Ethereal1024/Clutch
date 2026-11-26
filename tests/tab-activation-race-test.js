@@ -39,14 +39,16 @@ const { fnBody } = slicer(project);
     "and closes the PREVIOUS tab's stream before the next replay starts");
   check(activate.indexOf("closeSSE()") < activate.indexOf("claimTab("),
     "the close happens before the claim/replay, not at its end");
-  check(/const seq = supersedeOpen\(\);[\s\S]{0,400}closeSSE\(\);/.test(activate),
-    "supersede and close are adjacent: no old stream survives the switch");
+  const between = activate.slice(activate.indexOf("const seq = supersedeOpen();"), activate.indexOf("closeSSE();"));
+  check(activate.indexOf("const seq = supersedeOpen();") < activate.indexOf("closeSSE();") &&
+    !/\bawait\b/.test(between) && !/apiFetch|claimTab|refreshTree/.test(between),
+    "supersede and close are adjacent: nothing awaited or asked can come between them, so no old stream survives the switch");
   check(/if \(same && opening && opening\.id === tab\.id\) \{\s*await opening\.promise;/.test(activate),
     "a double click joins the open already in flight instead of replaying twice");
   // one landing point: an activation's state is applied where the activation ends,
   // and only while it is still the current one
   check((activate.match(/apply\(/g) || []).length === 1 &&
-        /if \(next && !isStale\(seq\)\) apply\(next\);/.test(activate),
+        /if \(next && !isStale\(seq\)\) \{\s*apply\(next\);/.test(activate),
     "and a superseded activation paints nothing: its state lands at one checked point");
 }
 
@@ -60,7 +62,7 @@ const { fnBody } = slicer(project);
   const staleAt = open.indexOf("if (isStale(seq)) return null;");
   const clearAt = open.indexOf("clearStream();");
   const metaAt = open.indexOf("setProjectInfo({");
-  const finishAt = open.indexOf("finishOpen();");
+  const finishAt = open.indexOf("finishOpen(projectOf(tab));");
   check(staleAt > -1 && staleAt < clearAt && staleAt < metaAt && staleAt < finishAt,
     "the generation is checked before clearing, painting, setting the project and reconnecting");
   check(/if \(isStale\(seq, e\)\) return null;/.test(open),
@@ -91,7 +93,7 @@ const { fnBody } = slicer(project);
   const restore = fnBody("restoreTabView");
   check(/apiFetch\("\/api\/session", \{ base, signal \}\)/.test(restore),
     "the tail restore first asks WHICH project this session has open");
-  check(/openPath !== \(tab\.projectKey \|\| tab\.path\)/.test(restore),
+  check(/openPath !== projectOf\(tab\)/.test(restore),
     "and refuses to paint another project's log when the session was replaced");
   check(/\/api\/history\?before=\$\{cursor\}&limit=\$\{RESTORE_PAGE_BYTES\}&align=turn/.test(restore),
     "it pages the visible byte range from the log instead of re-streaming the file");
@@ -115,8 +117,9 @@ const { fnBody } = slicer(project);
     "and the next tab click is what aborts them");
   check(/if \(isStale\(seq\)\) return true;/.test(restore),
     "a newer activation stops the restore mid-paint");
-  check(/if \(await restoreTabView\(tab, base, seq\)\) return isStale\(seq\) \? null : paneTab\(tab\.id\);/.test(fnBody("activateTab")),
-    "activation tries the tail restore befor the full open");
+  check(/if \(await restoreTabView\(tab, base, seq\)\) \{\s*if \(isStale\(seq\)\) return null;\s*restored = true;\s*return paneTab\(tab\.id\);/.test(fnBody("activateTab")),
+    "activation tries the tail restore befor the full open, and remembers that this is the path whose " +
+    "place is put back after the landing");
   check(/return await openInTab\(tab, base, readOnly, seq\);/.test(fnBody("activateTab")),
     "a first visit (or a replaced session) still takes the full open");
 }
@@ -165,7 +168,7 @@ const { fnBody } = slicer(project);
   check(/if \(!restoreDomCache\(tab\.id\)\) return false;/.test(paint) && /setProjectInfo\(\{/.test(paint) &&
         /setOlderPill\(m\.older\)/.test(paint),
     "the cache itself is DOM-only (no await), and it carries this tab's workdir and older pill with it");
-  check(/if \(cached\) \{\s*finishOpen\(\);\s*return paneTab\(tab\.id\);/.test(activate),
+  check(/if \(cached\) \{\s*finishOpen\(projectOf\(tab\)\);\s*return paneTab\(tab\.id\);/.test(activate),
     "the claim that follows only buys the SSE base: no second restore replays what is already painted");
   check(!/restoreDomCache\(tab\.id\)\) \{/.test(activate),
     "and the old restore-after-the-claim branch is gone, so a cached switch cannot land twice");

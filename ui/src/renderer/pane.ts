@@ -121,9 +121,19 @@ export function onPaneChange(fn: (state: PaneState) => void) {
 }
 
 export function setPane(next: PaneState) {
+  const was = pane;
   pane = next;
   render();
   for (const fn of listeners) fn(pane);
+  // The load card is down: the pane has stopped being the replay's target, and the
+  // rows drawn under that card are the reader's own from here on. The turn they
+  // carry is folded on the announcement, in auto-fold, which loads after this file
+  // and so may not be named here (`clutch:pane-settled`; stream-view.ts's
+  // endCatchUp is the other announcer).
+  if (was.view === "load" && next.view !== "load") {
+    const events = byId("events");
+    if (events) events.dispatchEvent(new CustomEvent("clutch:pane-settled"));
+  }
 }
 
 // ---- the only writer -------------------------------------------------------

@@ -133,9 +133,10 @@ export async function loadHostDefaults() {
   }
 }
 
-// settle the stored URL before connecting SSE; connectSSE is idempotent, so a
-// switch inside reconciledBackendUrl (stale-SSH fallback, tunnel target) plus
-// the trailing call still leaves exactly one live stream
+// The boot above settles this window's session URL before the stream starts —
+// and the base switches inside it (stale-SSH fallback, tunnel target) only HEAL:
+// nothing is adopted yet, so none of them can open a stream. The one connect at
+// the end of this IIFE is what starts the page's only stream.
 (async () => {
   // Restored tabs own their sessions. Claiming the window's default slot too
   // would spawn a session nobody is looking at: the remembered tab claims its
@@ -198,7 +199,11 @@ export async function loadHostDefaults() {
   }
   const url = await reconciledBackendUrl();
   if (url) switchBackend(url);
-  connectSSE();
+  // No tab opened on this boot, so the pane is the session's own resident window:
+  // the empty project is the log it reads. This is an ADOPTION like any other —
+  // the boot says which log, the same way a tab's open does — not a special case
+  // inside the stream.
+  connectSSE("");
   // A boot that already knows a project can continue a turn the last page left
   // open (render-events.ts resumeTurn); one that does not gets the same call
   // when a project is opened, because that is when the log it can resume appears.

@@ -338,8 +338,9 @@ function ruleBody(sel) {
     "paintCachedView refuses the cache for a machine tab only while its hop is down");
   check(paint.indexOf("hopUpFor(tab)") < paint.indexOf("restoreDomCache(tab.id)"),
     "and it asks BEFORE restoring: the cache is DOM-only, so the whole decision happens before the first await");
-  check(/if \(cached\) \{\s*finishOpen\(\);\s*return paneTab\(tab\.id\);/.test(projectFn("activateTab")),
-    "a cached remote switch then only re-binds its stream — it does not rebuild the transcript from the network");
+  check(/if \(cached\) \{\s*finishOpen\(projectOf\(tab\)\);\s*return paneTab\(tab\.id\);/.test(projectFn("activateTab")),
+    "a cached remote switch then only re-binds its stream — it does not rebuild the transcript from the network, " +
+    "and it re-binds it to the log the tab names (the scope belongs to the stream, not to whoever opened before)");
 }
 
 summary("tab-load-bar-test.js");

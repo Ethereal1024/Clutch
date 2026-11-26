@@ -378,9 +378,16 @@ function main() {
     // the two open paths place the view through that one helper, and neither gates
     // it on the tab's run any more
     const open = projectFn("openInTab");
+    const activate = projectFn("activateTab");
+    check(/placeRestored\(tab\.id\);/.test(open) &&
+      /apply\(next\);[\s\S]{0,400}placeRestored\(tab\.id\);/.test(activate),
+      "4i) a full replay and a tail restore both end by putting the tab's own place back — the " +
+      "rebuilt tail after the landing, like the full replay inside its own apply: the card's end is " +
+      "where the pane SETTLES (the fold of the turn a restored tail is cut in the middle of), and a " +
+      "place put back before that fold is a pixel of a taller pane");
     const tail = projectFn("restoreTabView");
-    check(/placeRestored\(tab\.id\);/.test(open) && /placeRestored\(tab\.id\);/.test(tail),
-      "4i) a full replay and a tail restore both end by putting the tab's own place back");
+    check(!/placeRestored\(/.test(tail),
+      "4i-b) …and the restore itself places nothing: it is done painting, not done settling");
     check(!/!tab\.running && !tab\.needsInput/.test(open) && !/!tab\.running && !tab\.needsInput/.test(tail),
       "4j) neither path asks the tab's run before placing it: a running tab comes back where its " +
       "reader left it too");

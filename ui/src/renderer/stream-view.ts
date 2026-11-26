@@ -54,6 +54,12 @@ export function beginCatchUp() {
 export function endCatchUp() {
   if (!catchUp) return;
   catchUp = false;
+  // The replay is over and its rows are the pane's: the turn they carry folds
+  // here, by the announcement, in auto-fold (which loads after this file, so the
+  // event is the door — pane.ts setPane is the other announcer, for the load card).
+  // Before the scroll: a fold changes the pane's height, and the one scroll a
+  // catch-up is allowed has to land on the tail it leaves.
+  eventsEl.dispatchEvent(new CustomEvent("clutch:pane-settled"));
   autoScroll(); // once, at the block's end: a latched view lands on the tail
 }
 

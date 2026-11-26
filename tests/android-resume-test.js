@@ -22,7 +22,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { check, summary, slicer, uiSource, stateStub } = require("./harness.js");
+const { check, summary, slicer, uiSource, stateStub, runnableSnippet } = require("./harness.js");
 const ROOT = path.join(__dirname, "..");
 
 const src = uiSource(); // the renderer, every module in page load order
@@ -45,14 +45,15 @@ check(!/sseDegrade|setStatus|notice\(/.test(fnBody("sseResume")),
   "returning from the background announces nothing and resets nothing");
 check(/sseDegrade\(/.test(fnBody("sseWatchdogTick")),
   "and the watchdog still REPORTS a stream that goes silent under a watching page");
-check(/qs\.set\("since", String\(state\.streamHighOffset\)\)/.test(fnBody("connectSSE")),
+check(/qs\.set\("since", String\(state\.streamHighOffset\)\)/.test(fnBody("openStream")),
   "every connect says how far this window has read");
 const SSE_SRC = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "sse-stream.ts"), "utf8");
 check(!/qs\.set\("replay"/.test(SSE_SRC),
   "and never asks for a blind replay: the offset says it better");
 check(/^function reconnectSSE\(\)/.test(fnBody("reconnectSSE")) &&
-  /connectSSE\(\)/.test(fnBody("reconnectSSE")) && !/es\.close/.test(fnBody("reconnectSSE")),
-  "reconnect is the same door as connect: no caller can ask for the wrong history");
+  /closeSocket\(\);/.test(fnBody("reconnectSSE")) && /openStream\(\);/.test(fnBody("reconnectSSE")) &&
+  !/new EventSource/.test(fnBody("reconnectSSE")),
+  "a reconnect only HEALS: it ends a dead socket and asks the opener for the adopted log — it cannot name one, so no caller can ask for the wrong history");
 check(/document\.addEventListener\("visibilitychange"/.test(src),
   "background/foreground is observed (visibilitychange)");
 check(/document\.addEventListener\("freeze", sseSuspend\)/.test(src) &&
@@ -106,7 +107,6 @@ global.setInterval = () => 1; // the watchdog timer is driven by hand below
 global.setTimeout = (fn) => timers.push(fn); // must stay empty: no probe, no timer
 global.clearTimeout = () => {};
 global.state.apiBase = "http://127.0.0.1:43761";
-global.currentProject = "/tmp/demo.clc";
 global.es = null;
 global.state.streamHighOffset = null;
 global.busy = false;
@@ -153,8 +153,8 @@ global.document = { hidden: false };
 
 // ---- load the real code ----
 for (const name of ["sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchdog",
-  "connectSSE", "settleCatchUp", "reconnectSSE", "sseSuspend", "sseResume"]) {
-  (0, eval)(fnBody(name));
+  "connectSSE", "closeSocket", "openStream", "settleCatchUp", "reconnectSSE", "sseSuspend", "sseResume"]) {
+  (0, eval)(runnableSnippet(fnBody(name)));
 }
 // count the reconnects without replacing the behaviour: the real one still runs
 const realReconnect = global.reconnectSSE;
@@ -164,10 +164,12 @@ global.reconnectSSE = () => {
 };
 
 // ---- 1) a run is live and the phone goes away ----
-connectSSE();
+// the boot adopts the log it shows (here: a project tab; "" would be the session's
+// resident window), and that adoption is the only thing that NAMES a stream
+connectSSE("/tmp/demo.clc");
 const es1 = instances[instances.length - 1];
 check(!/[?&]since=/.test(es1.url),
-  "painted nothing yet: the connect asks for the resident window, not an offset");
+  "painted nothing yet: the first read asks for the log, not for an offset");
 check(!/replay/.test(es1.url), "and carries no replay flag at all");
 es1.fireOpen();
 check(resolved === 1,

@@ -347,6 +347,27 @@ check(switchBackend("http://127.0.0.1:8890") === false && global.state.sseRunAtR
 check(dispatched.filter((t) => t === "clutch:turn-interrupted").length === 1,
   "and a window with nothing in flight announces no interrupted turn");
 
+// ---- 8) the status still lands while the pane is reconstructing ----
+// The ledger above is answered by ONE frame — the first status the window hears
+// after the move — and a window rebuilding its pane is exactly the window that
+// missed it. A status frame is the host's state at the moment of the connect,
+// never a record (agent/events.py DURABLE_TYPES has no state_update), so the
+// shape of the pane is not a reason to drop it: nothing later would repeat it.
+clearStream();
+setStatus("running");
+switchBackend("http://127.0.0.1:31007");
+check(global.state.sseRunAtRisk === true, "a run was in flight when the session moved");
+global.stream.classList.contains = (c) => c === "loading"; // the /api/project/open card
+statusFrame("idle");
+check(global.state.sseRunLostPending === true,
+  "the idle that reveals the loss is heard even with the load card up");
+check(global.busy === false, "and painted: the badge cannot go on claiming a run");
+addEvent({ type: "replayed", count: 0 });
+const rebuilt = completion();
+check(rebuilt && /nothing is running now/.test(rebuilt.note),
+  "the closing block answers it, exactly as it does on a live pane");
+global.stream.classList.contains = () => false;
+
 check(notices.length === 0, "and not one toast was raised anywhere in this journey");
 
 summary("silent-idle");

@@ -21,7 +21,7 @@ import {
   flushTextRender, flushThinkingRender, paintTextBlock, scheduleTextRender,
   scheduleThinkingRender,
 } from "./stream-text";
-import { eventsEl, stream } from "./els";
+import { eventsEl } from "./els";
 import {
   autoScroll, beginCatchUp, catchUp, endCatchUp, toolCallGroups, toolCalls,
 } from "./stream-view";
@@ -370,16 +370,19 @@ export function addEvent(ev) {
     clearStream();
     return;
   }
-  // replayed status frames must not drive the live UI — but a LIVE permission
-  // prompt is never a replay, and dropping it is how a run wedges: this frame is
-  // host-made and never persisted (agent/events.py DURABLE_TYPES has no
-  // permission_request), so it can only be the ask a blocked run is waiting on.
-  // While the pane was "loading" (the /api/project/open reconstruction, whose
-  // reader may never finish) such a frame was discarded and the prompt never
-  // appeared — the run then waits with no dialog to answer it.
-  if (stream.classList.contains("loading") && ev.type === "state_update") {
-    return;
-  }
+  // Nothing here mutes what the host says about this window's session for the
+  // shape of the pane. Both of those frames are HOST-MADE and never persisted
+  // (agent/events.py DURABLE_TYPES holds neither), so neither is ever part of a
+  // replay: the status frame a connect finds is computed from the host's state
+  // at that moment (agent/api/events.py `_sse`), and a permission ask is the one
+  // a blocked run is waiting on. Dropping them for a "loading" pane is how a run
+  // wedges: this window was reconstructing history, the ask never appeared, and
+  // the run sat in gate.require — which waits forever by design. The status frame
+  // is the same rule the other way round: a window rebuilding its pane is
+  // EXACTLY the window that missed the last word about the run (another window
+  // started one, its own ended, a claim took the project), and the reconstruction
+  // may never finish — nothing later would repeat it.
+
   // ---- the catch-up block: paint it once, when the server closes it ----
   //
   // Everything below is DOM work. While a catch-up is open (`history` …

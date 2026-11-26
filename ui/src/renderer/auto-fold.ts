@@ -33,11 +33,14 @@
 // `completed` and `aborted` (the user's own Stop); every other ending is an
 // interruption (turnEnded, turnSpan, mergeOpenFold).
 //
-// A turn only folds while it is in the pane. Two other ways its rows reach the
+// A turn only folds while it is in the pane. Three other ways its rows reach the
 // reader are covered here as well: a replayed project — the same `final` events,
-// replayed into the same pane — and a page of older records paged in above the
-// window, which can arrive carrying the front half of a turn whose divider this
-// window already had (foldClosedRegions at the bottom). That turn is often folded
+// replayed into the same pane, which fold their turns as they land; the rows a
+// replay (a restore, a reconnect's catch-up) took while the pane was not the run's
+// target, which nothing else would ever fold (foldSettledPane); and a page of
+// older records paged in above the window, which can arrive carrying the front half
+// of a turn whose divider this window already had (foldClosedRegions at the
+// bottom). That turn is often folded
 // ALREADY, under the row the window happened to start on, and a page that brings
 // its own task row completes it: the fold is then completed too, never folded
 // again (foldSegmentRows).
@@ -480,6 +483,45 @@ export function foldOpenTurn() {
   foldRegion(eventsEl, kids.length);
 }
 
+// Fold the turn a replay swallowed, at the moment the pane stops being a replay's
+// target.
+//
+// A row drawn while the pane was being rebuilt (`loading`: the project-open card)
+// or while a reconnect was replaying its window over it (catchUp) is a row
+// foldLiveRow refuses — correctly, those rows are data being restored, not a run
+// drawing. A turn that ENDS inside such a stretch still folds, because its ending
+// goes through autoFoldTurn. A turn that does not end did not, and nothing ever
+// came back for it: the rows a restore took stayed expanded above the block the
+// live rows after them made, for the rest of the run, because the live path only
+// folds the segment it is drawing into (segmentFrom) — the reported "abort 之后
+// 的事件仍无法被归入折叠块中（sleep 标签页中间那段）". A restore is what puts that
+// next to a Stop: a window reopened around an aborted turn takes the next turn's
+// first rows while its own card is still up, and that turn is the long one.
+//
+// So the end of a replay is a fold moment of its own, and it makes the same fold
+// the interruption path makes (foldOpenTurn): the turn's middle folds, its task
+// row and its prose stay in plain sight, and every segment is folded by the rule
+// that would have folded it live (mergeOpenFold, foldSegmentRows). The block is
+// left open as the run's own while the run is still drawing, so the row arriving
+// next joins it and its head goes on saying the block is still filling in.
+export function foldSettledPane() {
+  if (!eventsEl) return;
+  // A replay's rows are not rows the reader watched arrive, so the blocks this pass
+  // makes land closed in place, as the ending's own folds of the same records did
+  // when they replayed (foldsLandClosed, `settling`).
+  settling = true;
+  try {
+    foldOpenTurn();
+  } finally {
+    settling = false;
+  }
+  if (!runInFlight()) return;
+  for (let i = eventsEl.children.length - 1; i >= 0; i--) {
+    const el = eventsEl.children[i] as HTMLElement;
+    if (el.matches(".turn-fold") && el.dataset.turnOpen === "1") { markLive(el); break; }
+  }
+}
+
 /* ── the turn still drawing into the pane: foldable WHILE it runs ──────────────
    A finished turn folds when its ending lands; a run that is still working used to
    leave every row expanded until then, so the one moment the reader most wants the
@@ -798,8 +840,15 @@ export function foldClosedRegions(root) {
 // It must be instant there for a second reason: the pager measures the fold it
 // just made to re-anchor the view (project.ts loadOlder), and an animation still
 // in flight would carry the rows out from under that measurement.
+//
+// The settle pass is the third (foldSettledPane): the rows it folds are the ones a
+// replay drew, and the reader did not watch those arrive either. Its fold also has
+// to be finished when it returns — project.ts puts the reader's place back on the
+// pane the card leaves, and a box still sliding would hand it a height that is on
+// its way to another one.
+let settling = false;
 export function foldsLandClosed() {
-  return stream.classList.contains("loading") || paging;
+  return settling || stream.classList.contains("loading") || paging;
 }
 
 // The pager cannot call foldClosedRegions: the page loads project.ts before
@@ -816,6 +865,12 @@ if (eventsEl) eventsEl.addEventListener("clutch:turn-interrupted", () => {
   clearRunLive();
   foldOpenTurn();
 });
+// And the third: the pane announces that it has stopped taking a replay — the
+// project-open card is down (pane.ts setPane) or the reconnect's catch-up block is
+// closed (stream-view.ts endCatchUp) — and the turn those rows belong to folds here
+// (foldSettledPane). Both files load before this one and may not name it, which is
+// the same reason the two announcements above are events.
+if (eventsEl) eventsEl.addEventListener("clutch:pane-settled", () => foldSettledPane());
 // Every row the pane gains, from the moment the page is open: a run that is in
 // flight is folded as it draws (foldLiveRow). The observer, not the append sites —
 // see the note above foldLiveRow.

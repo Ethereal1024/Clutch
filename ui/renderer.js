@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 9aa0e8ab4df8b35e1ea5c2b28c7fd7f40595f75c9a53149bc461e46472301101
+// sources sha256: fe5e5dfa88cedab2a79e84476ecbd302fe0e1e774b520d0caa7b8e34c2be1b28
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -210,6 +210,12 @@
     // record it already rendered. Reset with the pane.
     streamHighOffset: null,
     // ---- sse-stream.ts ----
+    // WHAT the ONE live stream reads: the project whose records this window may
+    // paint ("" = the session's own resident window, which a boot with no tabs
+    // reads), or null for "this window owns no log at all" — a load card, the
+    // welcome page, a failure panel. Together with streamHighOffset above it is the
+    // whole identity of a read: WHICH log, and HOW FAR into it.
+    streamProject: null,
     // a run is in flight and the stream is at risk (a backend switch or a lost
     // link mid-run): the ring predicts a reconnect instead of a fresh turn
     sseRunAtRisk: false,
@@ -547,9 +553,14 @@
     listeners.push(fn);
   }
   function setPane(next) {
+    const was = pane;
     pane = next;
     render();
     for (const fn of listeners) fn(pane);
+    if (was.view === "load" && next.view !== "load") {
+      const events = byId("events");
+      if (events) events.dispatchEvent(new CustomEvent("clutch:pane-settled"));
+    }
   }
   function byId(id) {
     return document.getElementById(id);
@@ -3177,6 +3188,7 @@
   function endCatchUp() {
     if (!catchUp) return;
     catchUp = false;
+    eventsEl.dispatchEvent(new CustomEvent("clutch:pane-settled"));
     autoScroll();
   }
   function autoScroll(force = false) {
@@ -3599,12 +3611,37 @@
     if (sseWatchdog) return;
     sseWatchdog = setInterval(sseWatchdogTick, 5e3);
   }
-  function connectSSE() {
-    if (!state.apiBase) return;
+  function connectSSE(project) {
+    state.streamProject = project;
+    openStream();
+  }
+  function reconnectSSE() {
+    if (!state.apiBase) {
+      closeSocket();
+      return;
+    }
+    openStream();
+  }
+  function closeSSE() {
+    state.streamProject = null;
+    closeSocket();
+  }
+  function closeSocket() {
     settleCatchUp();
-    if (es) es.close();
+    if (!es) return;
+    try {
+      es.close();
+    } catch (e) {
+    }
+    es = null;
+  }
+  function openStream() {
+    const project = state.streamProject;
+    if (project === null) return;
+    if (!state.apiBase) return;
+    closeSocket();
     const qs = new URLSearchParams();
-    if (currentProject) qs.set("project", currentProject);
+    if (project) qs.set("project", project);
     if (state.streamHighOffset !== null) qs.set("since", String(state.streamHighOffset));
     es = new EventSource(state.apiBase + "/api/events?" + qs.toString());
     sseFrame();
@@ -3623,7 +3660,7 @@
       resolveConnectionLost();
       if (typeof pushTrustArmed === "function") pushTrustArmed();
       dropOrphanLive();
-      if (!currentProject) refreshTree();
+      if (!project) refreshTree();
     };
     es.onerror = () => {
       settleCatchUp();
@@ -3633,18 +3670,6 @@
       }
     };
     startSseWatchdog();
-  }
-  function reconnectSSE() {
-    connectSSE();
-  }
-  function closeSSE() {
-    settleCatchUp();
-    if (!es) return;
-    try {
-      es.close();
-    } catch (e) {
-    }
-    es = null;
   }
 
   // src/renderer/task-rollback.ts
@@ -3950,7 +3975,7 @@
   async function settleAnnouncedClaim(owner) {
     const tab = activeTab();
     if (!tab || !tab.path) return;
-    const project = tab.projectKey || tab.path;
+    const project = projectOf(tab);
     const key = claimIdentity(project, owner);
     if (!key || settledClaims.has(key) || settlingClaim) return;
     const api = window.clutchApi;
@@ -4104,6 +4129,9 @@
   function tabLabel(tab) {
     return tab && (tab.name || (tab.path ? String(tab.path).split("/").pop() : "")) || "project";
   }
+  function projectOf(tab) {
+    return tab && (tab.projectKey || tab.path) || "";
+  }
   function beginPaneLoad(tab) {
     const id = tab && tab.id || "";
     const label = tabLabel(tab);
@@ -4200,7 +4228,7 @@
       placeRestored(tab.id);
       if (started) await noteTabMachine(tab, base);
       if (isStale(seq)) return null;
-      finishOpen();
+      finishOpen(projectOf(tab));
       return null;
     } catch (e) {
       if (isStale(seq, e)) return null;
@@ -4243,8 +4271,8 @@
     state.followTail = nearBottom();
     setJumpVisible(!state.followTail);
   }
-  function finishOpen() {
-    reconnectSSE();
+  function finishOpen(project) {
+    connectSSE(project);
     refreshTree();
     refreshRollbackAnchors();
     resumeTurn();
@@ -4265,7 +4293,7 @@
     }
     if (isStale(seq)) return false;
     const openPath = info && info.memory && typeof info.memory.path === "string" ? info.memory.path : "";
-    if (!openPath || openPath !== (tab.projectKey || tab.path)) return false;
+    if (!openPath || openPath !== projectOf(tab)) return false;
     const pages = [];
     const mem = info && info.memory;
     const tail = mem && typeof mem.bytes === "number" && Number.isFinite(mem.bytes) ? mem.bytes : null;
@@ -4293,7 +4321,7 @@
       paneReplayProgress("parse", Math.min(1, (from - cursor) / span));
     }
     if (!pages.length) return false;
-    const project = tab.projectKey || tab.path;
+    const project = projectOf(tab);
     clearStream();
     setProjectInfo({
       project,
@@ -4316,9 +4344,8 @@
     setOlderPill(Math.max(0, cursor));
     await typesetProgressively(eventsEl, (f) => paneReplayProgress("typeset", f));
     if (isStale(seq)) return true;
-    placeRestored(tab.id);
     paneReplayProgress("typeset", 1);
-    finishOpen();
+    finishOpen(project);
     return true;
   }
   function paintCachedView(tab) {
@@ -4329,7 +4356,7 @@
     setJumpVisible(!state.followTail);
     dropOrphanLive();
     const m = mementoOf(tab.id);
-    const projectPath = tab.projectKey || tab.path;
+    const projectPath = projectOf(tab);
     setProjectInfo({
       project: projectPath,
       name: tab.name || projectPath.split("/").pop() || projectPath,
@@ -4345,7 +4372,7 @@
       await opening.promise;
       return;
     }
-    const here = tab.projectKey || tab.path;
+    const here = projectOf(tab);
     if (same && !opening && currentProject && currentProject === here) return;
     const prev = activeTab();
     if (prev && prev.id !== tab.id) {
@@ -4369,9 +4396,9 @@
     tab.needsInput = false;
     const cached = paintCachedView(tab);
     if (!cached) beginPaneLoad(tab);
-    const projectHere = tab.projectKey || tab.path || "";
     const hereMemo = mementoOf(tab.id);
-    enterWorkspace(projectHere, hereMemo && hereMemo.workdir || dirOf(projectHere));
+    enterWorkspace(here, hereMemo && hereMemo.workdir || dirOf(here));
+    let restored = false;
     const run2 = async () => {
       const base = await claimTab(tab);
       if (isStale(seq)) return null;
@@ -4387,10 +4414,14 @@
       refreshTree();
       if (!tab.path) return paneTab(tab.id);
       if (cached) {
-        finishOpen();
+        finishOpen(projectOf(tab));
         return paneTab(tab.id);
       }
-      if (await restoreTabView(tab, base, seq)) return isStale(seq) ? null : paneTab(tab.id);
+      if (await restoreTabView(tab, base, seq)) {
+        if (isStale(seq)) return null;
+        restored = true;
+        return paneTab(tab.id);
+      }
       if (isStale(seq)) return null;
       return await openInTab(tab, base, readOnly2, seq);
     };
@@ -4398,11 +4429,14 @@
     opening = mine;
     let next = null;
     try {
-      next = await run2();
+      next = await mine.promise;
     } finally {
       if (opening === mine) opening = null;
     }
-    if (next && !isStale(seq)) apply(next);
+    if (next && !isStale(seq)) {
+      apply(next);
+      if (restored) placeRestored(tab.id);
+    }
   }
   async function openProject(path, readOnly2 = false) {
     const existing = findTabByPath(path);
@@ -4443,7 +4477,7 @@
       clearStream();
       setProjectInfo(data);
       apply(paneTab(tab.id));
-      finishOpen();
+      finishOpen(projectOf(tab));
     } catch (e) {
       if (isStale(seq)) return;
       const held = e && e.code === "project_open_conflict" ? describeHolder(e.owner) : "";
@@ -4648,6 +4682,23 @@
     if (!kids.length || kids[kids.length - 1].matches(".completion")) return;
     foldRegion(eventsEl, kids.length);
   }
+  function foldSettledPane() {
+    if (!eventsEl) return;
+    settling = true;
+    try {
+      foldOpenTurn();
+    } finally {
+      settling = false;
+    }
+    if (!runInFlight()) return;
+    for (let i = eventsEl.children.length - 1; i >= 0; i--) {
+      const el = eventsEl.children[i];
+      if (el.matches(".turn-fold") && el.dataset.turnOpen === "1") {
+        markLive(el);
+        break;
+      }
+    }
+  }
   function runInFlight() {
     return !!busy && !catchUp && !paging && !pageSink && !stream.classList.contains("loading");
   }
@@ -4790,14 +4841,16 @@
       if (at >= 0) foldRegion(root, at);
     }
   }
+  var settling = false;
   function foldsLandClosed() {
-    return stream.classList.contains("loading") || paging;
+    return settling || stream.classList.contains("loading") || paging;
   }
   if (eventsEl) eventsEl.addEventListener("clutch:page-prepended", () => foldClosedRegions(eventsEl));
   if (eventsEl) eventsEl.addEventListener("clutch:turn-interrupted", () => {
     clearRunLive();
     foldOpenTurn();
   });
+  if (eventsEl) eventsEl.addEventListener("clutch:pane-settled", () => foldSettledPane());
   if (eventsEl) watchLiveRows();
 
   // src/renderer/stream-events.ts
@@ -4976,9 +5029,6 @@
     }
     if (ev && ev.type === "resync") {
       clearStream();
-      return;
-    }
-    if (stream.classList.contains("loading") && ev.type === "state_update") {
       return;
     }
     const paint2 = () => {
@@ -9260,7 +9310,7 @@ Closing its tab stops the task and writes an aborted ending to the project log.`
     }
     const url = await reconciledBackendUrl();
     if (url) switchBackend(url);
-    connectSSE();
+    connectSSE("");
     resumeTurn();
   })();
   if (typeof window.clutchWin !== "undefined") {

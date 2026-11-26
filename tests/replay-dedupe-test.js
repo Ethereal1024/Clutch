@@ -49,9 +49,9 @@ check(/function addEvent\(ev\)/.test(APP) &&
   /ev\.event && typeof ev\.offset === "number"/.test(fnBody("addEvent")),
   "the runner drives the real thing: a record is {offset, event} on the wire");
 check(/^export function reconnectSSE\(\)/m.test(APP) &&
-  /connectSSE\(\)/.test(fnBody("reconnectSSE")),
-  "the reconnecting stream is a plain connect: the watermark is read in one place");
-check(/if \(state\.streamHighOffset !== null\) qs\.set\("since"/.test(fnBody("connectSSE")),
+  /openStream\(\);/.test(fnBody("reconnectSSE")) && !/new EventSource/.test(fnBody("reconnectSSE")),
+  "the reconnecting stream re-opens the log the pane ADOPTED (openStream reads the scope): a heal never reads another project");
+check(/if \(state\.streamHighOffset !== null\) qs\.set\("since"/.test(fnBody("openStream")),
   "and it asks for exactly the records after that watermark, or for the window when there are none");
 
 // ---- stub environment ----
@@ -70,6 +70,9 @@ global.eventsEl = {
     return "";
   },
   appendChild: (el) => rendered.push(el),
+  // the pane's own announcements (the catch-up bracket ends with one, auto-fold's
+  // `clutch:pane-settled`): a real pane dispatches, and this runner has no listeners
+  dispatchEvent: () => {},
 };
 global.pageSink = null;
 // the view: a real element's two scroll fields and nothing else (autoScroll only

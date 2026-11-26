@@ -248,8 +248,8 @@ function twoTabs(ctx) {
 
   check(/if \(!restoredTabs\) \{[\s\S]{0,520}await resolveApiBase\(\);/.test(boot) &&
         /const url = await reconciledBackendUrl\(\);/.test(boot) &&
-        /connectSSE\(\);/.test(boot),
-    "the boot that has no tabs is untouched: resolve the window's session, connect, resume");
+        /connectSSE\(""\);/.test(boot),
+    "the boot that has no tabs is untouched: resolve the window's session, read the session's own resident window, resume");
   check(/if \(!restoredTabs\) \{[\s\S]{0,300}state\.activeTabId = null;/.test(boot),
     "and it drops the remembered highlight there: the conn-lost Cancel boot opens no tab, " +
     "so no tab may look open");
@@ -385,7 +385,8 @@ function twoTabs(ctx) {
     "a pane that held a panel is never cached as a view: switching back repaints the reason " +
     "instead of restoring the blank pane");
   check(/tab\.unreachable = null;\s*\n\s*adoptBase\(base\);/.test(activate) &&
-        /if \(next && !isStale\(seq\)\) apply\(next\);/.test(activate),
+        /if \(next && !isStale\(seq\)\) \{\s*apply\(next\);/.test(activate) &&
+        (activate.match(/apply\(next\)/g) || []).length === 1,
     "and the panel comes down the moment the tab has a session of its own: the claim clears the reason and " +
     "the state that run returns replaces it at the one landing point");
 }

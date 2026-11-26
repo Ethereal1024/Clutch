@@ -70,6 +70,12 @@ export const state = {
   streamHighOffset: null,
 
   // ---- sse-stream.ts ----
+  // WHAT the ONE live stream reads: the project whose records this window may
+  // paint ("" = the session's own resident window, which a boot with no tabs
+  // reads), or null for "this window owns no log at all" — a load card, the
+  // welcome page, a failure panel. Together with streamHighOffset above it is the
+  // whole identity of a read: WHICH log, and HOW FAR into it.
+  streamProject: null as string | null,
   // a run is in flight and the stream is at risk (a backend switch or a lost
   // link mid-run): the ring predicts a reconnect instead of a fresh turn
   sseRunAtRisk: false,

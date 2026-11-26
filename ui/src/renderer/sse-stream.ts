@@ -11,7 +11,6 @@
 
 import { connectionLost, resolveConnectionLost } from "./conn-lost";
 import { pushTrustArmed } from "./permissions";
-import { currentProject } from "./project";
 import { state } from "./state";
 import { addEvent, dropOrphanLive, settleCatchUp } from "./stream-events";
 import { refreshTree } from "./workspace-panel";
@@ -37,19 +36,21 @@ export let es = null;
 // background announces nothing, because there the window knows it was away.
 //
 // What this window knows when it (re)connects is exactly ONE thing: the highest
-// .clc byte offset it has painted (streamHighOffset, declared with the rest of
-// the stream state in project.ts), and that is what every connect says —
-// `?since=`. That read is the one deliberate exception to the load-order rule
-// above: the declaration sits in a file loaded LATER, which is harmless because
-// the value is only read when a stream is (re)connected, long after the page has
-// loaded (a `let` below is in TDZ only during the scripts' own evaluation). The
-// socket is transport, and
-// whatever the platform did to it while the page was not running (a backlog to
-// drain, a half-open connection, one Doze killed without a FIN) the answer is
-// the same, and it is not a guess: close it, and ask the log for what is after
-// the offset. A re-read is idempotent (a record at or below the watermark is
+// .clc byte offset it has painted (state.streamHighOffset, beside the rest of the
+// stream state), and that is what every connect says — `?since=`. The socket is
+// transport, and whatever the platform did to it while the page was not running
+// (a backlog to drain, a half-open connection, one Doze killed without a FIN) the
+// answer is the same, and it is not a guess: close it, and ask the log for what is
+// after the offset. A re-read is idempotent (a record at or below the watermark is
 // never painted twice), so nothing here has to decide whether the pipe is still
 // good — the probe that used to decide, and the `replay` flag it fed, are gone.
+//
+// WHICH log is asked is not a thing this file re-derives either — see "what the
+// live stream reads" below: state.streamProject is adopted once, by the pane that
+// takes a project, and every later read of it (the `?project=` this socket names,
+// the tree it resyncs, the log each heal re-reads) comes from there. It is why
+// this file imports nothing from project.ts: the window's belief about what it is
+// looking at moves at a different moment than the pane does.
 export const SSE_KEEPALIVE_MS = 15000; // must match agent/server.py SSE_KEEPALIVE_SEC
 export const SSE_STALE_MS = SSE_KEEPALIVE_MS * 3; // one missed keepalive is not death
 // How long a base may keep failing to answer before the window stops believing
@@ -182,33 +183,100 @@ export function startSseWatchdog() {
   sseWatchdog = setInterval(sseWatchdogTick, 5000);
 }
 
-export function connectSSE() {
+// ---- what the live stream reads ---------------------------------------------
+//
+// One EventSource reads ONE log, and that log is not derivable from the window's
+// globals: `currentProject` is the window's belief about what it is looking at,
+// and it moves at a different moment than the pane does (a tab switch closes the
+// old stream, claims the new tab's own session, and only then replays a project —
+// in between, the belief still names the tab that was LEFT). A connect that
+// re-read that belief could open a socket onto a log no pane is showing, and that
+// log's records would land in the pane that is still loading — one project's
+// answer drawn into another tab, which is what "the two tabs show each other's
+// project" was.
+//
+// So the log is a fact this module HOLDS (state.streamProject), and the three
+// doors below are its whole vocabulary:
+//   * connectSSE(project) — ADOPT: the pane now shows this log. The one and only
+//     way a stream STARTS, and it names the log itself, so nothing here has to
+//     guess what the window is looking at.
+//   * reconnectSSE()      — HEAL: that same log, on whatever base this window has
+//     now. It cannot choose a log, so it cannot invent one: with none adopted
+//     there is nothing to heal. That is what makes "a reconnect during a load
+//     connected to the tab we just left" impossible instead of merely unlikely.
+//   * closeSSE()          — LET GO: no pane owns a log any more (the welcome page,
+//     the last tab closed, a switch whose own load has not adopted one yet).
+export function connectSSE(project: string) {
+  state.streamProject = project;
+  openStream();
+}
+
+// The base is the other half of a read, and it is not adopted here: it belongs to
+// the session (adoptBase), and a heal is exactly "the session moved, the log did
+// not". WHICH log is not this door's to ask — openStream reads the adopted scope
+// and opens nothing without one — so a heal cannot invent a read, it can only
+// re-open the one the pane took. A window whose session is gone closes its socket
+// and KEEPS the scope, so the URL the host announces next (backend:base-changed ->
+// switchBackend) heals this same read instead of leaving the pane without one.
+export function reconnectSSE() {
+  if (!state.apiBase) {
+    closeSocket();
+    return;
+  }
+  openStream();
+}
+
+export function closeSSE() {
+  state.streamProject = null;
+  closeSocket();
+}
+
+// the ONE way a socket ends, whatever ended it. A block the stream was still
+// delivering ends with it: its rows are already counted in the watermark (addEvent
+// counts a record when it ARRIVES), so a dropped queue is a hole the next `?since=`
+// would never fill, and a bracket left open would hold the next stream's rows
+// behind a `replayed` it never sends. Paint them into the pane they belong to, and
+// close the block, before anything is asked of another stream.
+function closeSocket() {
+  settleCatchUp();
+  if (!es) return;
+  try {
+    es.close();
+  } catch (e) {
+    /* already closed */
+  }
+  es = null;
+}
+
+// The ONE way a socket starts, and the only place `es` is assigned: it reads the
+// adopted scope and nothing else, so a socket can never describe a log its pane is
+// not showing. Private on purpose — the three doors above are the vocabulary, and
+// a caller that could open a stream directly could open one nobody adopted.
+function openStream() {
+  // The log this socket reads, read once and fixed for its whole life: every frame
+  // it delivers and every tree it resyncs is about THIS project. null = no log was
+  // adopted, so there is nothing to read.
+  const project = state.streamProject;
+  if (project === null) return;
   // backend not claimed yet: the main process announces the real URL via
-  // backend:base-changed -> switchBackend -> reconnectSSE
+  // backend:base-changed -> switchBackend -> reconnectSSE, and that heals this
+  // same scope as soon as it lands
   if (!state.apiBase) return;
   // INVARIANT: at most one live stream per window. es is module-level and its
-  // callers are many (boot, switchBackend, open/new project, base-changed
-  // heal); the owner enforces single-stream here, so any call order — e.g. the
-  // boot IIFE switching backends before its trailing connect — replaces the
-  // old stream instead of leaking a second one (two live streams deliver every
-  // event twice: the per-token stutter).
-  // The block the OLD stream was still delivering ends with it: its rows are
-  // already counted in the watermark (addEvent counts a record when it ARRIVES),
-  // so a dropped queue is a hole the next `?since=` would never fill, and a
-  // bracket left open would hold the new stream's rows behind a `replayed` it
-  // never sends. Paint them into the pane they belong to, and close the block,
-  // before anything is asked of the new stream.
-  settleCatchUp();
-  if (es) es.close();
-  // ?project= scopes the stream to this window's .clc. ?since= is the offset we
-  // have already painted: the server answers with every durable record after
-  // it, so a (re)connect reads the log instead of guessing what the pipe missed
-  // — and with nothing painted yet (a fresh window) the parameter is left off,
-  // which asks for the resident window. The server still honours `replay` for
-  // 0.1.18 clients that have no watermark; this window never sends it, because
-  // it has something better to say than "paint it again".
+  // callers are many (boot, base-changed heal, open/new project); the owner
+  // enforces single-stream here, so any call order — e.g. the boot IIFE switching
+  // backends before its adoption — replaces the old stream instead of leaking a
+  // second one (two live streams deliver every event twice: the per-token stutter).
+  closeSocket();
+  // ?project= scopes the stream to that log. ?since= is the offset we have already
+  // painted: the server answers with every durable record after it, so a
+  // (re)connect reads the log instead of guessing what the pipe missed — and with
+  // nothing painted yet (a fresh window) the parameter is left off, which asks for
+  // the resident window. The server still honours `replay` for 0.1.18 clients that
+  // have no watermark; this window never sends it, because it has something better
+  // to say than "paint it again".
   const qs = new URLSearchParams();
-  if (currentProject) qs.set("project", currentProject);
+  if (project) qs.set("project", project);
   if (state.streamHighOffset !== null) qs.set("since", String(state.streamHighOffset));
   es = new EventSource(state.apiBase + "/api/events?" + qs.toString());
   sseFrame(); // the stream is starting: never stale before its first byte
@@ -252,7 +320,7 @@ export function connectSSE() {
     // brackets around that answer (stream-events.ts `replayed`) is the first
     // moment the read cannot race it. With no project named there is nothing to
     // race: the tree is read here, as it always was.
-    if (!currentProject) refreshTree();
+    if (!project) refreshTree();
   };
   es.onerror = () => {
     // The browser retries the SAME URL, so the `?since=` of the retry is the one
@@ -271,31 +339,5 @@ export function connectSSE() {
     }
   };
   startSseWatchdog();
-}
-
-// point the SSE stream at the (possibly new) API_BASE; when es is null (boot
-// before the backend resolved) this CREATES the stream — that is exactly the
-// late-heal path. connectSSE reads the watermark itself, so there is no amount
-// of history a caller could get wrong: this is a plain alias and callers that
-// used to pass replay/no-replay may keep their shape.
-export function reconnectSSE() {
-  connectSSE();
-}
-
-// Close the live stream outright (the last tab closed / a tab's session was
-// released). A reconnect heals it again; a page with no session must not keep
-// an EventSource pointed at a port nobody serves.
-export function closeSSE() {
-  // a block this stream was still delivering ends before the socket goes (see
-  // connectSSE): the watermark already counts those rows, and the `replayed`
-  // that would close the bracket is not coming
-  settleCatchUp();
-  if (!es) return;
-  try {
-    es.close();
-  } catch (e) {
-    /* already closed */
-  }
-  es = null;
 }
 
