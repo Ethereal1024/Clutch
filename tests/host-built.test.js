@@ -58,7 +58,7 @@ function main() {
   for (const required of ["main", "preload", "mirrors", "components", "plugin-host", "run"]) {
     check(names.has(required), `src/host/${required}.ts exists (it is loaded by path, not by require)`);
   }
-  check(names.size === 45, `the host half is 45 modules (found ${names.size})`);
+  check(names.size === 46, `the host half is 46 modules (found ${names.size})`);
 
   // 4. the emitted modules are CommonJS: they are loaded by require() here and
   // by the phone's node, and an ESM emit would make the file unloadable in that

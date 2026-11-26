@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/components-view.ts and run `npm run build:host`.
-// source sha256: 685b6cd3ab4ef82ef7bb43922225f82ad563d1b22e0d11565534abcb5f09fde8
+// source sha256: a80a5e1f4ba9a4e035b43065ce32e6a64db67d3fede469aada543cd8ac497f59
 
 // the plugin page's backend: what each component's declaration puts where, what
 // those places hold, what this client could give them, and the writes that move
@@ -40,6 +40,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const defaultLib = require("./components");
 const defaultMirrors = require("./mirrors");
+const defaultFacilities = require("./facilities");
 // this machine's executor id, in the one table a machine is named in
 const { LOCAL_ID } = require("./executors");
 // The PLACEMENT rule is not an effect: it is one pure function over a
@@ -74,7 +75,7 @@ function createComponentsView(deps) {
     // supervisor URL that slot's machine answers on — the two facts that make an
     // answer be about the tab whose page asked (host-core.ts backendExecutor /
     // supervisorBaseFor, both already per slot)
-    windowExecutor = null, slotBase = null, ensureSupervisor = null, log = () => { }, lib = defaultLib, mirrorStore = defaultMirrors, now = Date.now, } = deps;
+    windowExecutor = null, slotBase = null, ensureSupervisor = null, log = () => { }, lib = defaultLib, mirrorStore = defaultMirrors, facilities: facilitiesLib = defaultFacilities, now = Date.now, } = deps;
     let market = null; // {at, value, specs} — the last market read
     // Which machine a request is about. The components endpoint lives on a
     // machine's SUPERVISOR, not on its session server, so this cannot simply be
@@ -436,6 +437,24 @@ function createComponentsView(deps) {
             return { ok: false, name, error: (e && e.message) || String(e) };
         }
     }
+    // A component's bytes are on the machine; the host tools its statements stand
+    // on (`requires`, agent/tools/rendezvous.py) are the other half of "it runs".
+    // For THIS machine that means the desktop's own privilege prompt (pkexec, the
+    // same helper the app update uses — update-install.ts); the far side of a
+    // tunnel gets the same step from the connect pass, which is the only half that
+    // holds an exec channel there. Best-effort and never fatal: the bytes the
+    // facility stands on are already installed, and a refused elevation must not
+    // undo them (the row then keeps saying "installed" and the log says why it
+    // cannot be driven yet).
+    async function ensureTargetFacilities(spec, t, say) {
+        if (!t || t.kind !== "local" || process.platform !== "linux")
+            return;
+        const requires = spec && spec.declaration && Array.isArray(spec.declaration.requires) ? spec.declaration.requires : [];
+        if (!facilitiesLib.installable(requires).length)
+            return;
+        say("dependencies");
+        await facilitiesLib.ensureFacilities(facilitiesLib.localExec, requires, { escalate: "pkexec", log });
+    }
     // Hand ONE component to the machine the session runs on — the session-domain
     // half of `install` (the client-domain half is `clientInstall`).
     //
@@ -504,6 +523,10 @@ function createComponentsView(deps) {
         const held = have.find((h) => h.name === name);
         if (held && held.version === file.version && held.digest === file.digest) {
             say("current", { version: file.version });
+            // "installed" is not "runnable": a machine that already holds the bytes can
+            // still be missing the facility they are driven through (the reported
+            // installed-but-no-tools case), so this shortcut owes the same step.
+            await ensureTargetFacilities(spec, t, say);
             return {
                 ok: true,
                 name,
@@ -536,6 +559,7 @@ function createComponentsView(deps) {
                     onRetry: (prefix, reason) => say("mirror", { version: file.version, digest: file.digest, prefix, reason }),
                 });
             say(res.status === "current" ? "current" : "installed", { version: file.version });
+            await ensureTargetFacilities(spec, t, say);
             return {
                 ok: true,
                 name,

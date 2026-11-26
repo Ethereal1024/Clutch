@@ -1805,6 +1805,10 @@ export function plugStageLine(busy) {
       // pin of another place (ui/mirrors.js): one line, enough to tell a slow
       // install from a broken one, and it names the place being tried
       return `${where} could not reach the release host — trying ${busy.prefix || "a mirror"} instead…`;
+    case "dependencies":
+      // the bytes are already down; this is the host tool they are driven through
+      // (curl for the workspace tools), installed on the machine that will run it
+      return `${where} is installing the host tools ${busy.name} needs…`;
     case "current":
       return `${busy.name} is already current on ${where} — nothing was sent`;
     case "installed":

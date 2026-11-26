@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: f520fe9997f5782ac311aa6bf60f8dec9fbe0dab4735a3b24c552ee31a90bdf4
+// sources sha256: 7d42beea7e4bd7d837a86d37b60a3e66c4f9f2f9ae7c102da246f971a89cb51f
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -8045,6 +8045,8 @@
         return `${where} is fetching ${busy2.name} ${busy2.version || ""}\u2026`.replace("  ", " ");
       case "mirror":
         return `${where} could not reach the release host \u2014 trying ${busy2.prefix || "a mirror"} instead\u2026`;
+      case "dependencies":
+        return `${where} is installing the host tools ${busy2.name} needs\u2026`;
       case "current":
         return `${busy2.name} is already current on ${where} \u2014 nothing was sent`;
       case "installed":

@@ -802,6 +802,14 @@ const CODE = mod ? rendererScript("components-panel") : "";
     p.world.progress({ stage: "artifact", name: "clutch-workspace" });
     check(/preparing the bytes/.test(p.stateText("clutch-workspace")), "the building stage is drawn");
 
+    // the bytes are down; the host tool they are driven through (curl) is the
+    // other half, installed on the machine that will run the component
+    p.world.progress({ stage: "dependencies", name: "clutch-workspace" });
+    check(
+      /the session machine is installing the host tools clutch-workspace needs/.test(p.stateText("clutch-workspace")),
+      "the dependencies stage names the host tools the component is driven through"
+    );
+
     // a local install may have to start this machine's supervisor first (it exits
     // when it is idle): the page says so, because the first start is the slow one
     p.world.progress({ stage: "wake", name: "clutch-workspace" });

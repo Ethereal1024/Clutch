@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/components.ts and run `npm run build:host`.
-// source sha256: ec0a47c4526b9851320ab38552dea631f2e8e3fa22f57849f78dc5c3943496c4
+// source sha256: 67361683bc27d14c64773ed03a102008f7ba24b1711ecd7f863ad331ed891bff
 
 // The install layer's SENDING half: getting a component's artifact onto the
 // machine whose server will run it.
@@ -1193,7 +1193,14 @@ async function retireComponents(base, have, known, out, say, deadline) {
 // that were deferred or refused simply stay absent — the host then offers no
 // tool for them, because it has no implementation of its own to fall back to.
 async function ensureComponents(base, { checkout = true, index = null, progress = null, budgetMs = BUDGET_MS } = {}) {
-    const out = { current: [], installed: [], skipped: [], deferred: [], retired: [], errors: [] };
+    // `requirements` is the union of the facilities the components DESTINED for
+    // this machine declare (`requires` in their own declaration). The pass itself
+    // only lays bytes down; a facility like `curl` is what makes those bytes
+    // drivable (agent/tools/rendezvous.py `available`), so the caller that owns an
+    // exec channel to the machine can install it after this pass. Kept here rather
+    // than re-read by the caller: the specs and their declarations are already in
+    // hand, and a second reading of the market is how the two drift.
+    const out = { current: [], installed: [], skipped: [], deferred: [], retired: [], errors: [], requirements: [] };
     const say = (msg) => {
         if (progress)
             progress(msg);
@@ -1227,6 +1234,14 @@ async function ensureComponents(base, { checkout = true, index = null, progress 
                 (place.place === PLACE_CLIENT ? "its declaration puts it on the client" : "its declaration names no place this machine holds");
             say(`${spec.name} is not for this machine: ${why}`);
             continue;
+        }
+        // this machine will RUN it, so its declared facilities are this machine's to
+        // provide — collected whether it is being installed now or was already current
+        const requires = spec.declaration && Array.isArray(spec.declaration.requires) ? spec.declaration.requires : [];
+        for (const facility of requires) {
+            if (typeof facility === "string" && facility && !out.requirements.includes(facility)) {
+                out.requirements.push(facility);
+            }
         }
         let file;
         try {

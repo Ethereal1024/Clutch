@@ -628,7 +628,7 @@ async function main() {
     "no reverse forward is awaited by the connect"
   );
   check(
-    /establishForwardAndHealth\(localPort, client\)/.test(CONNECT_SRC) &&
+    /establishForwardAndHealth\(localPort, client(?:, secret)?\)/.test(CONNECT_SRC) &&
       !/could not be given a listener/.test(CONNECT_SRC),
     "a far side that never gets its listener can no longer hold the connect open, let alone fail it"
   );

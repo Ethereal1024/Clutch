@@ -385,6 +385,60 @@ async function main() {
     check(!r4.ok && /names no `entry`/.test(r4.error), "a refusal surfaces with the host's own words");
   }
 
+  // ---- 4b. the facility the tools are driven through is installed too ----
+  {
+    // "installed" is not "runnable": the bytes can be on the machine while the
+    // host tool its statements stand on (curl for the workspace file tools) is
+    // not. The local install path owes that step, through this desktop's own
+    // privilege prompt; the far side gets it from the connect pass, which is the
+    // only half holding an exec channel there.
+    const NEEDS_CURL = {
+      name: "clutch-memory",
+      version: "0.1.0",
+      checkout: true,
+      source: "/tmp/clutch-memory",
+      declaration: {
+        name: "clutch-memory",
+        version: "0.1.0",
+        launch: { argv: ["{py}", "{script}"], entry: "memory.py" },
+        requires: ["python", "posix-shell", "curl"],
+      },
+    };
+    const calls = [];
+    const fakeFacilities = {
+      installable: (reqs) => (Array.isArray(reqs) ? reqs : []).filter((r) => r === "curl"),
+      ensureFacilities: async (exec, reqs, opts) => {
+        calls.push({ exec, reqs, opts });
+        return [];
+      },
+      localExec: "the-local-exec",
+    };
+    const local = view({
+      lib: fakeLib({ specs: [NEEDS_CURL], held: [{ name: "clutch-memory", version: VERSION, digest: DIGEST }] }),
+      deps: { facilities: fakeFacilities },
+    });
+    const stages = [];
+    const r = await local.api.install("clutch-memory", EMPTY_WIN, { progress: (s) => stages.push(s.stage) });
+    check(r.ok && calls.length === 1, "a local install also installs the host facility its tools are driven through");
+    check(
+      calls[0].exec === "the-local-exec" && calls[0].opts && calls[0].opts.escalate === "pkexec",
+      "through this desktop's own prompt (pkexec), not a tunnel's sudo"
+    );
+    check(calls[0].reqs.includes("curl") && stages.includes("dependencies"), "the requirements are the component's own, and the page hears the step");
+
+    const remote = view({
+      lib: fakeLib({ specs: [NEEDS_CURL], held: [] }),
+      deps: {
+        windowExecutor: () => "me@dev.example:22",
+        slotBase: () => "http://127.0.0.1:41000",
+        facilities: fakeFacilities,
+      },
+    });
+    calls.length = 0;
+    await remote.api.install("clutch-memory", { id: 1 }, {});
+    check(calls.length === 0, "a remote install leaves facilities to the connect pass — the only half with an exec channel there");
+  }
+
   // ---- 5. the ways an install does not happen at all ----
   {
     const unknown = view({ lib: fakeLib({ specs: [CHECKOUT] }) });

@@ -512,7 +512,7 @@ async function connectTunnel({ host, user, port, password }, progress) {
     }
     if (progress) progress("forward");
 
-    return await establishForwardAndHealth(localPort, client);
+    return await establishForwardAndHealth(localPort, client, secret);
   } catch (e) {
     const raw = (e && e.message) || String(e);
     // A wire that died BY ITSELF below the handshake — during the bootstrap, or
@@ -789,7 +789,7 @@ function failConnect(client, why, error) {
 }
 
 // Set up the bidirectional forwards and gate on the health check through the tunnel.
-async function establishForwardAndHealth(localPort, client) {
+async function establishForwardAndHealth(localPort, client, secret = "") {
   state.localSrv = net.createServer((sock) => {
     // a request racing the teardown must fail the socket, not the main
     // process: forwardOut on a null client throws before it can answer
@@ -869,8 +869,12 @@ async function establishForwardAndHealth(localPort, client) {
   startHealing();
   // the pass is not awaited (see ui/src/host/tunnel-bootstrap.ts): what it did
   // goes to the tunnel log, and the plugin tab reads what a place HOLDS from that
-  // place's own inventory instead of from an older report of a pass.
-  installComponents(state.currentUrl);
+  // place's own inventory instead of from an older report of a pass. `exec` and
+  // `secret` are the same wire and the same secret this connect authenticated
+  // with: the pass installs a component's own facilities (curl) on the machine
+  // that runs it, and sudo -S is fed over stdin so the secret never joins a
+  // remote command line.
+  installComponents(state.currentUrl, { exec: remoteExec, secret });
   return { ok: true, url: state.currentUrl };
 }
 

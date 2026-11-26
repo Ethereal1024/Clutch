@@ -37,6 +37,7 @@
 
 const defaultLib = require("./components");
 const defaultMirrors = require("./mirrors");
+const defaultFacilities = require("./facilities");
 // this machine's executor id, in the one table a machine is named in
 const { LOCAL_ID } = require("./executors");
 // The PLACEMENT rule is not an effect: it is one pure function over a
@@ -86,6 +87,7 @@ function createComponentsView(deps) {
     log = () => {},
     lib = defaultLib,
     mirrorStore = defaultMirrors,
+    facilities: facilitiesLib = defaultFacilities,
     now = Date.now,
   } = deps;
 
@@ -443,6 +445,23 @@ function createComponentsView(deps) {
     }
   }
 
+  // A component's bytes are on the machine; the host tools its statements stand
+  // on (`requires`, agent/tools/rendezvous.py) are the other half of "it runs".
+  // For THIS machine that means the desktop's own privilege prompt (pkexec, the
+  // same helper the app update uses — update-install.ts); the far side of a
+  // tunnel gets the same step from the connect pass, which is the only half that
+  // holds an exec channel there. Best-effort and never fatal: the bytes the
+  // facility stands on are already installed, and a refused elevation must not
+  // undo them (the row then keeps saying "installed" and the log says why it
+  // cannot be driven yet).
+  async function ensureTargetFacilities(spec, t, say) {
+    if (!t || t.kind !== "local" || process.platform !== "linux") return;
+    const requires = spec && spec.declaration && Array.isArray(spec.declaration.requires) ? spec.declaration.requires : [];
+    if (!facilitiesLib.installable(requires).length) return;
+    say("dependencies");
+    await facilitiesLib.ensureFacilities(facilitiesLib.localExec, requires, { escalate: "pkexec", log });
+  }
+
   // Hand ONE component to the machine the session runs on — the session-domain
   // half of `install` (the client-domain half is `clientInstall`).
   //
@@ -511,6 +530,10 @@ function createComponentsView(deps) {
     const held = have.find((h) => h.name === name);
     if (held && held.version === file.version && held.digest === file.digest) {
       say("current", { version: file.version });
+      // "installed" is not "runnable": a machine that already holds the bytes can
+      // still be missing the facility they are driven through (the reported
+      // installed-but-no-tools case), so this shortcut owes the same step.
+      await ensureTargetFacilities(spec, t, say);
       return {
         ok: true,
         name,
@@ -545,6 +568,7 @@ function createComponentsView(deps) {
               say("mirror", { version: file.version, digest: file.digest, prefix, reason }),
           });
       say(res.status === "current" ? "current" : "installed", { version: file.version });
+      await ensureTargetFacilities(spec, t, say);
       return {
         ok: true,
         name,

@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-connect.ts and run `npm run build:host`.
-// source sha256: 8342fac110e93a3cf15fc081b44db6b9662d1aa807407c9bb1af708f698a139a
+// source sha256: 7962d127c30a9d23c97004eb038f8c501f6a85f71f3ec8baf77ee0984a309682
 
 "use strict";
 // one connect attempt — auth, the forwards, the health gate
@@ -486,7 +486,7 @@ function attach(ctx) {
             }
             if (progress)
                 progress("forward");
-            return await establishForwardAndHealth(localPort, client);
+            return await establishForwardAndHealth(localPort, client, secret);
         }
         catch (e) {
             const raw = (e && e.message) || String(e);
@@ -746,7 +746,7 @@ function attach(ctx) {
         return { ok: false, error };
     }
     // Set up the bidirectional forwards and gate on the health check through the tunnel.
-    async function establishForwardAndHealth(localPort, client) {
+    async function establishForwardAndHealth(localPort, client, secret = "") {
         state.localSrv = net.createServer((sock) => {
             // a request racing the teardown must fail the socket, not the main
             // process: forwardOut on a null client throws before it can answer
@@ -824,8 +824,12 @@ function attach(ctx) {
         startHealing();
         // the pass is not awaited (see ui/src/host/tunnel-bootstrap.ts): what it did
         // goes to the tunnel log, and the plugin tab reads what a place HOLDS from that
-        // place's own inventory instead of from an older report of a pass.
-        installComponents(state.currentUrl);
+        // place's own inventory instead of from an older report of a pass. `exec` and
+        // `secret` are the same wire and the same secret this connect authenticated
+        // with: the pass installs a component's own facilities (curl) on the machine
+        // that runs it, and sudo -S is fed over stdin so the secret never joins a
+        // remote command line.
+        installComponents(state.currentUrl, { exec: remoteExec, secret });
         return { ok: true, url: state.currentUrl };
     }
     return {

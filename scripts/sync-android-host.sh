@@ -47,7 +47,7 @@ UI_ASSETS=$ASSETS/ui
 # run loop is not available in this build" — the host's own sentence for a
 # module that is not there. tests/android-assets.test.js walks this list, so a
 # new require inside the loop has to be added here in the same commit.
-UI_NODE="client-tools.js compaction.js components-view.js components.js components.mirrors.json context.js event-text.js exec-bridge.js executors.js host-core.js llm-client.js llm-proxy.js log-client.js mirrors.js net-fetch.js plugin-child.js plugin-host.js plugin-link.js plugin-server.js plugin-worker.js procstat.js prompt.js run-host.js run-session.js run-state.js run.js server-bundle.js settings-mirror.js ssh-tunnel.js supervisor-client.js system-ca.js tool-client.js tool-decl.js transport_defaults.json tunnel-core.js tunnel-net.js tunnel-remote.js tunnel-bootstrap.js tunnel-lifecycle.js tunnel-connect.js tunnel-ladder.js update-core.js update-service.js"
+UI_NODE="client-tools.js compaction.js components-view.js components.js components.mirrors.json context.js event-text.js exec-bridge.js executors.js facilities.js host-core.js llm-client.js llm-proxy.js log-client.js mirrors.js net-fetch.js plugin-child.js plugin-host.js plugin-link.js plugin-server.js plugin-worker.js procstat.js prompt.js run-host.js run-session.js run-state.js run.js server-bundle.js settings-mirror.js ssh-tunnel.js supervisor-client.js system-ca.js tool-client.js tool-decl.js transport_defaults.json tunnel-core.js tunnel-net.js tunnel-remote.js tunnel-bootstrap.js tunnel-lifecycle.js tunnel-connect.js tunnel-ladder.js update-core.js update-service.js"
 
 # 1. nodejs-project = android/host + ui/ subset + production node_modules
 rm -rf "$NODEJS_PROJECT"

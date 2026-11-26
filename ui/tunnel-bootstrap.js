@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-bootstrap.ts and run `npm run build:host`.
-// source sha256: 6642447e93c6a1829730b870bfb58bf962172b07caa405973a05a51c3a6d4ea0
+// source sha256: 550fb2adf8295d56adff603a62a9959c32db9df1ea96d9c9f5032a10b7420952
 
 "use strict";
 // make the far side exist — probe, choose a strategy, install, start
@@ -17,6 +17,7 @@ const fs = require("fs");
 const { tunnelLog, REMOTE_API_PORT } = require("./tunnel-core");
 const { platformTag, ensureBundle, ensurePyLibsTar, resolvePyLibsVersion, hasLocalBundle } = require("./server-bundle");
 const components = require("./components");
+const facilities = require("./facilities");
 function attach(ctx) {
     // (the body below keeps the module's own indentation: this move lifted it whole,
     // and re-indenting 300-800 lines would have rewritten a diff whose point is that
@@ -831,7 +832,14 @@ else:
     // something a user has to be able to SEE: the plugin tab draws the names this
     // pass let go of (ui/js/components-panel.js). No second pass and no second
     // summary — the page reads the one pass and the one log line.
-    function installComponents(base) {
+    function installComponents(base, opts = {}) {
+        // `exec` and `secret` exist for the facilities step below: the same SSH wire
+        // and the same secret the connect authenticated with (so sudo -S can be fed
+        // without putting the password anywhere a process list would show it). A
+        // caller with neither still gets the bytes pass; facilities are then the
+        // machine's own business, as they always were.
+        const exec = typeof opts.exec === "function" ? opts.exec : null;
+        const secret = typeof opts.secret === "string" ? opts.secret : "";
         // The pass's answer goes to the log and nowhere else. It is a thing that
         // happened to ONE machine at ONE moment, and it used to travel to the plugin tab
         // as `state.componentsPass` — a second, older picture of what a place holds,
@@ -840,7 +848,7 @@ else:
         // event, and ~/.clutch/tunnel.log is where events live.
         Promise.resolve()
             .then(() => components.ensureComponents(base, { progress: (m) => tunnelLog("[components] " + m) }))
-            .then((r) => {
+            .then(async (r) => {
             tunnelLog(`[components] current=${r.current.length} installed=${r.installed.length} ` +
                 `skipped=${r.skipped.length} deferred=${r.deferred.length} ` +
                 `retired=${r.retired.map((x) => x.name).join(",") || 0} errors=${r.errors.length}`);
@@ -851,6 +859,9 @@ else:
             }
             for (const e of r.errors) {
                 tunnelLog(`[components] could not let go of ${e.name || "a component"} (${e.reason})`);
+            }
+            if (exec && Array.isArray(r.requirements) && r.requirements.length) {
+                await facilities.ensureFacilities(exec, r.requirements, { secret, log: tunnelLog });
             }
         })
             .catch((e) => {

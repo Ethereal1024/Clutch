@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-remote.ts and run `npm run build:host`.
-// source sha256: 37b0963c9a86f9c2a34596421c81e17013bbaff3262948191bcfadc885120f09
+// source sha256: dc7aa6bbd03fea95d301dfd930ed6121c4f5c8a520c3123e237f10e3518ffc7c
 
 "use strict";
 // the ssh wire — run a command on the far side, put a file there
@@ -16,13 +16,27 @@ function attach(ctx) {
     // nothing in them changed)
     const state = ctx.st;
     // ---- remote command/file helpers (used by bootstrap) ----
-    function remoteExec(command, timeoutMs = 60000, binary = false) {
+    // `stdin` is written to the far side's process and the channel's write side is
+    // then closed (EOF). It exists for the one command whose secret must not sit on
+    // the far side's command line — `sudo -S` reading the password from stdin — so
+    // the value never appears in the remote process table. Ordinary callers pass
+    // no stdin and keep the old shape.
+    function remoteExec(command, timeoutMs = 60000, binary = false, stdin = null) {
         return new Promise((resolve, reject) => {
             if (!state.sshClient)
                 return reject(new Error("not connected"));
             state.sshClient.exec(command, (err, stream) => {
                 if (err)
                     return reject(err);
+                if (stdin !== null && stdin !== undefined) {
+                    try {
+                        stream.write(String(stdin));
+                        stream.end();
+                    }
+                    catch (e) {
+                        /* the command may have exited before reading it; the close below answers */
+                    }
+                }
                 const out = [];
                 let stderr = "";
                 let done = false;

@@ -31,11 +31,24 @@ const state = ctx.st;
 
 // ---- remote command/file helpers (used by bootstrap) ----
 
-function remoteExec(command, timeoutMs = 60000, binary = false) {
+// `stdin` is written to the far side's process and the channel's write side is
+// then closed (EOF). It exists for the one command whose secret must not sit on
+// the far side's command line — `sudo -S` reading the password from stdin — so
+// the value never appears in the remote process table. Ordinary callers pass
+// no stdin and keep the old shape.
+function remoteExec(command, timeoutMs = 60000, binary = false, stdin: string | null = null) {
   return new Promise((resolve, reject) => {
     if (!state.sshClient) return reject(new Error("not connected"));
     state.sshClient.exec(command, (err, stream) => {
       if (err) return reject(err);
+      if (stdin !== null && stdin !== undefined) {
+        try {
+          stream.write(String(stdin));
+          stream.end();
+        } catch (e) {
+          /* the command may have exited before reading it; the close below answers */
+        }
+      }
       const out = [];
       let stderr = "";
       let done = false;

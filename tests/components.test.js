@@ -318,6 +318,13 @@ async function main() {
   check(res.errors.length === 0, `every component installs (${JSON.stringify(res.errors)})`);
   check(res.installed.includes("clutch-skills"), "a missing component is uploaded");
   check(res.current.length === 0 && res.deferred.length === 0, "nothing is skipped on a fresh host");
+  check(
+    Array.isArray(res.requirements) &&
+      res.requirements.includes("python") &&
+      res.requirements.includes("posix-shell") &&
+      res.requirements.includes("curl"),
+    `the pass reports the facilities the components it placed need on that machine (${JSON.stringify(res.requirements)})`
+  );
   const landed = components.CACHE && path.join(hostRoot, "clutch-skills");
   const versions = fs.existsSync(landed) ? fs.readdirSync(landed) : [];
   check(versions.length === 1, "one component, one version in the host's landing directory");
