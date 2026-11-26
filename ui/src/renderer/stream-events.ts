@@ -580,7 +580,28 @@ export function applyStreamEvent(ev) {
       // A step still streaming below it began after this record was written, so the
       // record's block goes above it: the page reads in the log's own order. (A
       // paging pass has no live block at all — project.ts renders pages into a sink.)
-      if (live) eventsEl.insertBefore(wrap, live);
+      //
+      // A block is that anchor in exactly two shapes. STILL BEING FED (unsealed): a
+      // step that began after this record is speaking, and its rows may already be on
+      // the page below it, so the block's position is not its own row count. Or
+      // CLOSED and still the last row: a cut closed the step in flight a moment ago
+      // and this record is the step before it.
+      //
+      // A CLOSED block with rows painted after it is neither: the page has moved
+      // past it, so this record is newer than every row on the page and belongs at
+      // the tail. That is exactly what a restored tab hit — saveDomCache/
+      // restoreDomCache put back lastTextEl pointing at a sealed block in the MIDDLE
+      // of the cached transcript (the block the run was typing into when the tab was
+      // left; dropOrphanLive seals it on the way back), and then every replayed
+      // record whose text did not start with that block's went above it: the run's
+      // closing answer ("The GRU training converged…", the step after the one the
+      // pane was left on) landed ABOVE the steps that produced it, so the reopened
+      // .clc read as answer-first-then-work — and its tail, which no answer ever
+      // reached, ended on tool rows and a raw call tag the model had typed as text
+      // instead of calling the tool. The log's order was never in doubt: its records
+      // are monotonic in offset, and the pane was the thing that reordered them.
+      const anchor = live && (!state.textSealed || live === eventsEl.lastElementChild) ? live : null;
+      if (anchor) eventsEl.insertBefore(wrap, anchor);
       else (pageSink || eventsEl).appendChild(wrap);
       // The record's text is final, so its math is typeset HERE: this block has no
       // delta to defer to and no completing record behind it — a stored session, a

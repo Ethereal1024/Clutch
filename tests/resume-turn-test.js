@@ -141,8 +141,9 @@ function handlerBody(src, name) {
   );
   check(!/phase: *"idle"/.test(state), "run:state never answers a invented idle: absence of an instance was the wrong answer");
   check(
-    /code: \(err && err\.code\) \|\| null/.test(state),
-    "its refusal carries the code (run_active, no_session) the page decides on"
+    /code: got\.code \|\| null, owner: got\.owner \|\| null/.test(state) &&
+      /return runFailure\(err, \{ winId: e\.sender\.id, slotId \}\)/.test(state),
+    "its refusal carries the code (run_active, no_session) the page decides on — the instance builder's code, or the one classifier's verdict for a send that never reached a session"
   );
   // ONE wheel per turn: a second start/drive on an instance that is already
   // driving is refused BEFORE it can step the loop — the session's own lease

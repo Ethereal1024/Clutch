@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 126d2820f17ed105bd759dcea916bf6eb600c4e93d874a81168a9fa1c6a968b8
+// sources sha256: cb632926298a19b933360b280698f6b70d61e7dfd873c6056d5ebdd1c4613557
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -5277,7 +5277,8 @@
         const wrap = createAgentTextBlock();
         wrap.querySelector(".body").innerHTML = renderMarkdown(ev.content);
         highlightCode(wrap);
-        if (live) eventsEl.insertBefore(wrap, live);
+        const anchor = live && (!state.textSealed || live === eventsEl.lastElementChild) ? live : null;
+        if (anchor) eventsEl.insertBefore(wrap, anchor);
         else (pageSink || eventsEl).appendChild(wrap);
         if (!pageSink) typesetMath(wrap);
         rememberRecord(wrap, ev.content);

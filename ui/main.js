@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/main.ts and run `npm run build:host`.
-// source sha256: 10293080394b908fdac1e0485d57ab0b7331a635125c5a7b0be21bfafadcf16c
+// source sha256: f34e85f22392faa9a8d24ac8e048ddab2989b34f85a2f8e5b8c3110a96b2a7af
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -38,6 +38,10 @@ const { exec_max_command_bytes: EXEC_MAX_COMMAND_BYTES, exec_chunk_bytes: EXEC_C
 // the composition root for one session's run loop (P1-4): fetches the session's
 // declarations + session facts and wires all five ports into createRunHost.
 const { createSessionRun, llmSettingsRev } = require("./run-session");
+// the one vocabulary this client already has for "the socket did not carry
+// bytes" (ui/mirrors.js classifier): a run's failure is read with it, so a
+// session that never answered is never reported as a run that failed
+const { looksLikeNetwork } = require("./mirrors");
 // the renderer trusts the OS certificate store and Node does not, by default:
 // this adopts it for the main process at startup (see system-ca.ts)
 const { installSystemTrust, describeTrust } = require("./system-ca");
@@ -69,6 +73,55 @@ const hostCore = createHostCore({
     executors,
     log: tunnelLog,
 });
+// ---- what a failed run:* answer says ----------------------------------------
+//
+// A run that could not REACH its session is not a run that failed. Node's fetch
+// says only "fetch failed"; the socket's words are ECONNRESET, "socket hang up",
+// "other side closed"; the claim's forward is a listener whose far side is gone,
+// so the failure carries no HTTP status and the session never answered anything.
+// Reported as a run error that becomes a line in the transcript —
+// "run failed: fetch failed" — over a session that is not there, with nothing for
+// the user to act on (the field report behind this fix: connecting to another
+// device, then Run on the tab that was left behind).
+//
+// The page's door for "this window's session is gone" already exists and is the
+// connection-lost dialog (render-events.ts: code `no_session`). So the answer is
+// classified HERE, once, for every run:* entry point:
+//
+//   * no status, no code, network-shaped message → `no_session`, and the claim's
+//     dead forward is dropped (dropSlotForward) so the next claim re-binds the
+//     SAME session through the live hop instead of handing this dead port back.
+//     That is also what makes the dialog's Reconnect do something.
+//   * anything else (a status, or a code the loop set — project_mismatch,
+//     run_elsewhere, run_active) is the session's own verdict and keeps its word.
+//
+// The socket's own codes count as "could not reach it" wherever they arrive:
+// undici hangs them off the CAUSE of its bare "fetch failed", but a shell that
+// wrapped one may hand the code itself, and `ECONNREFUSED` is not a verdict about
+// this turn — it is the forward's far side not being there.
+const NET_CODES = new Set([
+    "ECONNRESET", "ECONNREFUSED", "ECONNABORTED", "ETIMEDOUT", "ENOTFOUND",
+    "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "EPIPE", "EPROTO",
+]);
+function unreachableSession(err) {
+    if (!err)
+        return false;
+    if (err.status)
+        return false;
+    if (err.code)
+        return NET_CODES.has(err.code);
+    return looksLikeNetwork(err.message || err);
+}
+function runFailure(err, where) {
+    const error = String((err && err.message) || err);
+    if (unreachableSession(err)) {
+        if (where)
+            hostCore.dropSlotForward(where.winId, slotOf(where.slotId));
+        tunnelLog(`[run] the session could not be reached: ${error}`);
+        return { ok: false, error, code: "no_session", owner: null };
+    }
+    return { ok: false, error, code: (err && err.code) || null, owner: (err && err.owner) || null };
+}
 // Tell the session a window is on what THIS client runs (ui/plugin-link.js).
 //
 // Only a session that runs on ANOTHER machine is told. A plugin runs where the
@@ -610,7 +663,7 @@ else {
                 return { active: false, url: null, target: null, execBridge: null };
             return id ? tunnel.statusOf(id) : tunnel.tunnelStatus();
         });
-        ipcMain.handle("tunnel:disconnect", async (_e, what) => {
+        ipcMain.handle("tunnel:disconnect", async (e, what) => {
             const id = endpointId(what);
             if (id) {
                 // ONE endpoint: the user is done with that machine. Its ladder goes with
@@ -625,29 +678,37 @@ else {
                     await tunnel.stopTunnelOn(id);
                 return { ok: true };
             }
-            // THE WINDOW'S OWN Disconnect: the picker's, i.e. the user leaving the
-            // machine this window was on. `stopTunnel()` below drops exactly that hop.
+            // THE PICKER'S MOVE — not the user leaving. This call has exactly ONE caller
+            // in the page: conn-flow's dropTunnel, which runs when this window goes to
+            // ANOTHER machine (or back to local) and when a dial that failed cleans up
+            // after itself. There is no Disconnect button anywhere. `stopTunnel()` below
+            // drops the window's own hop.
             //
-            // Scoped to THAT hop, like the one-endpoint branch above: with a hop per
-            // endpoint (tunnel-lifecycle's connectTunnelOn) "every window was on the
-            // tunnel the user just dropped" is no longer true. A session on THIS machine
-            // never went through a hop at all, and a tab on another machine holds a
-            // different one. Releasing every claim here killed the local tabs' sessions
-            // — a tab already open here turned into "fetch failed", and its next send
-            // started a fresh session with no project open — and pulled the far tabs'
-            // forwards out from under hops that were still up. The user leaving one
-            // machine is not every window leaving every machine.
+            // So a claim ends its SESSION here only when it is unambiguously this
+            // window's own to end: the window's DEFAULT slot (slotId "") belonging to the
+            // window that asked. That is the one claim the move itself replaces, and the
+            // window really is leaving that machine.
+            //
+            // Every other affected claim is PARKED, not killed: a tab's claim (slotId)
+            // outlives the hop by design — releaseTunnelBackends detaches the forward,
+            // leaving the session id and port alive, so the tab's next claim re-binds the
+            // SAME session (rebindSessionBackend) over whatever hop exists then. Another
+            // window's claim is the same story: that window did not move.
+            //
+            // Killing all of them is what turned "connect to another device" into a tab
+            // that looked disconnected: its session was SIGTERMed, so its next claim
+            // started a fresh one with no project open, and a run already in flight hit a
+            // forward whose far side was gone ("run failed: fetch failed").
             ladder.noteUserLeft();
             const st = tunnel.tunnelStatus();
             const affected = st && st.url ? await hostCore.releaseTunnelBackends(st.url) : [];
-            // …and the SESSIONS those forwards carried. The hop is still up, so each
-            // claim can be told to stop through its supervisor's SIGTERM ladder (a
-            // `released` final) instead of being parked for a claim that will never come
-            // back — `leaving`, because this is the user leaving, not an outage. A tab
-            // closing releases without it: the window is still here and may re-bind
-            // (session:release below).
-            for (const s of affected)
+            for (const s of affected) {
+                if (s.slotId)
+                    continue;
+                if (s.winId !== e.sender.id)
+                    continue;
                 await hostCore.releaseSlot(s.winId, s.slotId, { leaving: true });
+            }
             await tunnel.stopTunnel();
             // …and the hops tabs opened for their own machines, which `stopTunnel()`
             // (the window's own tunnel) does not own
@@ -719,7 +780,7 @@ else {
             }
             catch (err) {
                 tunnelLog(`[run] base lookup failed for slot ${key}: ${err && err.message}`);
-                return { error: String((err && err.message) || err), code: (err && err.code) || null, owner: (err && err.owner) || null };
+                return runFailure(err);
             }
             if (!currentBase) {
                 // the one failure the page must treat as a lost session (it lands in
@@ -744,27 +805,53 @@ else {
             // instance to read.
             if (inst)
                 inst.run.stop();
+            const build = (base) => createSessionRun({
+                base,
+                mode: mode || undefined,
+                project: project || undefined,
+                // live events go straight to the renderer, tagged with the slot they
+                // belong to: a background tab's frames must not paint into the active
+                // tab's stream
+                onEvent: (ev) => {
+                    if (!wc.isDestroyed())
+                        wc.send("run:event", { slotId, event: ev });
+                },
+                warn: (msg) => tunnelLog(`[run] slot ${key}: ${msg}`),
+            });
             try {
-                const run = await createSessionRun({
-                    base: currentBase,
-                    mode: mode || undefined,
-                    project: project || undefined,
-                    // live events go straight to the renderer, tagged with the slot they
-                    // belong to: a background tab's frames must not paint into the active
-                    // tab's stream
-                    onEvent: (ev) => {
-                        if (!wc.isDestroyed())
-                            wc.send("run:event", { slotId, event: ev });
-                    },
-                    warn: (msg) => tunnelLog(`[run] slot ${key}: ${msg}`),
-                });
-                const fresh = { run, base: currentBase, mode, project, winId, slotId, rev, driving: false };
+                let base = currentBase;
+                let run;
+                try {
+                    run = await build(base);
+                }
+                catch (err) {
+                    // The base was handed out by a claim whose forward no longer carries
+                    // bytes — the far session ended under a listener that still accepts
+                    // connections (a hop that bounced, a session the far host reaped). The
+                    // first thing that notices is a request with no HTTP status at all, and
+                    // every press would end in the same bare "fetch failed" over a session
+                    // that never answered. So drop that forward and ask once more: the
+                    // claim re-binds the SAME session through the live hop (host-core
+                    // never starts a second one over the first one's work), and the run
+                    // the user pressed for happens.
+                    if (!unreachableSession(err))
+                        throw err;
+                    tunnelLog(`[run] slot ${key} session unreachable (${(err && err.message) || err}); re-binding its forward`);
+                    hostCore.dropSlotForward(winId, slotId);
+                    const again = await hostCore.ensureSlotBackend(wc, slotId);
+                    if (!again || again === base)
+                        throw err;
+                    base = again;
+                    run = await build(base);
+                }
+                const fresh = { run, base, mode, project, winId, slotId, rev, driving: false };
                 runInstances.set(key, fresh);
                 return { inst: fresh };
             }
             catch (err) {
                 tunnelLog(`[run] createSessionRun failed for slot ${key}: ${err && err.message}`);
-                return { error: String((err && err.message) || err), code: (err && err.code) || null, owner: (err && err.owner) || null };
+                const failure = runFailure(err, { winId, slotId });
+                return { error: failure.error, code: failure.code, owner: failure.owner };
             }
         }
         // ONE wheel per turn. A start/step/drive for a slot whose instance is
@@ -811,7 +898,7 @@ else {
                 return { ok: true };
             }
             catch (err) {
-                return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null, owner: (err && err.owner) || null };
+                return runFailure(err, { winId: e.sender.id, slotId });
             }
             finally {
                 got.inst.driving = false;
@@ -848,7 +935,7 @@ else {
                 return { ok: true, result };
             }
             catch (err) {
-                return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null, owner: (err && err.owner) || null };
+                return runFailure(err, { winId: e.sender.id, slotId });
             }
             finally {
                 inst.driving = false;
@@ -867,7 +954,7 @@ else {
                 return { ok: true, result };
             }
             catch (err) {
-                return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null, owner: (err && err.owner) || null };
+                return runFailure(err, { winId: e.sender.id, slotId });
             }
             finally {
                 inst.driving = false;
@@ -896,7 +983,7 @@ else {
                 return { ok: true, result };
             }
             catch (err) {
-                return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null, owner: (err && err.owner) || null };
+                return runFailure(err, { winId: e.sender.id, slotId });
             }
             finally {
                 got.inst.driving = false;
@@ -925,7 +1012,7 @@ else {
                 return { ok: true, result, driven: !!got.inst.driving };
             }
             catch (err) {
-                return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null, owner: (err && err.owner) || null };
+                return runFailure(err, { winId: e.sender.id, slotId });
             }
         });
         // tell every renderer the moment a tunnel dies, so it can drop a stale API

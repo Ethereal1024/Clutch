@@ -55,6 +55,10 @@ function fakeEl(tag) {
     parent: null,
     _body: body,
     querySelector(sel) { return sel === ".body" ? body : null; },
+    // the pane's last ROW: the assistant_message branch reads it to tell a block
+    // that is still the page's tail (a cut just closed the step in flight) from
+    // one the page has already painted past
+    get lastElementChild() { return node.children.length ? node.children[node.children.length - 1] : null; },
     appendChild(child) { child.parent = node; node.children.push(child); return child; },
     // a record's block goes above the block that is still streaming (the page
     // reads in the log's own order)
@@ -526,8 +530,11 @@ check(!/function forgetHoles|addHole\(|discardLivePartial\(keepText/.test(src),
 check(/const owed = awaitingFor\(ev\.content\);/.test(fnBody("applyStreamEvent")) &&
   /completeRecord\(owed\.el, ev\.content\);/.test(fnBody("applyStreamEvent")),
   "the step's record writes its own closed block whole, wherever it stands on the page");
-check(/if \(live\) eventsEl\.insertBefore\(wrap, live\);/.test(fnBody("applyStreamEvent")),
+check(/const anchor = live && \(!state\.textSealed \|\| live === eventsEl\.lastElementChild\)/.test(fnBody("applyStreamEvent")) &&
+  /if \(anchor\) eventsEl\.insertBefore\(wrap, anchor\);/.test(fnBody("applyStreamEvent")),
   "a record that extends nothing draws its own block above the step speaking now (the page is in log order)");
+check(/else \(pageSink \|\| eventsEl\)\.appendChild\(wrap\);/.test(fnBody("applyStreamEvent")),
+  "…and at the tail when the page has painted past that block (a restored tab's sealed pointer is not an anchor)");
 check(/if \(!awaiting\[i\]\.el\.isConnected\) awaiting\.splice\(i, 1\);/.test(fnBody("awaitingFor")),
   "the ledger prunes a block something took off the page, so no other bookkeeping has to be told");
 check(!/forgetHoles/.test(fnBody("clearStream")),

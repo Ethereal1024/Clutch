@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/host-core.ts and run `npm run build:host`.
-// source sha256: ffb4c08d5740d06a3896602fa54cd47d26229d59ba8de49ecda79f3651182e78
+// source sha256: e4c66e855ddcf92d102059c98729a3a22e1bc527c55f91ea26bf9b430f787c52
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -562,6 +562,26 @@ function createHostCore(deps) {
         }
         return affected;
     }
+    // A forward that carries no bytes is worse than no forward at all: the claim
+    // keeps its URL, so every later claim hands the same dead port back and every
+    // request over it ends the same way — undici's bare "fetch failed" in the run
+    // loop, an EventSource error in the page, and a user pressing Run or Reconnect
+    // into a socket nobody serves. The claim is right about the SESSION (what died
+    // is the local half: a hop that bounced, or a session the far host ended under
+    // a listener that still accepts connections) — so exactly that half is dropped
+    // here, and the claim stays re-bindable.
+    //
+    // `detach` is the whole of it (sessionClaim): the URL goes with the forward
+    // that owned it, the session id and port stay, and the next claim takes the
+    // re-bind path (rebindSessionBackend) — the SAME session, re-opened through the
+    // live hop, never a second session over the first one's work.
+    function dropSlotForward(winId, slotId = "") {
+        const wb = windowBackends.get(slotKey(winId, slotId));
+        if (!wb || !wb.remote || typeof wb.detach !== "function")
+            return false;
+        wb.detach();
+        return true;
+    }
     // Is any window still working over the tunnel? The tunnel is a shared resource
     // and stopping it is a machine-wide act, so only a caller that is about to
     // release the LAST window on it may stop it (ui/main.js `session:release`).
@@ -748,6 +768,7 @@ function createHostCore(deps) {
     return {
         ensureSlotBackend,
         releaseSlot,
+        dropSlotForward,
         releaseWindowBackends,
         releaseAllBackends,
         releaseTunnelBackends,

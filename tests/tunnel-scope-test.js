@@ -29,10 +29,11 @@
 //      window the hop never owned keeps its session, its stream and its work;
 //   3. leaving an outage releases THIS window's claim and stops the shared tunnel
 //      only when it was the last window on it (`session:release`); the picker's
-//      own Disconnect (tunnel:disconnect) is the user leaving ONE HOP — it
-//      releases the claims whose forward went through it, and leaves a session on
-//      THIS machine (which never went through a hop) and every other endpoint's
-//      hop alone;
+//      move (tunnel:disconnect — there is no Disconnect button, that call IS the
+//      move) ends exactly ONE session, the asking window's own default slot on the
+//      hop it stops, and PARKS every other claim: a tab on that machine keeps its
+//      session id and port and its next claim re-binds the SAME session, and a tab
+//      on THIS machine (which never went through a hop) is not touched at all;
 //   4. what the renderer remembers about its session URL is per window
 //      (sessionStorage), so one window's base is never the next window's memory.
 //
@@ -92,8 +93,8 @@ const discEnd = discAt < 0 ? -1 : MAIN.indexOf('ipcMain.handle("session:release"
 const disconnect = discAt < 0 || discEnd < discAt ? "" : MAIN.slice(discAt, discEnd);
 check(/const st = tunnel\.tunnelStatus\(\)/.test(disconnect) &&
   /const affected = st && st\.url \? await hostCore\.releaseTunnelBackends\(st\.url\) : \[\]/.test(disconnect) &&
-  /for \(const s of affected\)\s*await hostCore\.releaseSlot\(s\.winId, s\.slotId, \{ leaving: true \}\)/.test(disconnect),
-  "the picker's own Disconnect releases only the claims whose forward went through the hop it is stopping — and tells those sessions to stop while the hop is still up");
+  /for \(const s of affected\) \{\s*if \(s\.slotId\)\s*continue;\s*if \(s\.winId !== e\.sender\.id\)\s*continue;\s*await hostCore\.releaseSlot\(s\.winId, s\.slotId, \{ leaving: true \}\);\s*\}/.test(disconnect),
+  "the picker's MOVE ends one session — the asking window's own default slot on the hop it stops — and parks every tab claim and every other window's claim: their sessions outlive the hop, and the next claim re-binds the same one");
 check(!/releaseAllBackends/.test(disconnect) &&
   /await tunnel\.stopTunnel\(\)/.test(disconnect) && /stopIdleTunnels\(\)/.test(disconnect),
   "…and nothing else: no machine-wide release, because a tab on THIS machine never went through a hop and a tab on another machine is not on this one");
@@ -183,11 +184,20 @@ const FAR_ID = "me@far.example:22"; // tunnel-core's tunnelId spelling: user@hos
 
 function makeCore(tunnel) {
   let sseq = 0;
+  // what the supervisor was asked, so a test can tell a RE-bind (no start, the
+  // same session port) from a fresh session over abandoned work
+  tunnel.starts = 0;
+  tunnel.stops = [];
+  tunnel.forwards = [];
   const hop = {
     tunnelId: FAR_ID,
     lifecycle: {
       tunnelStatus: () => ({ active: !!tunnel.active, url: tunnel.url || null, target: FAR }),
-      openSessionForward: async (port) => ({ localPort: port + 1000, close: () => {} }),
+      openSessionForward: async (port) => {
+        tunnel.forwards.push(port);
+        // a real hop hands out whatever local port it got: never the same twice
+        return { localPort: 20000 + tunnel.forwards.length, close: () => {} };
+      },
       restartRemoteServer: async () => true,
     },
   };
@@ -202,8 +212,14 @@ function makeCore(tunnel) {
     executors,
     log: () => {},
     sessions: {
-      supervisorSessionStart: async () => ({ sessionId: "s" + ++sseq, port: 30000 + sseq }),
-      supervisorSessionStop: () => {},
+      supervisorSessionStart: async () => {
+        tunnel.starts++;
+        return { sessionId: "s" + ++sseq, port: 30000 + sseq };
+      },
+      supervisorSessionStop: (base, sessionId, opts) => {
+        tunnel.stops.push({ sessionId, leaving: !!(opts && opts.leaving) });
+        return { ok: true };
+      },
       supervisorSessionHeartbeat: async () => true,
       startSupervisorHeartbeat: () => ({ stop: () => {} }),
       supervisorShutdown: () => {},
@@ -300,39 +316,75 @@ async function main() {
   check(losts === lostsBefore && pickerPaints === paintsBefore,
     "no intent = the user left on purpose: neither verdict raises the dialog (that check is older than this one, and it still stands)");
 
-  // ---- 6. driven: the picker's own Disconnect is scoped to ITS hop ----
+  // ---- 6. driven: the picker's MOVE ends one session and parks the rest ----
   //
-  // The reported bug: choosing Local (or any picker switch) in one window told the
-  // host "the user is leaving this machine", and the host took that to mean EVERY
-  // claim — a tab already open on THIS machine lost its session (its forward died
-  // under it: "fetch failed", and the next send started a session with no project
-  // open), and a tab on another machine lost a hop nobody had dropped. The fix is
-  // the one-endpoint branch's rule, one level down: release the claims whose
-  // forward went through the hop being stopped, and nothing else.
+  // The reported bug: connecting to another device in the picker (its only caller
+  // of .disconnect() is exactly that move) told the host "the user is leaving",
+  // and the host took that to mean EVERY claim on the hop. A tab already open on
+  // that machine lost its session — SIGTERM, so its next claim started a FRESH
+  // session with no project open, which is what "it did not connect" looked like —
+  // and a run already in flight answered "run failed: fetch failed" over a forward
+  // whose far side was gone. A move replaces exactly ONE session: the moving
+  // window's own default slot. Every other claim is PARKED — its forward goes with
+  // the hop while its session id and port stay — so its next claim re-binds the
+  // SAME session through whatever hop exists then.
   const picker = { active: true, url: "http://127.0.0.1:8893" };
   const core2 = makeCore(picker);
   const localTab = fakeWin(11); // a tab on this machine: pinned there, no hop
   core2.setSlotTarget(localTab.id, "", { kind: "executor", id: LOCAL_ID });
-  const hopTab = fakeWin(12); // a tab following the picker's hop
+  const mover = fakeWin(12); // the window the user is moving: its DEFAULT slot is on the hop
+  const otherWindow = fakeWin(13); // a second window, sharing the picker's hop
   await core2.ensureSlotBackend(localTab);
-  await core2.ensureSlotBackend(hopTab);
+  await core2.ensureSlotBackend(mover);
+  await core2.ensureSlotBackend(mover, "tab-a"); // a TAB of the same window on that machine
+  await core2.ensureSlotBackend(otherWindow);
   const localBefore = core2.slotStatus(localTab.id);
-  check(!localBefore.remote && !!(localBefore.url || "").match(/^http:\/\/127\.0\.0\.1:\d+$/) &&
-    core2.slotStatus(hopTab.id).remote,
-    "the picker's Disconnect starts from one tab on this machine and one on its hop");
+  const startsBefore = picker.starts;
+  check(!localBefore.remote && /^http:\/\/127\.0\.0\.1:\d+$/.test(localBefore.url || "") &&
+    core2.slotStatus(mover.id).remote && core2.slotStatus(mover.id, "tab-a").remote &&
+    core2.slotStatus(otherWindow.id).remote,
+    "the move starts from one tab on this machine, the moving window's default slot on the hop, and a tab plus a second window on that same hop");
 
-  // ui/main.ts's own sequence, driven: tunnelStatus().url -> releaseTunnelBackends
-  // -> releaseSlot({leaving:true}) for each slot the hop owned
+  // ui/main.ts's own sequence, driven word for word: tunnelStatus().url ->
+  // releaseTunnelBackends -> releaseSlot({leaving:true}) for the ASKING window's
+  // DEFAULT slot only
   const dying = await core2.releaseTunnelBackends(picker.url);
-  for (const s of dying) await core2.releaseSlot(s.winId, s.slotId, { leaving: true });
-
-  check(dying.length === 1 && dying[0].winId === hopTab.id,
-    "only the tab whose forward went through that hop is released — the hop's name is the scope, exactly as in the one-endpoint branch");
+  for (const s of dying) {
+    if (s.slotId) continue;
+    if (s.winId !== mover.id) continue;
+    await core2.releaseSlot(s.winId, s.slotId, { leaving: true });
+  }
+  check(dying.length === 3,
+    "every claim whose forward went through that hop was DETACHED — the hop's name is the scope, exactly as in the one-endpoint branch");
+  check(!core2.slotStatus(mover.id).claimed && picker.stops.length === 1 && picker.stops[0].leaving === true,
+    "the moving window's own default slot is the ONE session the move ends, and it is ended as leaving (a `released` final) while the hop is still up");
   check(core2.slotStatus(localTab.id).claimed && core2.slotStatus(localTab.id).url === localBefore.url &&
     core2.backendExecutor(localTab.id) === LOCAL_ID,
     "the tab on THIS machine keeps its session and its base: nothing of the picker's hop was ever in its path — that is the tab that showed fetch failed");
-  check(!core2.slotStatus(hopTab.id).claimed,
-    "the tab on the hop is released outright, not parked: the hop was still up, so its supervisor was told to stop the session (a `released` final)");
+  check(core2.slotStatus(mover.id, "tab-a").claimed && core2.slotStatus(mover.id, "tab-a").url === null &&
+    core2.slotStatus(otherWindow.id).claimed && core2.slotStatus(otherWindow.id).url === null,
+    "the tab on the hop and the other window's claim are PARKED, not released: their forward went with the hop, their session did not");
+
+  // ...and the next claim re-binds the SAME session: no session start, the same
+  // remote port through the hop, and a URL again (the run in flight keeps its work)
+  const fwdsBefore = picker.forwards.slice();
+  const tabUrl = await core2.ensureSlotBackend(mover, "tab-a");
+  const otherUrl = await core2.ensureSlotBackend(otherWindow);
+  check(picker.starts === startsBefore,
+    "no session was started for either parked claim: the sessions those tabs were working in are still the ones they come back to");
+  check(typeof tabUrl === "string" && typeof otherUrl === "string" && tabUrl !== otherUrl &&
+    JSON.stringify(picker.forwards.slice(fwdsBefore.length)) === JSON.stringify(fwdsBefore.slice(1)),
+    "both re-opened a forward to their OWN session port — the same session id and port, over the hop that exists now");
+
+  // runFailure's repair (ui/main.ts): a claimed slot whose forward carries no
+  // bytes is dropped, so the next claim does not hand the dead port back
+  const deadUrl = core2.slotStatus(otherWindow.id).url;
+  check(core2.dropSlotForward(otherWindow.id) === true && core2.slotStatus(otherWindow.id).claimed &&
+    core2.slotStatus(otherWindow.id).url === null,
+    "dropSlotForward drops exactly the local half: the claim stays, the URL that named the dead forward does not");
+  const rebound = await core2.ensureSlotBackend(otherWindow);
+  check(typeof rebound === "string" && rebound !== deadUrl && picker.starts === startsBefore,
+    "and the next claim re-binds that claim's session over the live hop instead of handing back the port nobody serves");
 
   summary("tunnel-scope");
 }

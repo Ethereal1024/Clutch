@@ -580,15 +580,17 @@ export async function connectTabMachine(machine): Promise<string> {
 // again (connConnect refuses to "connect" where it believes it already is). So a
 // failed move drops the stale base and redraws the picker: no ✓, no old listing,
 // and the host it left is a choice that can be dialled again.
-// The picker's own Disconnect, and the one thing it must do around it. The shell's
-// teardown is caller-managed and announces NOTHING (tunnel-lifecycle.ts
-// stopTunnel(notify = false): the renderer asked, and re-claims in the same turn),
-// which is right for the tunnel and wrong for the record this window keeps of it:
-// `hopUpFor` (slots.ts) answers from the hop mirror while the cached-view decision
-// is being made, and a machine that was just dropped would still be "up" there —
-// so every tab on it takes the cached path and paints a transcript over a hop
-// nobody serves. The mirror is only ever written from an ANSWER, so ask: the shell
-// has one, now that the teardown has landed.
+// The MOVE's one call into the shell, and the one thing it must do after it. The
+// picker has no Disconnect button: this runs when the window goes to ANOTHER
+// machine (or back to local), which the host treats as exactly that — one move,
+// not every tab leaving. The shell's teardown is caller-managed and announces
+// NOTHING (tunnel-lifecycle.ts stopTunnel(notify = false): the renderer asked, and
+// re-claims in the same turn), which is right for the tunnel and wrong for the
+// record this window keeps of it: `hopUpFor` (slots.ts) answers from the hop mirror
+// while the cached-view decision is being made, and a machine that was just dropped
+// would still be "up" there — so every tab on it takes the cached path and paints a
+// transcript over a hop nobody serves. The mirror is only ever written from an
+// ANSWER, so ask: the shell has one, now that the teardown has landed.
 async function dropTunnel() {
   if (!window.clutchTunnel) return;
   try {
