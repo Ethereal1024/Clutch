@@ -69,6 +69,17 @@ check(
   chooseStrategy(probe("", "x86_64"), "linux-x86_64") === null,
   "missing os field without python -> null"
 );
+// the field's region-46 host: the probe had to go looking for the interpreter
+// (a conda prefix, a login shell) and reports where it found it. The strategy
+// keys on the VERSION it answered; the path is carried separately, so an
+// interpreter found off PATH is still an interpreter — pylibs, not null.
+check(
+  chooseStrategy(
+    { os: "Linux", arch: "x86_64", python: "3.10", pythonPath: "/root/miniconda3/bin/python3" },
+    "windows-x86_64"
+  ) === "pylibs",
+  "a python found off PATH (conda) from a win client -> pylibs"
+);
 
 // 6. aarch64 vs x86_64 naming from uname -m
 check(

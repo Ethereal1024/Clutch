@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-lifecycle.ts and run `npm run build:host`.
-// source sha256: 650f36d78124a9ee9bbdbe66f98df8bb65726477f8d6eab4d59d96e503353492
+// source sha256: f548570ac01f7fe2e02ff2a1e0c14c5d4be93a7cfb7895e723ee85cac2e55f00
 
 "use strict";
 // teardown, the per-window session forwards, and self-healing
@@ -211,7 +211,7 @@ function attach(ctx) {
             tunnelLog(`[heal] port ${REMOTE_API_PORT} still held after the stop:\n` + stopped.diag);
             return false;
         }
-        await remoteExec(startCommand(state.lastStrategy, state.lastHome));
+        await remoteExec(startCommand(state.lastStrategy, state.lastHome, state.lastProbe || {}));
         const base = state.currentUrl;
         if (!base)
             return false;

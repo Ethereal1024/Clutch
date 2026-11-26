@@ -254,7 +254,7 @@ async function main() {
     "…and the exit status the caller reads survives that cleanup"
   );
   check(
-    /const landed = await remoteExec\(pylibsInstallCmd\(dir\)\)/.test(BOOTSTRAP_SRC) &&
+    /const landed = await remoteExec\(pylibsInstallCmd\(dir, probe\)\)/.test(BOOTSTRAP_SRC) &&
       /if \(landed\.code !== 0\)/.test(BOOTSTRAP_SRC),
     "the caller asks how the install went before it writes the VERSION marker (a marker over a tree that did not land is the lie)"
   );
@@ -354,7 +354,7 @@ async function main() {
       PROBE_CMD.indexOf(TREE_PROBE_CMD) < PROBE_CMD.indexOf("__NET__"),
     "…between the artifact listing and the network check"
   );
-  const program = TREE_PROBE_CMD.slice(TREE_PROBE_CMD.indexOf("python3 -c '") + 11, TREE_PROBE_CMD.lastIndexOf("'"));
+  const program = TREE_PROBE_CMD.slice(TREE_PROBE_CMD.indexOf("-c '") + 4, TREE_PROBE_CMD.lastIndexOf("'"));
   check(!program.includes("__"), "…and nothing it prints contains __, so no section can be split in half");
   const parsed = parseProbe("__ART__\nbundle\n__TREE__\nDUP:pydantic_core\n__NET__\nOK\n__TMP__\nYES\n");
   check(

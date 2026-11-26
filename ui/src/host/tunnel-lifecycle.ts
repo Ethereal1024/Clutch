@@ -217,7 +217,7 @@ async function restartRemoteServer() {
     tunnelLog(`[heal] port ${REMOTE_API_PORT} still held after the stop:\n` + stopped.diag);
     return false;
   }
-  await remoteExec(startCommand(state.lastStrategy, state.lastHome));
+  await remoteExec(startCommand(state.lastStrategy, state.lastHome, state.lastProbe || {}));
   const base = state.currentUrl;
   if (!base) return false;
   return waitForServer(base + "/api/health", 20000);

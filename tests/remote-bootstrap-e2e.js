@@ -29,20 +29,11 @@ if (!host || !user || !password) {
   process.exit(2);
 }
 
-const PROBE_CMD = [
-  'echo "__OS__"; uname -s',
-  'echo "__ARCH__"; uname -m',
-  'echo "__HOME__"; echo "$HOME"',
-  'echo "__PY__"; (command -v python3 >/dev/null && python3 -c "import sys;print(\'%d.%d\'%sys.version_info[:2])") || echo NONE',
-  'echo "__LIBC__"; (ldd --version 2>&1 | head -1 | grep -qi musl && echo musl) || ([ -f /etc/alpine-release ] && echo musl) || (ldd --version 2>&1 | head -1 | grep -qE "GLIBC|glibc|GNU libc" && echo glibc) || echo unknown',
-  'echo "__VER__"; (cat "$HOME/.clutch-server/VERSION" 2>/dev/null) || echo NONE',
-  'echo "__NET__"; (python3 -c "import urllib.request;urllib.request.urlopen(\'https://pypi.org\',timeout=3);print(\'OK\')" 2>/dev/null) || echo NO',
-].join("; ");
-
-function parseSection(out, marker) {
-  const parts = out.split(marker);
-  return parts.length > 1 ? parts[1].split("__")[0].trim() : "";
-}
+// The probe is the SHIPPED one, not a copy: a copy here drifted from it once
+// already (it still asked only `command -v python3`, which reports a conda-only
+// host as python-less — the very failure the client has since learned to avoid).
+// A manual e2e run is exactly where that difference has to be visible.
+const { PROBE_CMD, parseProbe } = require("../ui/tunnel-bootstrap");
 
 function probeOnce() {
   return new Promise((resolve, reject) => {
@@ -63,14 +54,16 @@ function probeOnce() {
         stream.on("close", () => {
           clearTimeout(timer);
           client.end();
+          const p = parseProbe(out);
           resolve({
-            os: parseSection(out, "__OS__"),
-            arch: parseSection(out, "__ARCH__"),
-            home: parseSection(out, "__HOME__"),
-            python: parseSection(out, "__PY__"),
-            libc: parseSection(out, "__LIBC__"),
-            installed: parseSection(out, "__VER__"),
-            internet: parseSection(out, "__NET__"),
+            os: p.os,
+            arch: p.arch,
+            home: p.home,
+            python: p.python,
+            pythonPath: p.pythonPath,
+            libc: p.libc,
+            installed: p.installedVersion,
+            internet: p.internet,
             raw: out,
           });
         });

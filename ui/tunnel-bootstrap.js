@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-bootstrap.ts and run `npm run build:host`.
-// source sha256: d4618e0d96f05a80d30740d2d7a8682788fdafe9cecff2192bdba0ff81a40b83
+// source sha256: 6642447e93c6a1829730b870bfb58bf962172b07caa405973a05a51c3a6d4ea0
 
 "use strict";
 // make the far side exist — probe, choose a strategy, install, start
@@ -39,6 +39,84 @@ function attach(ctx) {
             return 0;
         }
     }
+    // ---- which python? ----
+    //
+    // The tunnel's commands run through ssh2's `exec`, which is a NON-LOGIN,
+    // NON-INTERACTIVE shell: it sources no profile, so it inherits the bare PATH
+    // sshd hands it. On a machine whose python3 lives in a conda/miniforge prefix —
+    // the SeetaCloud/AutoDL GPU images are built that way, and the field's
+    // region-46 host is one — `command -v python3` answers nothing there while the
+    // user's own terminal answers /root/miniconda3/bin/python3 all day. The old
+    // probe asked that one question, believed the empty answer, and refused the
+    // connect with "without python3 … no bundle for this platform" — a statement
+    // about the shell this client gets, not about the machine (the report: an x86_64
+    // box with everything needed to install).
+    //
+    // The component layer already settled this exact question for the same reason
+    // (agent/tools/modules.py `_login_shell_python`: CLUTCH_PYTHON, then PATH, then
+    // a login shell). So the probe asks in the same order — the exec's PATH, then
+    // the prefixes a profile would have put there, then a login shell — and REPORTS
+    // THE PATH it found, because every later command (the unpack, the start, the
+    // port and health checks) runs in that same bare shell and has to be handed the
+    // path rather than the name `python3`, which is exactly what PATH is missing.
+    //
+    // A candidate is accepted only if it ANSWERS as a python 3: `python3-config`
+    // matches a `python3.*` glob and `python` may be python 2, and either would be
+    // found by the shell and then fail every command built from it.
+    const PY_CANDIDATES = [
+        '"$(command -v python3 2>/dev/null)"',
+        '"$(command -v python 2>/dev/null)"',
+        // the prefixes a profile (conda init, venv activate, pyenv, homebrew) puts on
+        // PATH for an interactive shell, by their usual homes
+        '"$HOME/miniconda3/bin/python3"',
+        '"$HOME/anaconda3/bin/python3"',
+        '"$HOME/miniforge3/bin/python3"',
+        '"$HOME/mambaforge/bin/python3"',
+        '"$HOME/.venv/bin/python3"',
+        '"$HOME/venv/bin/python3"',
+        '"/opt/conda/bin/python3"',
+        '"/opt/venv/bin/python3"',
+        '"/usr/local/bin/python3"',
+        '"/usr/bin/python3"',
+        // …and the same directories' versioned spellings, where the unversioned name
+        // is the thing that was never created (an image that installed 3.10 only)
+        '"$HOME/miniconda3/bin/python3."*',
+        '"$HOME/anaconda3/bin/python3."*',
+        '"/opt/conda/bin/python3."*',
+        '"/usr/local/bin/python3."*',
+        '"/usr/bin/python3."*',
+    ];
+    // One section, three answers: the version (or NONE), then the absolute path the
+    // version came from. `$PY` stays set for the sections after this one, so the
+    // tree probe and the network check ask the SAME interpreter — and it is left as
+    // the name `python3` when nothing was found, so those sections still answer
+    // NOPY/NO instead of vanishing.
+    // The last ask, and the general one: the machine's own LOGIN shell. `bash -lc`
+    // sources the profile, which is the only place conda init / pyenv / a venv
+    // activation puts itself on PATH — the same question agent/tools/modules.py asks
+    // (LOGIN_PROBE) for the same reason. Its stdout is filtered to an absolute
+    // `…/python[0-9.]*` line, because a profile is free to print anything else, and
+    // `timeout` bounds the wait: a profile that blocks would otherwise hang the one
+    // exec the whole connect is waiting on.
+    const PY_LOGIN_PROBE_CMD = `{ Q='command -v python3 || command -v python'; ` +
+        `(command -v timeout >/dev/null 2>&1 && timeout 10 bash -lc "$Q") || bash -lc "$Q"; } ` +
+        `2>/dev/null </dev/null | grep -E '^/.*python[0-9.]*$' | tail -n 1`;
+    const PY_PROBE_CMD = `echo "__PY__"; PY=; VER=
+for p in ${PY_CANDIDATES.join(" ")}; do
+  case "$p" in
+    /*) v=$("$p" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null)
+        case "$v" in 3.[0-9]*) PY="$p"; VER="$v"; break;; esac;;
+  esac
+done
+if [ -z "$PY" ]; then
+  PY=$(${PY_LOGIN_PROBE_CMD})
+  case "$PY" in
+    /*) v=$("$PY" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null)
+        case "$v" in 3.[0-9]*) VER="$v";; *) PY=;; esac;;
+    *) PY=;;
+  esac
+fi
+if [ -n "$PY" ]; then echo "$VER"; echo "$PY"; else echo NONE; PY=python3; fi`;
     // Does the far side's tree still vouch for itself? A file WE wrote cannot: the
     // field's broken remote held a VERSION that matched ours exactly (so every
     // reconnect skipped the install — the gate is "the marker equals our hash") over
@@ -68,7 +146,7 @@ function attach(ctx) {
     // tree). The import is caught by NAME rather than reflected off the exception
     // (type(exc).__name__ is the one dunder that would put the delimiter in the
     // program).
-    const TREE_PROBE_CMD = `echo "__TREE__"; PYTHONPATH="$HOME/.clutch-server/site-packages" python3 -c '
+    const TREE_PROBE_CMD = `echo "__TREE__"; [ -n "$PY" ] || PY=python3; PYTHONPATH="$HOME/.clutch-server/site-packages" "$PY" -c '
 import os, sys
 d = os.path.join(os.environ.get("HOME", ""), ".clutch-server")
 sp = os.path.join(d, "site-packages")
@@ -97,13 +175,14 @@ else:
         'echo "__ARCH__"; uname -m',
         'echo "__HOME__"; echo "$HOME"',
         'echo "__OSREL__"; (grep -E "^(NAME|VERSION)=" /etc/os-release 2>/dev/null || true) | head -2',
-        'echo "__PY__"; (command -v python3 >/dev/null && python3 -c "import sys;print(\'%d.%d\'%sys.version_info[:2])") || echo NONE',
+        PY_PROBE_CMD,
         'echo "__LIBC__"; (ldd --version 2>&1 | head -1 | grep -qi musl && echo musl) || ([ -f /etc/alpine-release ] && echo musl) || (ldd --version 2>&1 | head -1 | grep -qE "GLIBC|glibc|GNU libc" && echo glibc) || echo unknown',
+        'echo "__PATH__"; echo "$PATH"',
         'echo "__VER__"; (cat "$HOME/.clutch-server/VERSION" 2>/dev/null) || echo NONE',
         'echo "__STRATEGY__"; (cat "$HOME/.clutch-server/STRATEGY" 2>/dev/null) || echo NONE',
         'echo "__ART__"; (test -x "$HOME/.clutch-server/agent-server" -a -x "$HOME/.clutch-server/agent-supervisor" && echo bundle || true); (test -x "$HOME/.clutch-server/venv/bin/python" && echo pip || true); (test -d "$HOME/.clutch-server/site-packages" && echo pylibs || true)',
         TREE_PROBE_CMD,
-        'echo "__NET__"; (python3 -c "import urllib.request;urllib.request.urlopen(\'https://pypi.org\',timeout=3);print(\'OK\')" 2>/dev/null) || echo NO',
+        'echo "__NET__"; ("${PY:-python3}" -c "import urllib.request;urllib.request.urlopen(\'https://pypi.org\',timeout=3);print(\'OK\')" 2>/dev/null) || echo NO',
         'echo "__TMP__"; (test -w /tmp && echo YES) || echo NO',
     ].join("; ");
     function parseProbe(out) {
@@ -112,13 +191,24 @@ else:
             return parts.length > 1 ? parts[1].split("__")[0].trim() : "";
         };
         const arts = out.split("__ART__").pop().split("\n").map((s) => s.trim()).filter(Boolean);
+        // the interpreter section is TWO lines when one was found: the version, then
+        // the absolute path every later command has to be handed (PY_PROBE_CMD). A
+        // line is a version only if it looks like one and a path only if it is
+        // absolute: the far side filters the login shell's answer, but a profile's
+        // own chatter reaches this string unfiltered, and nothing here is trusted by
+        // position.
+        const pyLines = section("__PY__").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
         return {
             os: section("__OS__"),
             arch: section("__ARCH__"),
             home: section("__HOME__"),
             osrel: section("__OSREL__"),
-            python: section("__PY__") === "NONE" ? "" : section("__PY__"),
+            python: pyLines.find((s) => /^\d+\.\d+$/.test(s)) || "",
+            pythonPath: pyLines.find((s) => s.startsWith("/")) || "",
             libc: section("__LIBC__"),
+            // what a NON-LOGIN shell sees, which is how a python3 that only a profile
+            // knows about goes missing (reported in the refusal, so it is answerable)
+            path: section("__PATH__"),
             installedVersion: section("__VER__"),
             installedStrategy: section("__STRATEGY__"),
             artifacts: arts,
@@ -130,7 +220,19 @@ else:
             tmpWritable: section("__TMP__") === "YES",
         };
     }
-    function startCommand(strategy, home) {
+    // The interpreter every far-side command must name: the one the probe FOUND
+    // (an absolute path), never the bare `python3` that PATH is missing. Only a
+    // path that is absolute, free of quoting hazards and named like an interpreter
+    // is used; anything else — no probe, a path with a space, an alias a shell
+    // echoed — falls back to the name, which is what the old code always used and
+    // is still right for the ordinary case (a system python3 on PATH).
+    function pyBin(probe) {
+        const p = String((probe && probe.pythonPath) || "");
+        if (/^\/[A-Za-z0-9._/+-]+$/.test(p) && /(^|\/)python[0-9.]*$/.test(p))
+            return p;
+        return "python3";
+    }
+    function startCommand(strategy, home, probe) {
         // remote supervisor runs on 8890 like local; session children get --base-url later
         const args = "--port " + REMOTE_API_PORT + " --idle-timeout 25";
         const nohup = "nohup setsid ";
@@ -148,11 +250,11 @@ else:
         // server can still take seconds before the port answers — keep the idle
         // reaper at 25s (> the 20s start poll). NOTE: argparse takes the LAST
         // --idle-timeout, so never append a second one after ${args}.
-        return `cd ${home}/.clutch-server && ${nohup}env PYTHONPATH=site-packages python3 -m agent.supervisor ${args} ${logredir}`;
+        return `cd ${home}/.clutch-server && ${nohup}env PYTHONPATH=site-packages ${pyBin(probe)} -m agent.supervisor ${args} ${logredir}`;
     }
     function remoteRunningCmd(probe) {
         if (probe && probe.python) {
-            return `python3 -c "import socket;s=socket.socket();s.settimeout(1);s.connect(('127.0.0.1',${REMOTE_API_PORT}));print('UP')" 2>/dev/null || echo DOWN`;
+            return `${pyBin(probe)} -c "import socket;s=socket.socket();s.settimeout(1);s.connect(('127.0.0.1',${REMOTE_API_PORT}));print('UP')" 2>/dev/null || echo DOWN`;
         }
         // no python3 to ask: try ss, and say UNKNOWN (not DOWN) when even that is
         // missing — "I could not look" and "nobody is listening" are different
@@ -167,7 +269,7 @@ else:
     function remoteHealthCmd(probe) {
         const url = `http://127.0.0.1:${REMOTE_API_PORT}/api/health`;
         if (probe && probe.python) {
-            return `python3 -c "import urllib.request;print(urllib.request.urlopen('${url}',timeout=3).status)" 2>/dev/null || echo DOWN`;
+            return `${pyBin(probe)} -c "import urllib.request;print(urllib.request.urlopen('${url}',timeout=3).status)" 2>/dev/null || echo DOWN`;
         }
         return `(command -v curl >/dev/null && (curl -fsS -m 3 -o /dev/null '${url}' && echo 200 || echo DOWN)) || echo UNKNOWN`;
     }
@@ -330,8 +432,11 @@ else:
     // (the staging directory is the only thing thrown away). The far side's server
     // is already stopped by the caller (see the note above), so nothing is reading
     // either tree while it is swapped.
-    function pylibsInstallCmd(dir) {
+    function pylibsInstallCmd(dir, probe) {
         const stage = `${dir}/pylibs.stage`;
+        // the interpreter the probe found, not the name: the unpack runs in the same
+        // bare shell that could not see a conda python3 by name (pyBin)
+        const py = pyBin(probe);
         // the OLD tree is renamed aside first and removed last: a swap that dies
         // between the two renames leaves `site-packages.old` recoverable, not a hole
         const swap = (name) => `rm -rf ${dir}/${name}.old && (mv ${dir}/${name} ${dir}/${name}.old 2>/dev/null || true) && ` +
@@ -339,7 +444,7 @@ else:
         const chain = [
             `rm -rf ${stage}`,
             `mkdir -p ${stage}`,
-            `python3 -c "import tarfile;tarfile.open('${dir}/pylibs.tar.gz').extractall('${stage}')"`,
+            `${py} -c "import tarfile;tarfile.open('${dir}/pylibs.tar.gz').extractall('${stage}')"`,
             // both trees before either swap: a tar that carries no `agent` (or no
             // site-packages) installs NOTHING rather than half of itself
             `test -d ${stage}/site-packages -a -d ${stage}/agent`,
@@ -354,10 +459,59 @@ else:
         // installServer now asks about by name.
         return `${chain} ; rc=$?; rm -rf ${stage}; test $rc -eq 0`;
     }
+    // The refusal owes the user a TRUE sentence. The old one said "no bundle for
+    // this platform is available", which was wrong twice over: the pylibs artifact's
+    // bytes do not depend on the target label at all (scripts/build-pylibs-tar.sh
+    // takes the label as an argument and ships the same tree for every one), and the
+    // thing actually missing was an interpreter the probe could FIND — a fact about
+    // the shell this client gets, not about the machine. The two are different
+    // failures with different actions, so they are said apart: what was searched,
+    // what that shell sees, and whether python is the whole story.
+    const POSIX_OS = ["linux", "darwin", "freebsd", "openbsd", "netbsd", "solaris"];
+    function noStrategyError(probe, localTag = platformTag(), forced = "") {
+        const os = String(probe.os || "?").trim();
+        const arch = String(probe.arch || "?").trim();
+        const libc = probe.libc || "unknown";
+        if (forced) {
+            return (`the bootstrap was forced to "${forced}" (CLUTCH_TUNNEL_FORCE), which is not an install ` +
+                `strategy. Unset it and reconnect: this target runs ${os}/${arch}` +
+                (probe.python ? ` with python ${probe.python}` : "") +
+                ".");
+        }
+        if (!POSIX_OS.includes(os.toLowerCase())) {
+            return (`target runs ${os}/${arch} (${libc} libc). This client installs the server through a POSIX ` +
+                "shell (tar, mkdir, mv), and no self-contained bundle is available for that platform here, " +
+                "so the server cannot be installed on it. Connect to a Linux or macOS host instead.");
+        }
+        const searched = [
+            "python3/python on the tunnel's own PATH",
+            "the usual prefixes (miniconda3, anaconda3, miniforge3, mambaforge, /opt/conda, /opt/venv, " +
+                "/usr/local/bin, /usr/bin — including versioned python3.x)",
+            "a LOGIN shell's answer (bash -lc 'command -v python3')",
+        ].join("; ");
+        return (`target runs ${os}/${arch} (${libc} libc), and the PLATFORM is not the problem: the release's ` +
+            "pylibs artifact carries no platform-specific code (its bytes are the same for every target " +
+            "label), so a python 3.8+ on the device is all it needs. What could not be found is a python 3 " +
+            "the tunnel can run it with. The tunnel runs non-login, non-interactive commands, so it sees " +
+            `PATH=${String(probe.path || "").trim() || "(empty)"}, and none of these answered: ${searched}. ` +
+            "A python3 that exists only for interactive shells (conda init in ~/.bashrc, a venv's " +
+            "activate, pyenv shims) is invisible to that shell. Install python 3 (apt install python3, or " +
+            "the distribution's python3-venv), or make the one already on the machine reachable — on PATH, " +
+            "or at one of the prefixes above (a conda install at ~/miniconda3/bin/python3 is found " +
+            "automatically) — then reconnect.");
+    }
     async function installServer(probe, { force, progress } = {}) {
         const localTag = platformTag();
-        tunnelLog(`[bootstrap] probe os=${probe.os} arch=${probe.arch} libc=${probe.libc || "?"} py=${probe.python || "none"} ` +
+        tunnelLog(`[bootstrap] probe os=${probe.os} arch=${probe.arch} libc=${probe.libc || "?"} ` +
+            `py=${probe.python || "none"}${probe.pythonPath ? " (" + probe.pythonPath + ")" : ""} ` +
             `local=${localTag}`);
+        if (!probe.python) {
+            // the one fact the refusal is about: a shell that sees this PATH is where a
+            // conda/pyenv/venv python3 goes missing, and it cannot be seen after the
+            // fact — the tunnel is torn down with the verdict
+            tunnelLog("[bootstrap] no python 3 answered the probe; the non-login shell sees PATH=" +
+                (String(probe.path || "").trim().slice(0, 300) || "(empty)"));
+        }
         let strategy;
         if (force) {
             strategy = force;
@@ -371,12 +525,10 @@ else:
         if (strategy !== "bundle" && strategy !== "pylibs") {
             // e.g. no python3: there is no deterministic install path, so the hop cannot
             // serve a session at all (an explicit CLUTCH_TUNNEL_FORCE=assist lands here
-            // too)
+            // too — noStrategyError says which of the two it is)
             return {
                 ok: false,
-                error: `target runs ${probe.os}/${probe.arch} without python3 (${probe.libc || "?"} libc) and no ` +
-                    "bundle for this platform is available, so the server cannot be installed. " +
-                    "Install python3 on the device to connect to it.",
+                error: noStrategyError(probe, localTag, force || process.env.CLUTCH_TUNNEL_FORCE || ""),
             };
         }
         // The declared floor, checked only where it applies: "bundle" is a
@@ -385,7 +537,8 @@ else:
         if (strategy === "pylibs" && pythonTooOld(probe.python)) {
             return {
                 ok: false,
-                error: `target runs python ${probe.python} (${probe.os}/${probe.arch}, ${probe.libc || "?"} libc), and the ` +
+                error: `target runs python ${probe.python}${probe.pythonPath ? " at " + probe.pythonPath : ""} ` +
+                    `(${probe.os}/${probe.arch}, ${probe.libc || "?"} libc), and the ` +
                     `server's sources declare python ${PY_FLOOR.join(".")} or newer. ` +
                     "Install a newer python3 on the device to connect to it.",
             };
@@ -551,7 +704,7 @@ else:
                 // changed, and a VERSION file written over a tree that did not land is
                 // exactly the lie this release is about. The install is reported, not
                 // assumed — the marker is only reached on the path that succeeded.
-                const landed = await remoteExec(pylibsInstallCmd(dir));
+                const landed = await remoteExec(pylibsInstallCmd(dir, probe));
                 if (landed.code !== 0) {
                     const diag = (landed.stderr || landed.stdout || "").trim().slice(0, 400);
                     tunnelLog(`[bootstrap] the pylibs install failed (exit ${landed.code}):\n` + diag);
@@ -605,7 +758,7 @@ else:
             if (progress)
                 progress("install:start");
             // short timeout: the start command backgrounds the server
-            await remoteExec(startCommand(strategy, home), 10000);
+            await remoteExec(startCommand(strategy, home, probe), 10000);
             // wait for it to answer; a cold start on a slow server (first import of the
             // sources, a phone-class disk) can take a while, so poll for up to 20s (vs
             // the old 6s window that reported a healthy install as "did not come up")
@@ -706,8 +859,11 @@ else:
     }
     return {
         PROBE_CMD,
+        PY_PROBE_CMD,
+        PY_LOGIN_PROBE_CMD,
         TREE_PROBE_CMD,
         parseProbe,
+        pyBin,
         pylibsTreeSound,
         pylibsInstallCmd,
         startCommand,
@@ -716,6 +872,7 @@ else:
         remoteRunningCmd,
         remoteServingState,
         chooseStrategy,
+        noStrategyError,
         installServer,
         installComponents,
     };
@@ -724,8 +881,11 @@ else:
 // this module's own export (see tunnel-core's compatSurface).
 module.exports = require("./tunnel-core").compatSurface("bootstrap", [
     "PROBE_CMD",
+    "PY_PROBE_CMD",
+    "PY_LOGIN_PROBE_CMD",
     "TREE_PROBE_CMD",
     "parseProbe",
+    "pyBin",
     "pylibsTreeSound",
     "pylibsInstallCmd",
     "startCommand",
@@ -734,6 +894,7 @@ module.exports = require("./tunnel-core").compatSurface("bootstrap", [
     "remoteRunningCmd",
     "remoteServingState",
     "chooseStrategy",
+    "noStrategyError",
     "installServer",
     "installComponents",
 ], { attach });
