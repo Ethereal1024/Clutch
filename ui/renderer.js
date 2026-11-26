@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: fe5e5dfa88cedab2a79e84476ecbd302fe0e1e774b520d0caa7b8e34c2be1b28
+// sources sha256: 20c1dcf0bb01d7eac87fd73220b08ef665b028526ba993a46f341c9545a75673
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -804,6 +804,10 @@
     if (!tab.base) return false;
     try {
       if (localStorage.getItem("clutch_ssh_connected") !== "1") return false;
+      const list = JSON.parse(localStorage.getItem("clutch_ssh_connections") || "[]");
+      if (Array.isArray(list)) {
+        return list.some((c) => c && sameMachine(asMachine(c), tab.machine));
+      }
     } catch (e) {
       return false;
     }

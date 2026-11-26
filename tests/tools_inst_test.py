@@ -146,27 +146,41 @@ TABLE = {
     "write_file": modules.WORKSPACE,
     "edit_file": modules.WORKSPACE,
     "run_command": None,
+    "trigger": None,
     "load_skill": modules.SKILLS,
 }
 
+# The host's three clocks (sleep, start_tick, end_tick): declared here so the
+# model is offered them, answered by the CLIENT (ui/src/host/client-tools.ts).
+# There is nothing for this layer to run, which is what the loop below pins.
+CLIENT = ("sleep", "start_tick", "end_tick")
+
 
 def check_table(reg: ToolRegistry, cfg: Config) -> None:
-    check(sorted(reg.names()) == sorted(TABLE), "the registry carries exactly the tools this test pins")
+    check(sorted(reg.names()) == sorted([*TABLE, *CLIENT]), "the registry carries exactly the tools this test pins")
     for name, module in TABLE.items():
         tool = reg.tool(name)
         assert tool is not None
         if module is None:
             check(tool.inst is None and tool.host is not None, f"{name}: the command IS the statement, and the host's")
-            check(name == "run_command", f"{name}: the one host-owned tool, with no component behind it")
+            check(name in ("run_command", "trigger"), f"{name}: a host-owned tool, with no component behind it")
             continue
         check(tool.inst is not None and tool.module == module, f"{name}: one statement against {module}")
         check(tool.host is None, f"{name}: no host-side stand-in (the component IS the implementation)")
+    for name in CLIENT:
+        tool = reg.tool(name)
+        assert tool is not None
+        check(
+            tool.client_native and tool.inst is None and tool.host is None,
+            f"{name}: declared here for the model, answered by the client",
+        )
     check(reg.tool("nope") is None, "an unknown tool has no definition")
 
     # The absence of a fallback, as a whole-surface fact: point the host at an
-    # empty install root, and the tool set collapses to the host's one command —
-    # not to a stand-in per missing tool. A host with nothing installed can chat
-    # and run commands, nothing more.
+    # empty install root, and the tool set collapses to the host's own five —
+    # the two command tools and the three clocks the client answers — not to a
+    # stand-in per missing tool. A host with nothing installed can chat, wait and
+    # run commands, nothing more.
     with tempfile.TemporaryDirectory() as empty:
         previous = os.environ.get(components.ROOT_ENV)
         os.environ[components.ROOT_ENV] = empty
@@ -177,7 +191,10 @@ def check_table(reg: ToolRegistry, cfg: Config) -> None:
                 os.environ.pop(components.ROOT_ENV, None)
             else:
                 os.environ[components.ROOT_ENV] = previous
-    check(bare.names() == ["run_command"], "with nothing installed the host can only chat and run commands")
+    check(
+        bare.names() == ["run_command", "trigger", "sleep", "start_tick", "end_tick"],
+        "with nothing installed the host can only chat, wait and run commands",
+    )
 
 
 # ------------------------------------------- 2. the daemon line (curl, frozen)
@@ -600,7 +617,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             _install_pinned(installed)
             # no project log: the host's own log readers are gated on one, so this is
-            # exactly the surface of a session that opened nothing (run_command only)
+            # exactly the surface of a session that opened nothing (its own five)
             reg = ToolRegistry(build_tools(cfg))
             ws = LocalWorkspace(tmp)
             check_table(reg, cfg)

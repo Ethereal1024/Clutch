@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/supervisor-client.ts and run `npm run build:host`.
-// source sha256: 823aab08ce06eff48d034a3ef157ea24df056c1a8c9e9eed1b60e111534c9a7c
+// source sha256: acfb555e7ac8cef1e705ab5a21a6fa070b3f65c757fdb1757662c3b25358ad8e
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -159,6 +159,14 @@ async function supervisorSessionStop(base, sid, { leaving = false, timeoutMs = 2
             body: JSON.stringify({ session_id: sid, leaving: !!leaving }),
             signal: ctl.signal,
         });
+        // 404 is the supervisor's own "no such session" — the same answer a
+        // heartbeat reads as gone, and the release itself: it PROVED it holds
+        // nothing of that id. A far side's registry is its own process, so a hop
+        // that re-bootstrapped the supervisor leaves every id it held unknown to
+        // the new one; read as a refusal, that answer parked the claim forever and
+        // the tab sat at "no session there right now" while nothing ran there.
+        if (r.status === 404)
+            return { ok: true };
         return { ok: r.ok };
     }
     catch (e) {

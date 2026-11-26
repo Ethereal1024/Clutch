@@ -145,6 +145,7 @@ function hostWith(ports = {}) {
     contextWindowBytes: ports.contextWindowBytes || 1_000_000,
     onEvent: (ev) => emitted.push(ev),
     ...(ports.onEvent ? { onEvent: ports.onEvent } : {}),
+    ...(ports.wake ? { wake: ports.wake } : {}),
   });
   return { host, log, llm, tools, emitted };
 }
@@ -469,6 +470,68 @@ async function main() {
     check(log.events().length === 0, "and driving it wrote nothing");
     const states = emitted.filter((ev) => ev.type === "state_update").map((ev) => ev.value);
     check(JSON.stringify(states) === JSON.stringify(["idle"]), "the page is told idle, which is not the same as running");
+  }
+
+  // ------------------------------------- 8. the client's own three tools
+  //
+  // sleep / start_tick / end_tick are the loop's clocks: the execution layer
+  // has no command to run and no file to write, so the host must answer them
+  // HERE. A call that leaked to the tool client would be a round trip the
+  // phone cannot pay and a name `agent/tools/registry.py` refuses outright.
+  {
+    const llm = fakeLlm([
+      {
+        content: "",
+        toolCalls: [
+          { id: "c1", name: "sleep", arguments: '{"seconds":0}' },
+          { id: "c2", name: "start_tick", arguments: '{"seconds":0}' },
+          { id: "c3", name: "end_tick", arguments: "{}" },
+        ],
+        finishReason: "tool_calls",
+      },
+      { content: "nothing to wait for", finishReason: "stop" },
+    ]);
+    const { host, log, tools } = hostWith({ llm });
+    await host.start(TASK);
+    const out = await host.drive();
+    check(out.did === "final", "a turn whose calls are the client's own still ends");
+    check(tools.state.ran.length === 0, "and none of the three is sent to the execution endpoint");
+    const results = log.events().filter((ev) => ev.type === "tool_result");
+    check(results.length === 3, "each call still gets its durable result");
+    check(
+      results[0] && /positive number/.test(results[0].content) && results[0].is_error === true,
+      "a bad sleep is refused by the loop's own tool, and recorded as an error result"
+    );
+    check(
+      results[1] && /at least 1/.test(results[1].content) && results[1].is_error === true,
+      "so is a tick faster than a second"
+    );
+    check(results[2] && /no ticker/.test(results[2].content) && results[2].is_error === false, "and end_tick with nothing running is not an error");
+  }
+
+  // ------------------------- 9. a tick: appended here, and the session asked
+  {
+    const wake = [];
+    const llm = fakeLlm([
+      { content: "", toolCalls: [{ id: "c1", name: "start_tick", arguments: '{"seconds":1}' }], finishReason: "tool_calls" },
+      { content: "waiting", finishReason: "stop" },
+    ]);
+    const { host, log } = hostWith({ llm, wake: () => wake.push(Date.now()) });
+    await host.start(TASK);
+    await host.drive();
+    const before = log.events().filter((ev) => ev.type === "user_message").length;
+    await new Promise((r) => setTimeout(r, 1300));
+    host.stop(); // the user's Stop: it silences the heartbeat with everything else
+    const ticks = log.events().filter((ev) => ev.type === "user_message" && /^\[tick:/.test(ev.content));
+    check(ticks.length === 1, `the ticker wrote its own line to this run's log (${ticks.length})`);
+    check(ticks[0] && /\bevery 1s\b/.test(ticks[0].content), "naming the interval it runs at");
+    check(log.events().filter((ev) => ev.type === "user_message").length === before + 1, "exactly one new user message");
+    check(wake.length === 1, "and the session was asked to continue, once per tick");
+    await new Promise((r) => setTimeout(r, 1200));
+    check(
+      log.events().filter((ev) => ev.type === "user_message" && /^\[tick:/.test(ev.content)).length === 1,
+      "after Stop nothing more fires"
+    );
   }
 
   summary("run-host: one loop, one log, one page feed (ports / turn / window / failure)");

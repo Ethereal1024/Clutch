@@ -1,0 +1,1 @@
+Stop the periodic ticker started by start_tick: no further tick messages are appended and the loop is no longer asked to continue. Calling end_tick when no ticker is running is not an error — the result says so, and you carry on.

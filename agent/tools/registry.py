@@ -155,6 +155,15 @@ class Tool:
     handed to it HERE — from the registry, never from the model's arguments: a
     reader whose file came from the call would be a reader the call could point
     anywhere.
+
+    `client_native` marks the host's three client tools (sleep, start_tick,
+    end_tick): the declaration is here so the model is offered them, but
+    the implementation is the CLIENT's dispatcher (ui/src/host/client-tools.ts),
+    so this layer has neither a statement nor a host function to run. Such a tool
+    has `inst`, `host` and `module` empty on purpose, and a call that reaches
+    `_invoke` anyway is refused by name instead of falling through to the
+    "no implementation" answer — which would tell the model the tool is broken
+    when in fact it was sent to the wrong half.
     """
 
     name: str
@@ -163,6 +172,7 @@ class Tool:
     inst: str | None = None  # the component's own part of the statement (a client's: its declared command)
     module: str | None = None  # which component serves the statement
     host: ToolImpl | None = None  # the host's own tool (no component behind it)
+    client_native: bool = False  # the client answers the call, not this layer
     cancelable: bool = False  # Stop reaches this call (a host tool that declares it)
     needs_log: bool = False  # the host tool reads the session's project log
     access: str = ""  # the policy its declaration put it under ("" = unguarded)
@@ -196,6 +206,7 @@ def _wire(
     owner: str,
     implementation: host.HostImpl | None = None,
     needs_log: bool = False,
+    client_native: bool = False,
 ) -> Tool:
     """One declaration -> the tool the model sees and the host runs.
 
@@ -218,6 +229,11 @@ def _wire(
     the session's project log declares it, and the registry hands the log in on
     every call (no component can declare it, because no component can read the
     file the call is logged in).
+
+    `client_native` is the host's too, and it is the one wiring that is
+    deliberately EMPTY: the client's dispatcher answers the call, so the tool gets
+    no statement and no host function — only the declaration the model reads
+    (Tool.client_native).
     """
     access = ACCESS.get(spec.access)
     access_arg = spec.access_arg or (access.arg if access else "")
@@ -228,6 +244,7 @@ def _wire(
         inst=None if implementation is not None else spec.command,
         module=owner if implementation is None else None,
         host=implementation,
+        client_native=client_native,
         cancelable=implementation is not None,
         needs_log=needs_log,
         access=spec.access,
@@ -285,6 +302,7 @@ def _bootstrap(config: Config, log: LazyEventLog | None = None, *, remote: bool 
                 owner=host.NAME,
                 implementation=declared.implementation,
                 needs_log=declared.needs_log,
+                client_native=declared.client_native,
             )
         )
     return out
@@ -534,6 +552,16 @@ class ToolRegistry:
             if refused is not None:
                 return refused
         if tool.inst is None:
+            if tool.client_native:
+                # Declared here, answered there: the client's dispatcher runs this
+                # one (ui/src/host/client-tools.ts), and a request that arrives at
+                # the exec endpoint for it was sent to the wrong half. Saying so is
+                # the point — "no implementation" would read as a host bug.
+                return Envelope(
+                    f"ERROR: {tool.name} is answered by the client, not by this endpoint; "
+                    "do not call it again.",
+                    error=True,
+                )
             if tool.host is None:  # unreachable: build_tools never wires one
                 return Envelope(f"ERROR: tool {tool.name} has no implementation", error=True)
             # The log is not an argument (Tool.needs_log): it is handed in from

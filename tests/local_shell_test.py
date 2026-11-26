@@ -7,6 +7,7 @@ host's POSIX sh / a detected Git Bash / cmd.exe). These tests PIN that decision
   - split_command                    tokenizer flavor (backslash + quoting rules)
   - LocalTransport.run               spawn shape (argv vs shell=True, utf-8 decode)
   - shell.run_command/_blocked_reason  unparseable-command guard + REPL lexer
+  - shell.run_trigger                the same guards under a longer clock
   - PermissionEvaluator.escaped_paths  flavor comes from the WORKSPACE, so a
                                      remote (SSH) workspace tokenizes POSIX even
                                      on a host pinned to cmd
@@ -22,6 +23,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from dataclasses import replace
 
 from agent.config import Config
 from agent.core.permission import PermissionEvaluator
@@ -117,6 +119,29 @@ def test_run_command_guard() -> None:
         shell_mod._blocked_reason(cfg, "python -m json.tool", posix=True) is None,
         "posix: python -m is non-interactive",
     )
+
+
+def test_trigger_deadline() -> None:
+    # ---- 4b. trigger: every guard, and a clock of its own ----
+    #
+    # The one difference between run_command and trigger is the deadline: the
+    # session's command_timeout is a budget for a command that should be short,
+    # and trigger exists for the command whose LENGTH is the point (a build, a
+    # clone, a suite). So the same line has to fail under the first and pass
+    # under the second, with nothing else changed.
+    reset_cache(POSIX)
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = LocalWorkspace(tmp)
+        cfg = replace(Config(), command_timeout=0.5)
+        slow = "sleep 1; echo done"
+        r = shell_mod.run_command(ws, cfg, slow)
+        check(bool(r.error) and "timed out" in r.content, "run_command: the session's budget is the deadline")
+        t = shell_mod.run_trigger(ws, cfg, slow)
+        check(not t.error and "done" in t.content, "trigger: the same command outlives command_timeout")
+        check(
+            shell_mod.TRIGGER_TIMEOUT_S >= 3600,
+            "and trigger's own deadline is measured in hours, not the session's seconds",
+        )
 
 
 def test_transport_spawn() -> None:
@@ -291,6 +316,7 @@ def main() -> int:
         test_split_command()
         test_classify_cmd()
         test_run_command_guard()
+        test_trigger_deadline()
         test_transport_spawn()
         test_workspace_exec_shell()
         test_permission_flavor()

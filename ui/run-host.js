@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/run-host.ts and run `npm run build:host`.
-// source sha256: f1224dc535ec2cf391050e52b1fe6864a842f6283b5159d3a6408c220b42ca37
+// source sha256: 6b6ab9e5e0c5764a16544022966a6c4c88314e81f881cf8f7a0d5980e97498ce
 
 "use strict";
 // The host's run: every piece the loop talks to, wired once.
@@ -28,6 +28,10 @@
 //                                         and these are the numbers it enforces.
 //                                         Absent means this session imposes none.
 //     onEvent?(event),                    the page's live feed (/events)
+//     wake?(),                            "drive the turn if nothing else is"
+//                                         — what a tick asks of the session
+//                                         that owns this run (P2-3's lease);
+//                                         absent means a tick only appends.
 //     warn?(message),
 //   }) -> {start, stop, step, drive, state}
 //
@@ -60,6 +64,7 @@ const { createRun } = require("./run");
 const { createDerive } = require("./context");
 const { createCompactor } = require("./compaction");
 const { say } = require("./prompt");
+const { createClientTools } = require("./client-tools");
 function requiredFn(holder, owner, name) {
     const fn = holder && holder[name];
     if (typeof fn !== "function") {
@@ -123,6 +128,15 @@ function createRunHost(ports) {
         warn: typeof ports.warn === "function" ? ports.warn : undefined,
     });
     const derive = createDerive(session);
+    // The three tools that are the loop's own clocks (sleep, start_tick, end_tick)
+    // are answered here, not by the execution layer: they run no command and write
+    // no file, they only wait and append a line. One factory per run, so the ticker
+    // dies with the run that started it and Stop clears it with everything else.
+    const clientTools = createClientTools({
+        log: { append },
+        wake: typeof ports.wake === "function" ? ports.wake : undefined,
+        warn: typeof ports.warn === "function" ? ports.warn : undefined,
+    });
     // The byte-addressed log is one port with one shape; the loop wants the events
     // of it. Dropping the offsets here is what keeps ui/run.js free of the log's
     // addressing — it has no use for a byte offset, and a second place that
@@ -197,8 +211,27 @@ function createRunHost(ports) {
             };
         },
         // The execution layer runs the call and enforces every permission (P3): the
-        // host asks for the effect, it never performs it.
-        runTool: ({ call, signal }) => runTool({ call, signal }),
+        // host asks for the effect, it never performs it. The client's own three
+        // tools are the exception — they are clocks and one log append, which the
+        // loop answers itself (client-tools.ts) before the tool client sees the call.
+        runTool: async ({ call, signal }) => {
+            if (clientTools.has(call.name)) {
+                let args = {};
+                try {
+                    args = call.arguments ? JSON.parse(call.arguments) : {};
+                }
+                catch (_e) {
+                    return { content: `${call.name}: could not parse arguments`, isError: true, diff: "" };
+                }
+                const result = await clientTools.run(call.name, args, signal);
+                return {
+                    content: result.content,
+                    isError: Boolean(result.isError),
+                    diff: typeof result.diff === "string" ? result.diff : "",
+                };
+            }
+            return runTool({ call, signal });
+        },
         // the loop's own prose, from the same templates the Python half used; the
         // two guard notes are the only ones with slots ($max_turns, $tool)
         text: (key, vars) => say(key, vars),
@@ -248,7 +281,12 @@ function createRunHost(ports) {
     return {
         start: (task) => run.start(task),
         run: runUnified,
-        stop: () => run.stop(),
+        // Stop is the user's, not the turn's: it silences the heartbeat too, or a
+        // ticker would keep appending messages to a turn nobody is driving.
+        stop: () => {
+            clientTools.dispose();
+            return run.stop();
+        },
         step,
         drive,
         state: () => run.state(),

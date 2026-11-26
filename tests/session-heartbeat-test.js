@@ -245,6 +245,33 @@ const { startSupervisorHeartbeat } = require(path.join(ROOT, "ui", "supervisor-c
   check(sent.at(-1).body.claim_pid === process.pid,
     "a caller cannot name somebody else's process as the claim: the client is the authority for what it is");
 
+  // ---- 6) a stop the supervisor ANSWERS with "no such session" IS the release --
+  // The registered sessions belong to the supervisor PROCESS. A hop that
+  // re-bootstraps the far side therefore hands the slot's session id to a
+  // supervisor that has never heard of it, and the one honest answer left is
+  // 404 "unknown". Read as a refusal to release, that answer parked the claim
+  // forever: every later claim re-asked, got the same 404, parked again and
+  // returned nothing — the reported fix-train tab sitting at "no session there
+  // right now" while nothing was running on that machine.
+  const { supervisorSessionStop } = require(path.join(ROOT, "ui", "supervisor-client.js"));
+  let answer = null; // the status the fake supervisor replies with; null = unreachable
+  global.fetch = async () => {
+    if (answer === null) throw new Error("Failed to fetch");
+    return { ok: answer >= 200 && answer < 300, status: answer };
+  };
+  const stopAsking = async (status) => {
+    answer = status;
+    return supervisorSessionStop("http://127.0.0.1:8891", "s1");
+  };
+  check((await stopAsking(404)).ok === true,
+    "a stop answered 404 ('no such session') is the release, not a failure: the supervisor proved it holds nothing");
+  check((await stopAsking(500)).ok === false,
+    "a supervisor that refused the stop (500) did NOT release: the claim stays kept");
+  check((await stopAsking(null)).ok === false,
+    "an unreachable supervisor is doubt, never a release: its session may still be running");
+  check((await supervisorSessionStop("http://127.0.0.1:8891", "")).ok === true,
+    "a claim that names no session had nothing to release");
+
   Date.now = realNow;
   summary("session-heartbeat");
 })();

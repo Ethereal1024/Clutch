@@ -281,8 +281,13 @@ def check_the_host_declares_its_own_tool() -> None:
 
         config = Config()
         tools = build_tools(config)
-        # the component is refused whole, so the only run_command here is the host's
-        check([t.name for t in tools] == ["run_command"], "and it contributes nothing at all — not just no schema")
+        # the component is refused whole, so the only tools here are the host's own
+        # — and with no project log open the two log readers are gated out, which
+        # leaves the two command tools and the three the client answers
+        check(
+            [t.name for t in tools] == ["run_command", "trigger", "sleep", "start_tick", "end_tick"],
+            "and it contributes nothing at all — not just no schema",
+        )
         wired = tools[0]
         check(
             wired.host is not None and wired.module is None,
@@ -297,17 +302,19 @@ def check_the_host_declares_its_own_tool() -> None:
 
 
 def check_bare_host_is_chat_only() -> None:
-    """Nothing registered -> the host's whole surface is its own command.
+    """Nothing registered -> the host's whole surface is what it declares itself.
 
     The registry does not paper an absent component over: build_tools asks
     rendezvous whether the component is here, and a component that is not
-    contributes no schema at all.
+    contributes no schema at all. What is left is the two command tools
+    (run_command, trigger) and the three the CLIENT answers (sleep, start_tick,
+    end_tick); the two log readers are gated out, because no project log is open.
     """
     with isolated_host():
         check(catalog.table() == {}, "a host with no registrations drives nothing")
         check(
-            [t.name for t in build_tools(Config())] == ["run_command"],
-            "with no component installed the host offers only run_command",
+            [t.name for t in build_tools(Config())] == ["run_command", "trigger", *host.client_native_names()],
+            "with no component installed the host offers only its own tools",
         )
         check(not rendezvous.available(modules.WORKSPACE), "the workspace component is not available on a bare host")
 

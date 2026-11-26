@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/main.ts and run `npm run build:host`.
-// source sha256: 4bb34c93518ea5c2c69698195f89cfd8e6cf91dcaac31fe2873dee96e8fe0ceb
+// source sha256: 019534fde54ef07ecb0ad71692d65d0e2825f4b574f23c0931d81fe2e5659dc3
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -736,6 +736,14 @@ else {
                     (inst.base === currentBase && inst.mode === mode && inst.project === project && inst.rev === rev))) {
                 return { inst };
             }
+            // The instance is being REPLACED (new settings, base, mode or project) and
+            // is not driving. Stop it before it is dropped: its ticker (start_tick) is
+            // a timer inside that instance, and one left running would keep appending
+            // to the old slot's log and wake a loop wired to the OLD base. stop() is
+            // synchronous and writes nothing — the turn stays open on disk for the new
+            // instance to read.
+            if (inst)
+                inst.run.stop();
             try {
                 const run = await createSessionRun({
                     base: currentBase,

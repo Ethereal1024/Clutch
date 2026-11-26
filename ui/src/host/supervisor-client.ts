@@ -149,6 +149,13 @@ async function supervisorSessionStop(base, sid, { leaving = false, timeoutMs = 2
       body: JSON.stringify({ session_id: sid, leaving: !!leaving }),
       signal: ctl.signal,
     });
+    // 404 is the supervisor's own "no such session" — the same answer a
+    // heartbeat reads as gone, and the release itself: it PROVED it holds
+    // nothing of that id. A far side's registry is its own process, so a hop
+    // that re-bootstrapped the supervisor leaves every id it held unknown to
+    // the new one; read as a refusal, that answer parked the claim forever and
+    // the tab sat at "no session there right now" while nothing ran there.
+    if (r.status === 404) return { ok: true };
     return { ok: r.ok };
   } catch (e) {
     return { ok: false, error: e && e.message }; /* supervisor already gone: nothing to tell */

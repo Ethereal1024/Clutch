@@ -231,6 +231,11 @@ async function createSessionRun({
     contextWindowBytes,
     limits,
     onEvent,
+    // A tick's ask: continue the turn if nothing else is. Never a second wheel —
+    // the session's own inflight counter decides (see wakeSoon below).
+    wake: () => {
+      void wakeSoon();
+    },
     warn: typeof warn === "function" ? warn : undefined,
   });
 
@@ -455,6 +460,33 @@ async function createSessionRun({
     } catch (e) {
       // the marker is a courtesy to a native service, never the turn's business
       say(`could not report ${now ? "busy" : "idle"}: ${(e && e.message) || e}`);
+    }
+  }
+
+  // A tick's ask (client-tools.ts's `wake`): continue the turn if nothing else
+  // is. Never a second wheel — a step already in flight has its next derive
+  // coming, and that derive reads the tick's own line. With nothing in flight
+  // the appended message IS a durable open turn, so run("") drives it; `start`
+  // would refuse an empty task and refuses from a non-idle turn anyway. The
+  // phase is read first because a drive that finished between the tick's append
+  // and this call leaves nothing open, and run("") on an idle log is a
+  // TypeError, not a turn. The lease is taken by run() like any other drive, so
+  // a session that has lost its slot answers 409 and this is a warning, not a
+  // failed turn.
+  async function wakeSoon() {
+    if (inflight > 0) return;
+    let now;
+    try {
+      now = await loop.state();
+    } catch (e) {
+      say(`tick: could not read the turn: ${(e && e.message) || e}`);
+      return;
+    }
+    if (!now || now.phase === "idle") return;
+    try {
+      await run("");
+    } catch (e) {
+      say(`tick: could not continue the turn: ${(e && e.message) || e}`);
     }
   }
 

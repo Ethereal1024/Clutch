@@ -127,21 +127,33 @@ def test_record_release_reads_log_not_busy():
         def __init__(self, log):
             self.log = log
             self.path = Path("/tmp/test.clc")
-    
+            self.read_only = False  # a claim cannot be taken on a read-only open
+
     state = RunState()
     state.project = MockProject(log)
-    # state.busy is False (lease expired or never claimed)
-    # but log shows open turn
-    assert not state.busy, "Setup: state.busy should be False"
-    
-    # Before fix, this would return early because state.busy is False
-    # After fix, it should write a released final because has_open_turn is True
-    record_release(state)
-    
-    events = log.events()
-    finals = [e for e in events if e.type == "final"]
-    assert len(finals) == 1, f"Should have written released final (got {len(finals)} finals)"
-    assert finals[0].status == "released", f"Final should be 'released' (got '{finals[0].status}')"
+    # The record of a release is the CLAIM HOLDER's to write (record_release
+    # refuses a session that is merely looking at somebody else's turn), so the
+    # fixture has to be the holder. The lease is taken and already expired
+    # (`ttl_s=0`): the claim stands on the file, `busy` is False — which is the
+    # very state this test is about, a lease the host never renewed because it
+    # died, and a log that still holds an open turn.
+    assert state.claim_run(str(state.project.path), 0.0) == "", "Setup: this session takes the claim"
+    try:
+        assert not state.busy, "Setup: state.busy should be False (the lease has lapsed)"
+        assert state.owns_claim(str(state.project.path)), "Setup: the claim itself is still held"
+
+        # Before fix, this would return early because state.busy is False
+        # After fix, it should write a released final because has_open_turn is True
+        record_release(state)
+
+        events = log.events()
+        finals = [e for e in events if e.type == "final"]
+        assert len(finals) == 1, f"Should have written released final (got {len(finals)} finals)"
+        assert finals[0].status == "released", f"Final should be 'released' (got '{finals[0].status}')"
+    finally:
+        # hand the file back: a lock left held would make the next run of this
+        # suite (and the session that opens the same path) see a foreign claim
+        state.release_run(str(state.project.path))
     print("✓ record_release correctly checks log instead of state.busy")
 
 

@@ -803,6 +803,13 @@ if (!app.requestSingleInstanceLock()) {
       ) {
         return { inst };
       }
+      // The instance is being REPLACED (new settings, base, mode or project) and
+      // is not driving. Stop it before it is dropped: its ticker (start_tick) is
+      // a timer inside that instance, and one left running would keep appending
+      // to the old slot's log and wake a loop wired to the OLD base. stop() is
+      // synchronous and writes nothing — the turn stays open on disk for the new
+      // instance to read.
+      if (inst) inst.run.stop();
       try {
         const run = await createSessionRun({
           base: currentBase,

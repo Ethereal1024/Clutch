@@ -37,6 +37,9 @@
 // 18. A release the session disowns ("I was not holding it") is said once.
 // 19. A failure inside the loop gives the slot back instead of leaving the
 //     session busy for the rest of the ttl.
+// 24. A tick is a TURN: start_tick is answered on the client, appends a user
+//     message every N seconds, and wakes the session to drive it — proven by a
+//     model that is asked a third time with no user behind the request.
 //
 // Run: node tests/run-session.test.js
 "use strict";
@@ -312,6 +315,35 @@ function fakeSession(opts = {}) {
   };
 }
 
+// ---- a provider that answers a scripted turn of OpenAI chat deltas ----------
+//
+// One SSE body per request, in the order they arrive: the script is a list of
+// turns ([chunk, ...]), and the LAST one answers any further request (a loop
+// that asks a fourth time is the test's own bug, and it should not hang the
+// runner while it does). Used by the sections where the model is not just a
+// thing that is configured but the thing that has to SPEAK.
+function fakeModel(turns) {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      let body = null;
+      try {
+        body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      } catch (e) {
+        /* a malformed body is the client's bug; the script is served anyway */
+      }
+      requests.push({ url: req.url, body });
+      const turn = turns[Math.min(requests.length - 1, turns.length - 1)] || [];
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      for (const chunk of turn) res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  return { requests, server };
+}
+
 function listen(server) {
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => resolve(server.address().port));
@@ -324,7 +356,10 @@ function close(server) {
 
 // Stub LLM credentials so createLlmClient does not throw. model comes from
 // settings.json, so we point HOME at a temp dir with a .clutch/settings.json.
-function stubEnv(model, protocol, effort) {
+// `upstream` names a REAL provider for the sections that need the model to
+// answer (a tick has to be driven by a turn); the default is a dead port, so a
+// section that does not pass one cannot reach a model by accident.
+function stubEnv(model, protocol, effort, upstream) {
   const os = require("os");
   const fs = require("fs");
   const path = require("path");
@@ -344,7 +379,7 @@ function stubEnv(model, protocol, effort) {
     })
   );
   process.env.HOME = tmp;
-  process.env.CLUTCH_LLM_UPSTREAM = "http://127.0.0.1:1";
+  process.env.CLUTCH_LLM_UPSTREAM = upstream || "http://127.0.0.1:1";
   process.env.CLUTCH_API_KEY = "test-key";
   return () => {
     process.env.HOME = savedHome;
@@ -1198,6 +1233,97 @@ async function main() {
       gate.release(); // an un-answered parked request would keep close() waiting
       restore();
       await close(fake.server);
+    }
+  }
+
+  // 24. A tick is a TURN, not a log line. start_tick is answered on the client
+  //     (no exec round trip), it appends a user message every N seconds, and it
+  //     asks the session to drive — which is the only reason the clock lives on
+  //     this side at all. The model is what proves it: turn 1 asks for the clock,
+  //     turn 2 closes the user's turn (the loop is idle, the ticker is not), and
+  //     turn 3 is one nobody asked for — the tick opened it.
+  {
+    const model = fakeModel([
+      // turn 1: the model asks for the clock
+      [
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_tick",
+                    type: "function",
+                    function: { name: "start_tick", arguments: '{"seconds":1}' },
+                  },
+                ],
+              },
+              finish_reason: null,
+            },
+          ],
+        },
+        { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+      ],
+      // turn 2: the answer that closes the user's turn
+      [
+        { choices: [{ delta: { content: "waiting" }, finish_reason: null }] },
+        { choices: [{ delta: {}, finish_reason: "stop" }] },
+      ],
+      // turn 3: the tick's own — unprompted, after the turn was already closed
+      [
+        { choices: [{ delta: { content: "still here" }, finish_reason: null }] },
+        { choices: [{ delta: {}, finish_reason: "stop" }] },
+      ],
+    ]);
+    const mport = await listen(model.server);
+    const restore = stubEnv("test-model", "chat", "", `http://127.0.0.1:${mport}`);
+    const fake = fakeSession({
+      sessionBody: { mode: "work", shell: "posix-sh", components: "", contextWindowBytes: 500_000, memory: { path: "/p", bytes: 1 } },
+    });
+    const port = await listen(fake.server);
+    const ticks = () =>
+      fake.logLines.filter(
+        (l) => l.event && l.event.type === "user_message" && /^\[tick: every 1s, at /.test(l.event.content || "")
+      );
+    try {
+      const run = await createSessionRun({ base: `http://127.0.0.1:${port}`, project: "/p" });
+      await run.start("watch the build");
+      const out = await run.drive();
+      check(out && out.did === "final", `the tool call closed the user's turn (got ${out && out.did})`);
+      check(ticks().length === 0, "nothing has ticked yet: the clock starts with the call, not before it");
+      const execs = fake.requests.filter((r) => r.method === "POST" && r.url === "/api/exec");
+      check(execs.length === 0, `start_tick never reached the exec endpoint (got ${execs.length} calls)`);
+
+      // The ticker is still running on a closed, idle turn. Its next beat is a
+      // durable line AND a request to drive.
+      for (let i = 0; i < 500 && ticks().length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+      check(ticks().length === 1, `the ticker appended its line once (got ${ticks().length})`);
+
+      for (let i = 0; i < 500 && model.requests.length < 3; i++) await new Promise((r) => setTimeout(r, 10));
+      check(
+        model.requests.length >= 3,
+        `the tick woke the loop: the model was asked again with no user (got ${model.requests.length} calls)`
+      );
+      const asked = JSON.stringify((model.requests[2] && model.requests[2].body) || {});
+      check(asked.includes("[tick: every 1s"), "and the tick's own line is what it was asked about");
+
+      const lineAt = () => fake.logLines.indexOf(ticks()[0]);
+      const closed = () =>
+        ticks().length > 0 && fake.logLines.slice(lineAt() + 1).some((l) => l.event && l.event.type === "final");
+      for (let i = 0; i < 500 && !closed(); i++) await new Promise((r) => setTimeout(r, 10));
+      check(closed(), "the tick's turn closed with its own final");
+
+      // ...and Stop is what ends the heartbeat: the run that owns the clock is
+      // gone, so nothing may append into it afterwards.
+      const before = ticks().length;
+      run.stop();
+      await new Promise((r) => setTimeout(r, 1200));
+      check(ticks().length === before, `Stop silences the ticker (got ${ticks().length - before} more lines)`);
+    } finally {
+      restore();
+      await close(fake.server);
+      await close(model.server);
     }
   }
 

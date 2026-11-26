@@ -167,14 +167,21 @@ function surfaceOf(declarations, more) {
 const names = (tools) => tools.names();
 
 function behavior() {
-  // ---- the host's own three tools, and the gate that holds two of them back --
+  // The host's surface with the `project` gate shut: run_command and trigger
+  // (the execution layer's), then the three the CLIENT answers (sleep,
+  // start_tick, end_tick — dispatched by ui/src/host/client-tools.ts, offered
+  // from the same declaration table). Every case about what a COMPONENT
+  // contributes starts from this list, because these five are on every surface.
+  const BASE = ["run_command", "trigger", "sleep", "start_tick", "end_tick"];
+
+  // ---- the host's own seven tools, and the gate that holds two of them back --
   const empty = createTools({ mode: "work" });
   check(
-    eq(names(empty), ["run_command"]),
-    "host: with no project open the host offers only run_command"
+    eq(names(empty), BASE),
+    "host: with no project open the host offers run_command, trigger and the client's three"
   );
   const open = createTools({ mode: "work", project: true });
-  check(eq(names(open), HOST_TOOL_NAMES), "host: an open project offers the host's three tools, host tools first");
+  check(eq(names(open), HOST_TOOL_NAMES), "host: an open project offers the host's seven tools, host tools first");
   check(
     eq(open.names(), HOST_TOOL_NAMES) && HOST_TOOL_NAMES[0] === "run_command",
     "host: the host's own tools lead the surface"
@@ -183,11 +190,11 @@ function behavior() {
   // ---- a component's tool is offered only when this machine can drive it -----
   const one = [manifest("c-avail", {})];
   check(
-    eq(names(surfaceOf(one, { available: { "c-avail": false } })), ["run_command"]),
+    eq(names(surfaceOf(one, { available: { "c-avail": false } })), BASE),
     "available: a component whose code is not here contributes nothing"
   );
   check(
-    eq(names(surfaceOf(one)), ["run_command", "c-avail_tool"]),
+    eq(names(surfaceOf(one)), [...BASE, "c-avail_tool"]),
     "available: a drivable component's tool is offered after the host's"
   );
 
@@ -204,9 +211,12 @@ function behavior() {
       ],
     },
   ];
-  check(eq(names(surfaceOf(moded)), ["run_command", "c_mode_work", "c_mode_any"]), "mode: work keeps work and mode-less tools");
   check(
-    eq(names(surfaceOf(moded, { mode: "chat" })), ["run_command", "c-mode_tool", "c_mode_chat", "c_mode_any"]),
+    eq(names(surfaceOf(moded)), [...BASE, "c_mode_work", "c_mode_any"]),
+    "mode: work keeps work and mode-less tools"
+  );
+  check(
+    eq(names(surfaceOf(moded, { mode: "chat" })), [...BASE, "c-mode_tool", "c_mode_chat", "c_mode_any"]),
     "mode: chat keeps chat and mode-less tools"
   );
 
@@ -221,19 +231,19 @@ function behavior() {
     },
   ];
   check(
-    eq(names(surfaceOf(gated)), ["run_command"]),
+    eq(names(surfaceOf(gated)), BASE),
     "gate: a skills-gated tool waits for an answered fact, and a project-gated one for a log"
   );
   check(
-    eq(names(surfaceOf(gated, { facts: { skills: ["alpha"] } })), ["run_command", "c-gated_tool"]),
+    eq(names(surfaceOf(gated, { facts: { skills: ["alpha"] } })), [...BASE, "c-gated_tool"]),
     "gate: an answered skills fact opens the skills gate"
   );
   check(
-    eq(names(surfaceOf(gated, { project: true })), ["run_command", "grep_memory", "read_memory", "c_project_tool"]),
+    eq(names(surfaceOf(gated, { project: true })), [...HOST_TOOL_NAMES, "c_project_tool"]),
     "gate: an open project opens the project gate"
   );
   check(
-    eq(names(surfaceOf(gated, { facts: { skills: [] } })), ["run_command"]),
+    eq(names(surfaceOf(gated, { facts: { skills: [] } })), BASE),
     "gate: an empty skill list is fail-CLOSED (nothing to pick from, never a guess)"
   );
 
@@ -241,7 +251,7 @@ function behavior() {
   const badAccess = [manifest("c-bad-access", { access: "telepathy" })];
   let warned = [];
   const badAccessTools = surfaceOf(badAccess, { warn: (m) => warned.push(m) });
-  check(eq(names(badAccessTools), ["run_command"]), "refuse: an unknown access word withholds the component's tools");
+  check(eq(names(badAccessTools), BASE), "refuse: an unknown access word withholds the component's tools");
   check(
     badAccessTools.diagnostics().some((d) => d.fatal && d.message.includes("unknown access 'telepathy'")),
     "refuse: the diagnostic names the unknown access word"
@@ -260,7 +270,7 @@ function behavior() {
   // names the word that caused it.
   function refused(label, declaration, reason) {
     const tools = surfaceOf([declaration]);
-    check(eq(names(tools), ["run_command"]), `${label}: withheld`);
+    check(eq(names(tools), BASE), `${label}: withheld`);
     check(
       tools.diagnostics().some((d) => d.fatal && reason.test(d.message)),
       `${label}: the reason names the word`
@@ -317,7 +327,7 @@ function behavior() {
   // ---- a cosmetic word is not fatal: the tool works, it looks plainer ------
   const cosmetic = surfaceOf([manifest("c-cosmetic", { ui: { sparkle: true, chip: "summary" } })]);
   check(
-    eq(names(cosmetic), ["run_command", "c-cosmetic_tool"]),
+    eq(names(cosmetic), [...BASE, "c-cosmetic_tool"]),
     "cosmetic: an unknown ui key does not withhold the tool"
   );
   const cosmeticUi = cosmetic.ui("c-cosmetic_tool");

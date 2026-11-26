@@ -249,7 +249,24 @@ FACILITIES: tuple[str, ...] = ("python", "posix-shell", "curl")
 # already means something by is not a component's to redefine (see
 # component_diagnostics). The declarations behind the names live in
 # agent/tools/host.py; registry._check_vocabulary keeps the two lists equal.
-HOST_TOOL_NAMES: tuple[str, ...] = ("run_command", "grep_memory", "read_memory")
+#
+# The last three are the CLIENT's tools (tools/host.py `_CLIENT_NATIVE_DECLARATIONS`):
+# sleep, start_tick and end_tick are answered by the client host's own
+# dispatcher, never by a statement this layer runs, and the two reasons are the
+# same as the four above: the model must be told the tool exists, and no
+# component may publish the name. The name is reserved here; the implementation
+# is the client's (ui/src/host/client-tools.ts), so a call that arrives at the
+# exec endpoint for one of them is answered with a refusal rather than run
+# (registry.ToolRegistry._invoke).
+HOST_TOOL_NAMES: tuple[str, ...] = (
+    "run_command",
+    "trigger",
+    "grep_memory",
+    "read_memory",
+    "sleep",
+    "start_tick",
+    "end_tick",
+)
 # The names the host declares for ITSELF again when the session's root is on
 # another machine (the ssh backend: tools/host.py `_REMOTE_DECLARATIONS`). These
 # are NOT reserved the way HOST_TOOL_NAMES are: the same four names are what

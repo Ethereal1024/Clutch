@@ -178,15 +178,25 @@ export function rememberedMachine(): Machine | null {
 // it — so it cannot ask the host.
 //
 // Two facts, both of which a dial would change: the tab HAS a base from this life
-// (it was claimed here, so the hop was serving it), and this window is on that
-// machine (`clutch_ssh_connected`, which connectTabMachine sets on a landing and
-// a Disconnect or a move to another host clears — the same standing intent
-// prepareTabMachine reads). A tab that names no machine never dials at all.
+// (it was claimed here, so the hop was serving it), and this window holds a live
+// hop for that machine (`clutch_ssh_connected`, which connectTabMachine sets on a
+// landing and a Disconnect clears; `clutch_ssh_connections`, the full list of
+// machines with a live hop). A tab that names no machine never dials at all.
+//
+// The check scans the WHOLE connections list, not just its first entry. With one
+// hop per machine (multi-hop), several endpoints can be live at the same time.
+// `upsertConn` pushes the newest machine to the front, so `rememberedMachine()`
+// (first-entry only) stopped matching tab A the moment tab B connected — the
+// reported "every switch back to a remote tab triggers a full reload".
 export function hopUpFor(tab: Tab): boolean {
   if (!tab || !tab.machine) return true;
   if (!tab.base) return false; // never claimed in this life: that claim may dial
   try {
     if (localStorage.getItem("clutch_ssh_connected") !== "1") return false;
+    const list = JSON.parse(localStorage.getItem("clutch_ssh_connections") || "[]");
+    if (Array.isArray(list)) {
+      return list.some((c) => c && sameMachine(asMachine(c), tab.machine));
+    }
   } catch (e) {
     return false; // a page that forbids storage cannot promise a hop is up
   }

@@ -1,6 +1,6 @@
 """The host's own tools, and why they are not components'.
 
-With nothing installed the host's whole surface is its own three tools, and each
+With nothing installed the host's whole surface is its own four tools, and each
 of them is here for a reason a component could not be:
 
   * `run_command` — the loop's escape hatch, the way anything gets looked at on a
@@ -8,6 +8,13 @@ of them is here for a reason a component could not be:
     that declared it could only be installed by first running a command, so the
     host would have nothing to install it with. It is the ONE declared bootstrap
     exception.
+  * `trigger` — the same command text, waited on. `run_command` answers inside
+    config.command_timeout (30 s) because it is the loop's look-around tool; a
+    build or a training run outlives that, and the model's only other way to wait
+    is to poll, which spends a model call per look. A component could not declare
+    it: a statement is run with the same command budget (that is the number the
+    registry hands `Statement.execute`), so a declaration promising a longer wait
+    would be a promise its own runner would break. The clock is the host's.
   * `grep_memory` / `read_memory` — the readers of the project's own log (recall.py).
     The file they read is the one file this host writes, protects, and already
     holds open: the loop appends to its bytes, and reading it back means using the
@@ -34,7 +41,7 @@ may take those names) but in catalog.REMOTE_TOOL_NAMES (a component's copies of
 these are dropped only when the host is holding them — registry.build_tools).
 
 `declarations(config, remote=...)` is therefore what the session's ROOT decides:
-the three bootstrap tools always, plus the four workspace tools when the root is
+the four bootstrap tools always, plus the four workspace tools when the root is
 a workspace this host can only reach through a shell.
 
 What a component's declaration does not have, and these must, is the
@@ -45,7 +52,7 @@ another — and what decides whether each may run stays here too
 protected-path guard, the timeout, truncation and Stop, all of them the host's).
 A component would only re-say "run this" while every decision stayed in the host.
 
-The three in `_DECLARATIONS` are also the names no component may take: a component
+The four in `_DECLARATIONS` are also the names no component may take: a component
 that publishes one of them is refused where every other unreadable word is refused
 (catalog.component_diagnostics), `names()` is the vocabulary entry
 catalog.HOST_TOOL_NAMES, and registry._check_vocabulary asserts at import that
@@ -88,12 +95,17 @@ class Declaration(NamedTuple):
     session's own project log, and the log is not an argument the model may pass
     — the registry hands the open's log in (registry.ToolRegistry._invoke), so
     the model can never point the reader at a file of its choosing.
+
+    `client_native` marks a tool that runs on the client, not in the execution
+    layer. The client dispatch path recognizes this flag and runs the tool
+    directly without calling /api/exec. The implementation is None for these.
     """
 
     name: str
     declaration: Mapping[str, Any]
     implementation: HostImpl
     needs_log: bool = False
+    client_native: bool = False
 
 
 # The host's own tools, as data. A declaration here may name any word the host's
@@ -111,6 +123,24 @@ _DECLARATIONS: tuple[Declaration, ...] = (
             "ui": {"preview": "command"},
         },
         shell.run_command,
+    ),
+    Declaration(
+        "trigger",
+        {
+            "parameters": {
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "shell command string to run; the loop waits for it to finish "
+                        "(up to six hours) instead of the command tool's short budget",
+                    },
+                },
+                "required": ["command"],
+            },
+            "access": "command",
+            "ui": {"preview": "command", "summary": "trigger {command}"},
+        },
+        shell.run_trigger,
     ),
     Declaration(
         "grep_memory",
@@ -175,12 +205,106 @@ _DECLARATIONS: tuple[Declaration, ...] = (
     ),
 )
 
+# The tools whose implementation is the CLIENT's, not the execution layer's.
+# A `sleep` that suspends the loop, and a ticker (`start_tick`/`end_tick`) that
+# pokes it awake: neither is a shell statement, neither writes anything, and
+# neither has any business in a permission engine — what they do is wait and
+# append to the log the client already owns. The declaration travels to the
+# model exactly like the host's own (same parser, same diagnostics, same prose
+# convention), but the CALL is answered by the client host's dispatcher
+# (ui/src/host/client-tools.ts) without a POST /api/exec round trip, and a call
+# for one of these names that reaches the exec endpoint anyway is refused there
+# rather than run (registry.ToolRegistry._invoke).
+#
+# `trigger` used to live here and does not any more: it runs a command, so it
+# belongs to the layer that owns the command policy and the transport clock —
+# see its entry in `_DECLARATIONS` and tools/shell.py:run_trigger.
+_CLIENT_NATIVE_DECLARATIONS: tuple[Declaration, ...] = (
+    Declaration(
+        "sleep",
+        {
+            "parameters": {
+                "properties": {
+                    "seconds": {
+                        "type": "number",
+                        "description": "how long to suspend the loop, in seconds (at most 3600; "
+                        "0 is refused — use start_tick for a heartbeat)",
+                    },
+                },
+                "required": ["seconds"],
+            },
+            "access": "",
+            "ui": {
+                "group": "time",
+                "form": "row",
+                "summary": "sleep {seconds}s",
+                "collapse": "never",
+                "chrome": "quiet",
+            },
+        },
+        None,
+        client_native=True,
+    ),
+    Declaration(
+        "start_tick",
+        {
+            "parameters": {
+                "properties": {
+                    "seconds": {
+                        "type": "number",
+                        "description": "seconds between ticks (at least 1)",
+                    },
+                },
+                "required": ["seconds"],
+            },
+            "access": "",
+            "ui": {
+                "group": "time",
+                "form": "row",
+                "summary": "start tick every {seconds}s",
+                "collapse": "never",
+                "chrome": "quiet",
+            },
+        },
+        None,
+        client_native=True,
+    ),
+    Declaration(
+        "end_tick",
+        {
+            "parameters": {
+                "properties": {},
+                "required": [],
+            },
+            "access": "",
+            "ui": {
+                "group": "time",
+                "form": "row",
+                "summary": "end tick",
+                "collapse": "never",
+                "chrome": "quiet",
+            },
+        },
+        None,
+        client_native=True,
+    ),
+)
+
+
+def client_native_names() -> tuple[str, ...]:
+    """The tool names whose implementation is the client's own dispatcher, not
+    the execution layer's. These are offered to the model alongside the host's
+    own four; the names are reserved exactly as HOST_TOOL_NAMES are (no
+    component may publish them)."""
+    return tuple(d.name for d in _CLIENT_NATIVE_DECLARATIONS)
+
 
 def names() -> tuple[str, ...]:
     """The tool names the host declares for itself — the vocabulary of the
     bootstrap exception (catalog.HOST_TOOL_NAMES), and the names no component may
-    publish."""
-    return tuple(d.name for d in _DECLARATIONS)
+    publish. Client-native tools are part of the same reserved surface: a
+    component publishing `sleep` would be two implementations of one promise."""
+    return tuple(d.name for d in _DECLARATIONS + _CLIENT_NATIVE_DECLARATIONS)
 
 
 # The four workspace tools, for the session whose root is another machine's (see
@@ -327,7 +451,7 @@ def declarations(config: Config, *, remote: bool = False) -> tuple[Declaration, 
     component carries its own instead (`Component.prompt`).
     """
     chat = config.mode == "chat"
-    declared = _DECLARATIONS + (_REMOTE_DECLARATIONS if remote else ())
+    declared = _DECLARATIONS + _CLIENT_NATIVE_DECLARATIONS + (_REMOTE_DECLARATIONS if remote else ())
     return tuple(
         d._replace(declaration={"name": d.name, "description": render(_prose(d.name, chat)), **d.declaration})
         for d in declared
@@ -337,13 +461,16 @@ def declarations(config: Config, *, remote: bool = False) -> tuple[Declaration, 
 def _prose(name: str, chat: bool) -> str:
     """Which of the host's prompt files carries one tool's model-facing text.
 
-    The three bootstrap tools have a work and a chat wording, because the same
-    call means something else in each mode (a command's read-only classifier, the
-    log readers' scope). The four workspace tools do not: `read_file` says the
-    same thing in chat and in work, and the writers are not offered in chat at all
-    (`modes: ["work"]`), so there is one file for each and no `_chat` twin to keep
-    in sync.
+    The four bootstrap tools (`run_command`, `trigger`, and the two log readers)
+    have a work and a chat wording, because the same call means something else in
+    each mode (a command's read-only classifier, the log readers' scope). The four
+    workspace tools do not: `read_file` says the same thing in chat and in work,
+    and the writers are not offered in chat at all (`modes: ["work"]`), so there is
+    one file for each and no `_chat` twin to keep in sync.
+
+    Client-native tools (sleep, start_tick, end_tick) have one wording: they are
+    not conditional on mode and have one `.md` file each.
     """
-    if name in remote_names():
+    if name in remote_names() or name in client_native_names():
         return f"tools/{name}.md"
     return f"tools/{name}_chat.md" if chat else f"tools/{name}.md"

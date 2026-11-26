@@ -207,7 +207,50 @@ def classify_command(command: str, posix: bool = True) -> tuple[str, str]:
     return "unknown", f"'{name}' cannot be proven read-only"
 
 
+# How long `trigger` waits for the command it was given, in seconds.
+#
+# `run_command` is bounded by config.command_timeout (30 s by default) because it
+# is the loop's look-around tool: a command that outlives that budget is a
+# command the model should have started differently. `trigger` exists for the
+# opposite case — a build, a training run, a test suite whose length IS the
+# point — so the budget has to be the command's own, not the loop's.
+#
+# Not "unbounded", for three reasons that are all mechanical: the transport
+# computes a deadline (workspace.run), the remote one sends it in milliseconds
+# (int(timeout * 1000), so inf would raise), and a session must never be wedged
+# forever by a command that never ends. Six hours is a long build and a short
+# eternity; Stop is the way out of a real hang, and this is the backstop.
+TRIGGER_TIMEOUT_S = 6 * 60 * 60.0
+
+
 def run_command(workspace: Workspace, config: Config, command: str, cancel: threading.Event | None = None) -> Envelope:
+    """The loop's command tool: config.command_timeout is its budget."""
+    return _run(workspace, config, command, config.command_timeout, cancel=cancel)
+
+
+def run_trigger(workspace: Workspace, config: Config, command: str, cancel: threading.Event | None = None) -> Envelope:
+    """`run_command` with a deadline for a command whose length is the point.
+
+    Every guard is shared — the interactive-command block, chat mode's
+    read-only classifier, the escape/protected-path check, the python syntax
+    pre-check, Stop — because a trigger is a command this layer runs, judged by
+    this layer's policy exactly like any other. What is its own is the clock
+    (TRIGGER_TIMEOUT_S), and that is what the model waits on: this call does not
+    answer until the command has, so the loop makes no model call while it runs.
+    """
+    return _run(workspace, config, command, TRIGGER_TIMEOUT_S, cancel=cancel)
+
+
+def _run(
+    workspace: Workspace,
+    config: Config,
+    command: str,
+    timeout: float,
+    *,
+    cancel: threading.Event | None = None,
+) -> Envelope:
+    """One command, run under every guard this layer has, with `timeout` as its
+    deadline (run_command's config value, trigger's own far-out one)."""
     # the flavor of the shell that will PARSE this text: local host's decision
     # for local workspaces, always POSIX for a remote (SSH) workspace
     posix = workspace.exec_shell().posix
@@ -256,10 +299,10 @@ def run_command(workspace: Workspace, config: Config, command: str, cancel: thre
                 return Envelope(f"ERROR: {err}", error=True)
 
     try:
-        r = workspace.run(command, config.command_timeout, cancel=cancel)
+        r = workspace.run(command, timeout, cancel=cancel)
     except TransportError as e:
         # one mapping, shared with the statement layer (transport.failure_envelope)
-        return failure_envelope(e, timeout_seconds=config.command_timeout)
+        return failure_envelope(e, timeout_seconds=timeout)
     except Exception as e:  # noqa: BLE001 -- tool boundary: report to model
         return Envelope(render("errors/execution_failed.md", error=e), error=True)
 

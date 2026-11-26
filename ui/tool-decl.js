@@ -1,12 +1,12 @@
 // GENERATED FILE — do not edit; edit src/host/tool-decl.ts and run `npm run build:host`.
-// source sha256: 33949bce54ea8951fcdd115e35d12ebbb3e8c03670ad988eca87c6f349d58e78
+// source sha256: e04b358a67f0e851cd25edb9d0b14f297683a47f49be3ce43b61b039f7bb06f5
 
 "use strict";
 // The model-facing tool surface, derived HERE (host side), from declarations.
 //
 // What the model may call, what each call looks like in the page, and which
 // argument of it named a file are three readings of ONE thing: the declaration a
-// component ships in its own component.json (plus the three the host declares for
+// component ships in its own component.json (plus the seven the host declares for
 // itself, agent/tools/host.py). This module is that reading — the host's, on the
 // user's own machine — so the session machine is not asked what a tool is, only
 // to run a call (POST /api/exec) and to keep the log (P2).
@@ -96,7 +96,8 @@ const FACILITIES = ["python", "posix-shell", "curl"];
 // that still carries one is refused by name, because reading it whichever way
 // this host can guess would run a statement on a machine its author did not mean.
 const RETIRED_WORDS = ["interface", "runs_on"];
-// The host's own three tools (agent/tools/host.py). They are declarations like a
+// The host's own four execution tools (agent/tools/host.py) — the ones this
+// machine's execution layer performs. They are declarations like a
 // component's — same shape, same parser, same diagnostics — and they are here
 // because they are the host's, not a component's; their model-facing text is the
 // host's own prose file. `host: true` is the one field a component's declaration
@@ -111,6 +112,25 @@ const HOST_DECLARATIONS = [
         },
         access: "command",
         ui: { preview: "command" },
+        host: true,
+    },
+    {
+        // The same command text, waited on: `host: true` like run_command, because
+        // the execution layer is what runs it (agent/tools/shell.py:run_trigger) —
+        // it is host code with a longer clock, not a client-side tool.
+        name: "trigger",
+        parameters: {
+            properties: {
+                command: {
+                    type: "string",
+                    description: "shell command string to run; the loop waits for it to finish (up to six hours) " +
+                        "instead of the command tool's short budget",
+                },
+            },
+            required: ["command"],
+        },
+        access: "command",
+        ui: { preview: "command", summary: "trigger {command}" },
         host: true,
     },
     {
@@ -161,7 +181,62 @@ const HOST_DECLARATIONS = [
         host: true,
     },
 ];
-const HOST_TOOL_NAMES = HOST_DECLARATIONS.map((d) => d.name);
+// The three tools the CLIENT answers (agent/tools/host.py
+// `_CLIENT_NATIVE_DECLARATIONS`, same data). They are declared here, on the
+// client, because that is where they run: the loop dispatches them itself
+// (ui/src/host/client-tools.ts) and never asks the execution layer, so this is
+// the only place their schema can come from. They are offered exactly like the
+// host's own above — same parser, same diagnostics, same prose convention — and
+// their names are reserved the same way (HOST_TOOL_NAMES below), because a
+// component publishing `sleep` would be two implementations of one promise.
+//
+// They carry no `host: true`: that flag says "the implementation is host code,
+// not a statement", and the two derived UI facts read from it (a mutating call)
+// would then call `sleep` a write. The implementation is the client's, and it
+// mutates nothing.
+const CLIENT_NATIVE_DECLARATIONS = [
+    {
+        name: "sleep",
+        parameters: {
+            properties: {
+                seconds: {
+                    type: "number",
+                    description: "how long to suspend the loop, in seconds (at most 3600; 0 is refused — use start_tick for a heartbeat)",
+                },
+            },
+            required: ["seconds"],
+        },
+        access: "",
+        ui: { group: "time", form: "row", summary: "sleep {seconds}s", collapse: "never", chrome: "quiet" },
+    },
+    {
+        name: "start_tick",
+        parameters: {
+            properties: { seconds: { type: "number", description: "seconds between ticks (at least 1)" } },
+            required: ["seconds"],
+        },
+        access: "",
+        ui: {
+            group: "time",
+            form: "row",
+            summary: "start tick every {seconds}s",
+            collapse: "never",
+            chrome: "quiet",
+        },
+    },
+    {
+        name: "end_tick",
+        parameters: { properties: {}, required: [] },
+        access: "",
+        ui: { group: "time", form: "row", summary: "end tick", collapse: "never", chrome: "quiet" },
+    },
+];
+// The host's whole own surface, in the order the model sees it: the four
+// bootstrap tools, then the three the client answers. A session always has all
+// seven (the log readers' `project` gate is the only filter).
+const HOST_DECLARATIONS_ALL = HOST_DECLARATIONS.concat(CLIENT_NATIVE_DECLARATIONS);
+const HOST_TOOL_NAMES = HOST_DECLARATIONS_ALL.map((d) => d.name);
+const CLIENT_NATIVE_TOOL_NAMES = CLIENT_NATIVE_DECLARATIONS.map((d) => d.name);
 // The four file tools, for the session whose ROOT is another machine's
 // (agent/tools/host.py `_REMOTE_DECLARATIONS`, same data). There is no daemon on
 // the far side to serve them — an sshd shell and nothing else — so the host
@@ -274,8 +349,11 @@ const REMOTE_TOOL_NAMES = REMOTE_DECLARATIONS.map((d) => d.name);
 // The four file tools read ONE file in both modes, like their Python half: a read
 // means the same thing in chat and in work, and the two writers are not offered in
 // chat at all (`modes: ["work"]`), so there is no `_chat` twin to keep in sync.
+// The client's three say the same thing in both modes for the same reason, so they
+// are one file each too.
 function hostProse(name, mode) {
-    const file = mode === "chat" && !REMOTE_TOOL_NAMES.includes(name) ? `${name}_chat.md` : `${name}.md`;
+    const single = REMOTE_TOOL_NAMES.includes(name) || CLIENT_NATIVE_TOOL_NAMES.includes(name);
+    const file = mode === "chat" && !single ? `${name}_chat.md` : `${name}.md`;
     if (file !== path.basename(file))
         throw new TypeError(`tool-decl: "${file}" is not a prose file name`);
     return fs.readFileSync(path.join(__dirname, "prompts", "tools", file), "utf8");
@@ -420,7 +498,7 @@ function refine(known, declared, data) {
 }
 // Every registration, merged by name, in first-seen order — the components this
 // host may drive at all. There is no base catalog: with nothing registered the
-// table is empty and the host's own three tools are its whole surface.
+// table is empty and the host's own seven tools are its whole surface.
 function tableOf(declarations) {
     const out = new Map();
     for (const data of declarations || []) {
@@ -720,10 +798,13 @@ function createTools(input) {
     // The host's own tools come first, and are always here: a word the host itself
     // cannot honor is a host bug (its own declaration is data, so it is checked like
     // any other), and there is nothing for the model to fall back on if it is wrong.
-    // In a session whose root is another machine's, the four file tools are the
-    // host's too (REMOTE_DECLARATIONS): there is no daemon over there to declare
-    // them, and the execution layer implements them.
-    for (const declared of remote ? HOST_DECLARATIONS.concat(REMOTE_DECLARATIONS) : HOST_DECLARATIONS) {
+    // The client's three are in the same group for the same reason — the loop answers
+    // them itself, so no component and no execution layer is involved in offering
+    // them. In a session whose root is another machine's, the four file tools join
+    // them (REMOTE_DECLARATIONS): there is no daemon over there to declare them, and
+    // the execution layer implements them.
+    const own = remote ? HOST_DECLARATIONS_ALL.concat(REMOTE_DECLARATIONS) : HOST_DECLARATIONS_ALL;
+    for (const declared of own) {
         const spec = toolOf({ ...declared, description: prose(declared.name, mode) });
         const fatal = toolDiagnostics("clutch-host", spec, host).filter((d) => d.fatal);
         if (fatal.length) {
@@ -816,7 +897,10 @@ module.exports = {
     schemaOf,
     resolve,
     HOST_DECLARATIONS,
+    HOST_DECLARATIONS_ALL,
     HOST_TOOL_NAMES,
+    CLIENT_NATIVE_DECLARATIONS,
+    CLIENT_NATIVE_TOOL_NAMES,
     REMOTE_DECLARATIONS,
     REMOTE_TOOL_NAMES,
     HOST_PROSE_DIR: path.join(__dirname, "prompts", "tools"),
