@@ -28,8 +28,8 @@ import {
 } from "./stream-view";
 import { refreshRollbackAnchors } from "./task-rollback";
 import {
-  addToolCallRow, appendResultRow, argsButton, makeToolRowBase, previewText,
-  toolGroupFor, uiOf, uiOfResult,
+  addToolCallRow, appendResultRow, argsButton, makeToolRowBase, markAbortedCalls,
+  noteCallRow, previewText, settleCallRow, toolGroupFor, uiOf, uiOfResult,
 } from "./tool-render";
 import { refreshTree } from "./workspace-panel";
 
@@ -628,6 +628,12 @@ export function applyStreamEvent(ev) {
     // the run is over: no call is waiting any more, so no meter keeps counting
     // one (a call aborted by Stop never gets a result to settle it)
     settleAllCountdowns();
+    // ...and a call the run never answered says so: the row is closed here
+    // because nothing after this final can still close it (tool-render.ts). A
+    // history PAGE is not the run's ending — its rows are painted into the sink
+    // while a live run may still be waiting in the pane below, so a final in the
+    // page claims nothing about the pane's calls.
+    if (!pageSink) markAbortedCalls();
     clearStreamPreviews(); // an aborted turn may have left half-streamed calls
     clearRetryNote(); // a lost stream that never recovered leaves no chip behind
     // The divider below says "completed" and nothing else (render-events.ts
@@ -719,6 +725,9 @@ export function applyStreamEvent(ev) {
       const meter = countdownMeter(ui, ev);
       if (meter) st.row.appendChild(meter);
       st.row.appendChild(argsButton(ev.arguments, ui));
+      // the settled row is this call's now: a run that ends without its result
+      // marks it (tool-render.ts)
+      noteCallRow(ev.tool_call_id, st.row);
       st.body = null;
       streamRows[ev.tool_call_id] = undefined;
       autoScroll();
@@ -735,7 +744,11 @@ export function applyStreamEvent(ev) {
 
   // the call is over: its row stops counting down — the result row says how the
   // wait ended, and a finished call must never keep a clock running
-  if (ev.type === "tool_result" && ev.tool_call_id) settleCountdown(ev.tool_call_id);
+  if (ev.type === "tool_result" && ev.tool_call_id) {
+    settleCountdown(ev.tool_call_id);
+    // ...and its call row is closed, so a later final never marks it abandoned
+    settleCallRow(ev.tool_call_id);
+  }
 
   // a row-form result lands beside its call, in the block their calls collect
   // in; every other result is its own block after the calls (renderEvent)

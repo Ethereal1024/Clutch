@@ -130,6 +130,15 @@ Two more keys ride every block and no declaration sets them, because only the
 host can answer them: `undo` (this call has an undo record the UI can offer) and
 the derived default of `mutates`.
 
+One state of a call row is no key either, because it is a fact about the RUN and
+not about the tool: a call the run never answered. The row is drawn when the
+call is written and only its result closes it, so a run that ends in between (the
+reader stopped it, the model answered without waiting, the process went away)
+would leave a row that reads like a call still in flight. The UI marks those
+`no result` when the run's `final` arrives, and a declaration can neither ask for
+that mark nor turn it off — the alternative is a transcript that cannot tell a
+wait that is over from one that is still going.
+
 A component's own state reaches the UI the same way: its `ui` block carries
 `label` (what to call it in the interface) and `status` (True = the host tells
 the user when this component is unavailable, so a missing tool is explained

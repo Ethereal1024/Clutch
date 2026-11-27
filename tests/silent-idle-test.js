@@ -187,6 +187,10 @@ global.forgetAnsweredPerm = () => {};
 // when the log confirms a task. This runner replays frames, it never sends one.
 global.noteUserMessage = () => {};
 global.clearStreamPreviews = () => {};
+// the call-row registry (js/tool-render.ts): this runner has no DOM rows to mark
+global.markAbortedCalls = () => {};
+global.noteCallRow = () => {};
+global.settleCallRow = () => {};
 global.clearRetryNote = () => {};
 global.refreshTree = () => {};
 // the run's `final` branch hands off to two modules that load AFTER

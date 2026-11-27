@@ -280,7 +280,7 @@ const ui = (key) => ({ countdown: key });
       "applyStreamEvent routes the live tool_started frame to the anchor"
     );
     check(
-      /ev\.type === "tool_result" && ev\.tool_call_id\) settleCountdown\(ev\.tool_call_id\)/.test(stream),
+      /ev\.type === "tool_result" && ev\.tool_call_id\) \{[\s\S]{0,300}?settleCountdown\(ev\.tool_call_id\)/.test(stream),
       "a result settles its call's meter"
     );
     check(

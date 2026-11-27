@@ -121,6 +121,11 @@ global.pendingPerm = null;
 global.closePerm = () => {};
 global.forgetAnsweredPerm = () => {};
 global.settleAllCountdowns = () => {};
+// the call-row registry (js/tool-render.ts): rows here are fake nodes, so nothing
+// on the page can be claimed abandoned (tool-render.ts)
+global.markAbortedCalls = () => {};
+global.noteCallRow = () => {};
+global.settleCallRow = () => {};
 global.clearStreamPreviews = () => {};
 global.clearRetryNote = () => {};
 global.refreshTree = () => {};

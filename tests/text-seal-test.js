@@ -112,6 +112,11 @@ global.handleToolCallDelta = () => {};
 global.uiOfResult = () => ({});
 global.appendResultRow = () => {};
 global.clearStreamPreviews = () => {};
+// the call-row registry (js/tool-render.ts): this runner never draws a call row,
+// so the page has nothing that could be abandoned
+global.markAbortedCalls = () => {};
+global.noteCallRow = () => {};
+global.settleCallRow = () => {};
 global.toolCalls = {};
 global.toolCallGroups = new Map();
 global.streamRows = {};

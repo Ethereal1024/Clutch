@@ -30,6 +30,7 @@ function node(tag) {
     className: "",
     innerHTML: "",
     _text: "",
+    dataset: {}, // the row carries its call id and its settled flag (tool-render.ts)
     classList: {
       add(...cls) { const set = new Set(n.className.split(" ").filter(Boolean)); cls.forEach((c) => set.add(c)); n.className = [...set].join(" "); },
       remove(...cls) { const set = new Set(n.className.split(" ").filter(Boolean)); cls.forEach((c) => set.delete(c)); n.className = [...set].join(" "); },

@@ -148,6 +148,11 @@ global.clearStream = () => {};
 global.beginCatchUp = () => {};
 global.endCatchUp = () => {};
 global.clearStreamPreviews = () => {};
+// the call-row registry (js/tool-render.ts): this runner is about which run an ask
+// belongs to, and its rows are hand-built fakes with no dataset to claim
+global.markAbortedCalls = () => {};
+global.noteCallRow = () => {};
+global.settleCallRow = () => {};
 global.clearRetryNote = () => {};
 global.refreshTree = () => {};
 global.announceRunLost = () => {};

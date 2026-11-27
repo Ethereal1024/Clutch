@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 0884f8b42f4114d5e06c79d702e787ee2acf2b0059698a17010fd69b7c2e3000
+// sources sha256: 9915b6ec29cacf84a222a8de889b4f3a1bd556acd672333b536a04b08b731584
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -2198,9 +2198,47 @@
   function permReason(reason) {
     return String(reason || "").replace(/\s+with args\b[\s\S]*$/, "");
   }
+  function callRowOf(id) {
+    const quoted = String(id).replace(/[\\"]/g, "\\$&");
+    for (const root of [eventsEl, pageSink]) {
+      if (!root) continue;
+      const row = root.querySelector('.tool-row[data-call-id="' + quoted + '"]');
+      if (row) return row;
+    }
+    return null;
+  }
+  function noteCallRow(id, row) {
+    const key = String(id || "");
+    if (!key || !row) return;
+    row.dataset.callId = key;
+  }
+  function settleCallRow(id) {
+    const key = String(id || "");
+    if (!key) return;
+    const row = callRowOf(key);
+    if (!row) return;
+    row.dataset.settled = "1";
+    const mark = row.querySelector(".tool-aborted");
+    if (mark) mark.remove();
+  }
+  function markAbortedCalls() {
+    const rows = [];
+    for (const root of [eventsEl, pageSink]) {
+      if (root) rows.push(...Array.prototype.slice.call(root.querySelectorAll(".tool-row[data-call-id]")));
+    }
+    for (const row of rows) {
+      if (row.dataset.settled || row.querySelector(".tool-aborted")) continue;
+      const mark = document.createElement("span");
+      mark.className = "tool-aborted";
+      mark.textContent = "no result";
+      mark.title = "this call never returned a result \u2014 the run ended first";
+      row.appendChild(mark);
+    }
+  }
   function makeToolRow(ev) {
     const ui = uiOf(ev);
     const row = makeToolRowBase(ui, ev.name);
+    noteCallRow(ev.tool_call_id, row);
     const meter = countdownMeter(ui, ev);
     if (meter) row.appendChild(meter);
     row.appendChild(argsButton(ev.arguments, ui));
@@ -5317,6 +5355,7 @@
       if (pendingPerm) closePerm();
       forgetAnsweredPerm();
       settleAllCountdowns();
+      if (!pageSink) markAbortedCalls();
       clearStreamPreviews();
       clearRetryNote();
       if (!pageSink && !catchUp && ev.status === "completed" && String(ev.summary || "").trim()) {
@@ -5372,6 +5411,7 @@
         const meter = countdownMeter(ui, ev);
         if (meter) st.row.appendChild(meter);
         st.row.appendChild(argsButton(ev.arguments, ui));
+        noteCallRow(ev.tool_call_id, st.row);
         st.body = null;
         streamRows[ev.tool_call_id] = void 0;
         autoScroll();
@@ -5385,7 +5425,10 @@
       handleToolCallDelta(ev);
       return true;
     }
-    if (ev.type === "tool_result" && ev.tool_call_id) settleCountdown(ev.tool_call_id);
+    if (ev.type === "tool_result" && ev.tool_call_id) {
+      settleCountdown(ev.tool_call_id);
+      settleCallRow(ev.tool_call_id);
+    }
     if (ev.type === "tool_result" && toolCalls[ev.tool_call_id]) {
       const call = toolCalls[ev.tool_call_id];
       const ui = uiOfResult(ev);

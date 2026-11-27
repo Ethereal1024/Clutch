@@ -1363,6 +1363,14 @@ mjx-container[display="true"] {
 /* no real start yet (a replayed row, a call written but not entered): an empty
    track in the border colour — a bar at zero is not a bar in motion */
 .tool-countdown.waiting .tool-countdown-fill { background: var(--border); }
+/* a call the run never answered (tool-render.ts marks it at the final): a small
+   quiet fact, in the row's own mono voice — the wait is over, and this is the
+   one thing the row can still say about it */
+.tool-aborted {
+  color: var(--muted); font-family: var(--font-mono); font-size: 12px;
+  border: 1px solid var(--border); border-radius: 2px; padding: 0 5px;
+  white-space: nowrap;
+}
 .tool-args-detail {
   background: var(--code-bg); padding: 6px 8px; border-radius: 0;
   border: 1px solid var(--border);

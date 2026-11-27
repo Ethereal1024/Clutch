@@ -325,12 +325,83 @@ export function permReason(reason) {
   return String(reason || "").replace(/\s+with args\b[\s\S]*$/, "");
 }
 
+// ---- a call the run never answered ------------------------------------------
+//
+// A call row is drawn when the call is WRITTEN, and only its result closes it. A
+// run can end in between — the reader pressed Stop, the model went on to speak
+// without waiting for the call, the process went away — and the row then reads
+// exactly like a call still in flight: a chip, an args expander, maybe a meter
+// counting a wait nothing is doing. The row that hung at the end of an
+// interrupted .clc said nothing at all, so the transcript of a stopped run read
+// like a run that never finished.
+//
+// The mark is applied at the one moment the pane KNOWS no result can still arrive
+// (the `final`, stream-events.ts), and it is found on the PAGE, not in a table
+// here: a row whose result lands while its tab is cached is not on the page to be
+// marked, and that tab's own replay re-delivers the result before the final and
+// flags the row then (slots.ts saveDomCache moves the nodes; the flag moves with
+// them). Same scope as the countdown meters: what is on the page is what the page
+// can say about it.
+//
+// The id is a wire value, never a selector: it is quoted as a string, so nothing
+// in it can end the selector early (the state a mark must never reach — another
+// call's row).
+function callRowOf(id) {
+  const quoted = String(id).replace(/[\\"]/g, "\\$&");
+  for (const root of [eventsEl, pageSink]) {
+    if (!root) continue;
+    const row = root.querySelector('.tool-row[data-call-id="' + quoted + '"]');
+    if (row) return row;
+  }
+  return null;
+}
+
+// this row is this call's: the id is what a result and a final address it by
+export function noteCallRow(id, row) {
+  const key = String(id || "");
+  if (!key || !row) return;
+  row.dataset.callId = key;
+}
+
+// The call came back: its row is not an abandoned one — and a mark some other
+// run's final put on it goes with the claim, because the result is the later
+// fact. (That is the one way a row can wear a mark it should not: it was on the
+// page when a run that never drew it ended.)
+export function settleCallRow(id) {
+  const key = String(id || "");
+  if (!key) return;
+  const row = callRowOf(key);
+  if (!row) return;
+  row.dataset.settled = "1";
+  const mark = row.querySelector(".tool-aborted");
+  if (mark) mark.remove();
+}
+
+// the run is over: every call row on the page that no result ever closed is one
+// the run abandoned. Idempotent — a replayed final over a row already marked is
+// the same fact, and a second mark is a second lie about one call.
+export function markAbortedCalls() {
+  const rows = [];
+  for (const root of [eventsEl, pageSink]) {
+    if (root) rows.push(...Array.prototype.slice.call(root.querySelectorAll(".tool-row[data-call-id]")));
+  }
+  for (const row of rows) {
+    if (row.dataset.settled || row.querySelector(".tool-aborted")) continue;
+    const mark = document.createElement("span");
+    mark.className = "tool-aborted";
+    mark.textContent = "no result";
+    mark.title = "this call never returned a result — the run ended first";
+    row.appendChild(mark);
+  }
+}
+
 // one tool_call row: the declaration's chip — the tool's own name leading the
 // row — and the raw payload one click away; the call says what it is, its
 // result speaks for the outcome
 export function makeToolRow(ev) {
   const ui = uiOf(ev);
   const row = makeToolRowBase(ui, ev.name);
+  noteCallRow(ev.tool_call_id, row);
   const meter = countdownMeter(ui, ev);
   if (meter) row.appendChild(meter);
   row.appendChild(argsButton(ev.arguments, ui));
