@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tool-decl.ts and run `npm run build:host`.
-// source sha256: 32a244495e91e7ad2c22806c2ec55042a34efdb65a99395f085fe4bc3fdff3a6
+// source sha256: 9ed9426a3b4044068fe9bb95074eb21ae79a5a336423350d971622cafa2b49a9
 
 "use strict";
 // The model-facing tool surface, derived HERE (host side), from declarations.
@@ -133,7 +133,12 @@ const HOST_DECLARATIONS = [
             required: ["command", "timeout"],
         },
         access: "command",
-        ui: { preview: "command", summary: "trigger {command}" },
+        // the call waits for a deadline it was GIVEN, and that deadline is the one
+        // number about the call a reader needs at a glance: the row counts the
+        // seconds still to go from the live `tool_started` anchor
+        // (ui/src/renderer/countdown.ts), so the wait is visible without opening
+        // the args panel
+        ui: { preview: "command", summary: "trigger {command}", countdown: "timeout" },
         host: true,
     },
     {

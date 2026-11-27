@@ -85,7 +85,10 @@ click away, its result its own whole block.
     preview   the LIVE row while the call streams, either a mode or
               {mode, keys}: "args" the raw argument JSON, "content" the
               arguments' own text, "command" the unwrapped command argument
-              under its `mark` (the shell prompt it reads as, "$ " by default),
+              under its `mark` (the shell prompt it reads as, "$ " by default);
+              the arguments a call sets BESIDE its command (a deadline, a
+              workdir) follow it on their own line wherever the unwrap is
+              shown, so unwrapping never hides the rest of the payload;
               "none" nothing to stream. Under "content", `keys` names the
               arguments to print, in order, and a leading "-"/"+"/"✎" on a key
               is a mark printed before its value — that is how a write declares

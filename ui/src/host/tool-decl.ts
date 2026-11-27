@@ -138,7 +138,12 @@ const HOST_DECLARATIONS: any[] = [
       required: ["command", "timeout"],
     },
     access: "command",
-    ui: { preview: "command", summary: "trigger {command}" },
+    // the call waits for a deadline it was GIVEN, and that deadline is the one
+    // number about the call a reader needs at a glance: the row counts the
+    // seconds still to go from the live `tool_started` anchor
+    // (ui/src/renderer/countdown.ts), so the wait is visible without opening
+    // the args panel
+    ui: { preview: "command", summary: "trigger {command}", countdown: "timeout" },
     host: true,
   },
   {

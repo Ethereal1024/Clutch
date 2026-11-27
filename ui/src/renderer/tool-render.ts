@@ -37,7 +37,10 @@ import { refreshTree } from "./workspace-panel";
 //             not (a row whose preview already says what the call is).
 //   preview   the live body while the call is generated: "args" the raw
 //             payload; "command" a `mark`ed shell line (default "$ "), which
-//             is also what the args panel unwraps a command payload with;
+//             is also what the args panel unwraps a command payload with —
+//             the arguments the call set BESIDE its command (a deadline, a
+//             workdir) follow it on their own line, so unwrapping the command
+//             never hides the rest of the payload;
 //             "content" prints argument VALUES (`keys` in order, a leading
 //             "-", "+" or "✎" printed as a mark before the value); "none" the
 //             chip alone — a body too large to preview.
@@ -164,7 +167,9 @@ export function previewText(ui, name, raw) {
   if (mode === "none") return "";
   if (mode === "command") {
     const cmd = extractCommand(raw);
-    return cmd !== null ? (spec.mark || "$ ") + cmd : raw || "";
+    if (cmd === null) return raw || "";
+    const rest = otherArgs(raw);
+    return (spec.mark || "$ ") + cmd + (rest ? "\n" + rest : "");
   }
   if (mode === "content" && spec.keys && spec.keys.length) {
     const parts = [];
@@ -250,14 +255,42 @@ export function argsButton(raw, ui) {
 }
 
 // the payload as the args panel shows it: a command-shaped declaration gets its
-// command unwrapped under its own prompt mark, everything else is pretty JSON
+// command unwrapped under its own prompt mark, everything else is pretty JSON.
+// A command payload is not only its command: whatever else the call set (the
+// deadline a waiting call must give, a workdir) follows the command line as JSON,
+// so "the raw arguments, one click away" stays true for a command-shaped tool too.
 export function argsDetail(ui, raw) {
   const spec = ui.preview && typeof ui.preview === "object" ? ui.preview : { mode: ui.preview };
   if (spec.mode === "command") {
     const cmd = extractCommand(raw);
-    if (cmd !== null) return (spec.mark || "$ ") + cmd;
+    if (cmd !== null) {
+      const rest = otherArgs(raw);
+      return (spec.mark || "$ ") + cmd + (rest ? "\n" + rest : "");
+    }
   }
   try { return JSON.stringify(JSON.parse(raw || "{}"), null, 1); } catch (e) { return raw || ""; }
+}
+
+// The arguments a command-shaped payload carries BESIDE its command, as compact
+// JSON — the part a `preview: "command"` unwrap would otherwise drop. `skip`
+// names the one key the unwrap consumed. "" = nothing beside it, or a payload
+// that is not JSON yet (mid-stream, where the caller shows the raw text anyway).
+export function otherArgs(raw, skip = "command") {
+  let parsed;
+  if (typeof raw === "string") {
+    try { parsed = JSON.parse(raw || "{}"); } catch (e) { return ""; }
+  } else {
+    parsed = raw;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "";
+  const rest = {};
+  let any = false;
+  for (const key of Object.keys(parsed)) {
+    if (key === skip) continue;
+    rest[key] = parsed[key];
+    any = true;
+  }
+  return any ? JSON.stringify(rest) : "";
 }
 
 // Pull a shell command out of a command-shaped args payload. The schema is

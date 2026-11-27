@@ -138,7 +138,11 @@ _DECLARATIONS: tuple[Declaration, ...] = (
                 "required": ["command", "timeout"],
             },
             "access": "command",
-            "ui": {"preview": "command", "summary": "trigger {command}"},
+            # the call waits for a deadline it was GIVEN, and that deadline is
+            # the one number about the call a reader needs at a glance: the row
+            # counts the seconds still to go from the live `tool_started`
+            # anchor, so the wait is visible without opening the args panel
+            "ui": {"preview": "command", "summary": "trigger {command}", "countdown": "timeout"},
         },
         shell.run_trigger,
     ),

@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: cb632926298a19b933360b280698f6b70d61e7dfd873c6056d5ebdd1c4613557
+// sources sha256: 0884f8b42f4114d5e06c79d702e787ee2acf2b0059698a17010fd69b7c2e3000
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -2059,7 +2059,9 @@
     if (mode === "none") return "";
     if (mode === "command") {
       const cmd = extractCommand(raw);
-      return cmd !== null ? (spec.mark || "$ ") + cmd : raw || "";
+      if (cmd === null) return raw || "";
+      const rest = otherArgs(raw);
+      return (spec.mark || "$ ") + cmd + (rest ? "\n" + rest : "");
     }
     if (mode === "content" && spec.keys && spec.keys.length) {
       const parts = [];
@@ -2133,13 +2135,37 @@
     const spec = ui.preview && typeof ui.preview === "object" ? ui.preview : { mode: ui.preview };
     if (spec.mode === "command") {
       const cmd = extractCommand(raw);
-      if (cmd !== null) return (spec.mark || "$ ") + cmd;
+      if (cmd !== null) {
+        const rest = otherArgs(raw);
+        return (spec.mark || "$ ") + cmd + (rest ? "\n" + rest : "");
+      }
     }
     try {
       return JSON.stringify(JSON.parse(raw || "{}"), null, 1);
     } catch (e) {
       return raw || "";
     }
+  }
+  function otherArgs(raw, skip = "command") {
+    let parsed;
+    if (typeof raw === "string") {
+      try {
+        parsed = JSON.parse(raw || "{}");
+      } catch (e) {
+        return "";
+      }
+    } else {
+      parsed = raw;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "";
+    const rest = {};
+    let any = false;
+    for (const key of Object.keys(parsed)) {
+      if (key === skip) continue;
+      rest[key] = parsed[key];
+      any = true;
+    }
+    return any ? JSON.stringify(rest) : "";
   }
   function extractCommand(txt) {
     let s = txt;
@@ -2343,8 +2369,10 @@
     let txt = ev.args_repr || "";
     let isJson = false;
     const cmd = extractCommand(txt);
-    if (cmd !== null) txt = "$ " + cmd;
-    else {
+    if (cmd !== null) {
+      const rest = otherArgs(txt);
+      txt = "$ " + cmd + (rest ? "\n" + rest : "");
+    } else {
       try {
         txt = JSON.stringify(JSON.parse(txt), null, 2);
         isJson = true;

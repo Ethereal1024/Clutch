@@ -143,6 +143,33 @@ const ui = (key) => ({ countdown: key });
       "host.py's sleep declaration names the same argument"
     );
 
+    // ...and a call that waits for a DEADLINE it was given counts that deadline:
+    // `trigger`'s timeout is required, so the wait it must state is the number
+    // its row shows, in both halves of the declaration
+    const triggerDecl = decl.HOST_DECLARATIONS.find((d) => d.name === "trigger");
+    check(!!triggerDecl, "the host declares trigger");
+    check(
+      triggerDecl && triggerDecl.ui && triggerDecl.ui.countdown === "timeout",
+      "and its row counts down the `timeout` the call was required to give"
+    );
+    check(
+      triggerDecl && triggerDecl.parameters && triggerDecl.parameters.required.includes("timeout"),
+      "the argument it counts is the one its schema requires"
+    );
+    const hostDeclsAt = hostpy.indexOf("_DECLARATIONS");
+    const triggerDeclText = hostpy.slice(
+      hostpy.indexOf('"trigger"', hostDeclsAt),
+      hostpy.indexOf("shell.run_trigger", hostDeclsAt)
+    );
+    check(
+      /"countdown": "timeout"/.test(triggerDeclText),
+      "host.py's trigger declaration names the same argument"
+    );
+    check(
+      /"required": \["command", "timeout"\]/.test(triggerDeclText),
+      "and requires the same argument its row counts"
+    );
+
     // the renderer knows no tool name at all: the meter is driven by the
     // declaration, so every module that mounts it is free of the word (other
     // modules may name a tool in passing prose — auto-fold's comment does)

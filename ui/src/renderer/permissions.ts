@@ -14,7 +14,7 @@ import { $ } from "./dom";
 import { closeModal } from "./settings";
 import { state } from "./state";
 import { setStatus } from "./stream-view";
-import { extractCommand, permReason } from "./tool-render";
+import { extractCommand, otherArgs, permReason } from "./tool-render";
 
 // ---- permission confirm ----
 export const permModal = $("#perm-modal");
@@ -48,8 +48,12 @@ export function openPerm(ev) {
   // the payload is unwrapped generically: a command-shaped one shows as the
   // command the user is being asked about, anything else as formatted JSON
   const cmd = extractCommand(txt);
-  if (cmd !== null) txt = "$ " + cmd;
-  else { try { txt = JSON.stringify(JSON.parse(txt), null, 2); isJson = true; } catch (e) {} }
+  if (cmd !== null) {
+    // the arguments the call set beside its command (a deadline) are part of
+    // what the user is being asked about: unwrapping must not hide them
+    const rest = otherArgs(txt);
+    txt = "$ " + cmd + (rest ? "\n" + rest : "");
+  } else { try { txt = JSON.stringify(JSON.parse(txt), null, 2); isJson = true; } catch (e) {} }
   argsEl.textContent = "";
   if (typeof hljs !== "undefined" && isJson) {
     const code = document.createElement("code");

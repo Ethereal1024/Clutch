@@ -64,6 +64,48 @@ check(
 check(permReason("") === "", "empty reason -> empty");
 check(permReason(null) === "", "null reason -> empty string");
 
+// ---- 2b. otherArgs / argsDetail: a command payload is not only its command ----
+// The args panel is the payload one click away, and the permission dialog is
+// what the user is asked about: unwrapping the command must not swallow the
+// arguments the call set beside it (a deadline, a workdir). The real functions
+// are composed here the way the renderer composes them.
+const otherArgs = new Function("return (" + fnBody("otherArgs") + ");")();
+const argsDetail = new Function(
+  "extractCommand",
+  "otherArgs",
+  "return (" + fnBody("argsDetail") + ");",
+)(extractCommand, otherArgs);
+
+check(
+  otherArgs('{"command": "npm test", "timeout": 3600}') === '{"timeout":3600}',
+  "the arguments beside the command survive the unwrap",
+);
+check(otherArgs('{"command": "ls"}') === "", "a payload that is only its command has nothing beside it");
+check(
+  otherArgs('{"command": "ls", "workdir": "sub"}') === '{"workdir":"sub"}',
+  "any argument beside the command is kept, not just a deadline",
+);
+check(otherArgs('{"command": "ls", "timeout": 60') === "", "mid-stream JSON has nothing to show yet");
+check(otherArgs('"ls -la"') === "", "a bare JSON string has nothing beside it");
+check(otherArgs("42") === "", "a scalar payload has nothing beside it");
+check(otherArgs('{"timeout": 60}') === '{"timeout":60}', "a non-command payload keeps every key it has");
+check(otherArgs({ command: "ls", timeout: 5 }) === '{"timeout":5}', "a parsed payload works the same");
+
+const CMD_UI = { preview: "command" };
+check(
+  argsDetail(CMD_UI, '{"command": "npm test", "timeout": 3600}') === '$ npm test\n{"timeout":3600}',
+  "the args panel shows the command AND the deadline it was given",
+);
+check(argsDetail(CMD_UI, '{"command": "ls"}') === "$ ls", "a command-only payload reads exactly as before");
+check(
+  argsDetail({ preview: { mode: "command", mark: "> " } }, '{"command": "ls", "timeout": 5}') === '> ls\n{"timeout":5}',
+  "a declared mark styles the command line, not the arguments beside it",
+);
+check(
+  argsDetail({ preview: "args" }, '{"a": 1}') === '{\n "a": 1\n}',
+  "anything not command-shaped stays pretty JSON, whole",
+);
+
 // ---- 3. sources: the CSS font rule and the backend reason format ----
 check(
   /\.args\s*\{[^}]*font-family:\s*var\(--font-mono\)/.test(css),
@@ -74,5 +116,10 @@ check(
   "permission.py: ask reason no longer embeds the raw args JSON",
 );
 check(/reason = f"permission \{action\}"/.test(permPy), "permission.py: reason keeps the action form (tool lives in the header)");
+check(
+  /const rest = otherArgs\(txt\);\s*\n\s*txt = "\$ " \+ cmd/.test(src),
+  "permissions.ts: the prompt appends the arguments the call set beside its command",
+);
+
 
 summary("perm-args-test");
