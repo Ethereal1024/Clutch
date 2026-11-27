@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-connect.ts and run `npm run build:host`.
-// source sha256: 7962d127c30a9d23c97004eb038f8c501f6a85f71f3ec8baf77ee0984a309682
+// source sha256: 5f4d137e66c4a2bace132fa902319a79b9a468efe2817353cc3f6242f6bfdece
 
 "use strict";
 // one connect attempt — auth, the forwards, the health gate
@@ -15,7 +15,7 @@ const os = require("os");
 const path = require("path");
 const fs = require("fs");
 const { Client } = require("ssh2");
-const { tunnelLog, tunnelId, held, name, REMOTE_API_PORT, CONNECT_TIMEOUT_MS, channelFor } = require("./tunnel-core");
+const { tunnelLog, tunnelId, held, name, adoptPrimary, REMOTE_API_PORT, CONNECT_TIMEOUT_MS, channelFor } = require("./tunnel-core");
 const { freePort, listen, waitForServer, probeServer, probeSupervisorShape } = require("./tunnel-net");
 const { getSshSecret, saveSshSecret, forgetSshSecret } = require("./settings-mirror");
 // ---- the instance ----
@@ -174,6 +174,15 @@ function attach(ctx) {
                 const ask = await probeServer(other.currentUrl + "/api/health", REUSE_PROBE_MS, REUSE_REQUEST_MS);
                 if (ask.up) {
                     tunnelLog(`[connect] reusing the hop another bound tunnel already holds for ${wantId}`);
+                    // …and the window's own tunnel IS that hop from here on. A window that
+                    // connects to a host a tab already opened must claim its own sessions
+                    // THERE: left unnamed, the primary would answer "no hop" and the window's
+                    // default slot would resolve to this machine (the picker showing ✓ over a
+                    // file browser on the wrong one, before this hop was ever kept across a
+                    // move and now for every tab-first dial).
+                    if (adoptPrimary(wantId, state)) {
+                        tunnelLog(`[connect] the window's own tunnel is now ${wantId}: the host this window is on`);
+                    }
                     return { ok: true, url: other.currentUrl };
                 }
                 tunnelLog(`[connect] the hop another bound tunnel holds for ${wantId} did not answer (${ask.kind}); opening this request's own`);

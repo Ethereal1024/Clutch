@@ -15,7 +15,7 @@
 // (connectTunnelOn/statusOf/stopTunnelOn) and the aggregate onTunnelEnd, which
 // hears every bound tunnel and says which one ended.
 
-const { tunnelLog, stateFor, tunnels, PRIMARY_KEY } = require("./tunnel-core");
+const { tunnelLog, stateFor, tunnels, keepPrimaryHop, adoptPrimary } = require("./tunnel-core");
 const remote = require("./tunnel-remote");
 const bootstrap = require("./tunnel-bootstrap");
 const lifecycle = require("./tunnel-lifecycle");
@@ -83,8 +83,13 @@ function bind({ id = null, parts = null } = {}) {
   // the DAG's order: each attach may read the parts before it, never after
   ctx.remote = supplied.remote || remote.attach(ctx);
   ctx.bootstrap = supplied.bootstrap || bootstrap.attach(ctx);
-  // the bridge is keyed per INSTANCE, and an instance is one state
-  ctx.bridge = supplied.bridge || execBridgeFor(key == null ? PRIMARY_KEY : key, ctx.remote.remoteExec);
+  // the bridge is keyed by the STATE, not by the id the state answers for at bind
+  // time. The window's own tunnel is bound before any dial names it, and it can be
+  // handed over to its host (tunnel-core keepPrimaryHop) while the tab working
+  // through it keeps going — a key that changed with the name would leave the old
+  // row behind for the next primary to overwrite, and one bridge row for two
+  // machines is one machine running the other's plugin commands.
+  ctx.bridge = supplied.bridge || execBridgeFor(st, ctx.remote.remoteExec);
   ctx.lifecycle = supplied.lifecycle || lifecycle.attach(ctx);
   ctx.connect = supplied.connect || connect.attach(ctx);
   watchEnd(st);
@@ -150,6 +155,14 @@ module.exports = {
   connectTunnelOn,
   statusOf,
   stopTunnelOn,
+  // The primary role changing hands (tunnel-core owns both: there is one bound
+  // instance per state, so a shell asks the state, never an instance).
+  //   keepPrimaryHop — the window moves off the host, a tab is still working
+  //                    through the hop: the wire stays and answers for its id.
+  //   adoptPrimary   — the window's dial landed on a host a tab already holds:
+  //                    the window's own tunnel IS that state from here on.
+  keepPrimaryHop,
+  adoptPrimary,
   // The old contract, on the primary instance. Arrow functions on purpose: they
   // read the primary at CALL time, so an instance bound later (or a rebind) is
   // not a load-order question.

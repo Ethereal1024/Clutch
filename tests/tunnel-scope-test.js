@@ -92,9 +92,26 @@ const discAt = MAIN.indexOf('ipcMain.handle("tunnel:disconnect"');
 const discEnd = discAt < 0 ? -1 : MAIN.indexOf('ipcMain.handle("session:release"', discAt);
 const disconnect = discAt < 0 || discEnd < discAt ? "" : MAIN.slice(discAt, discEnd);
 check(/const st = tunnel\.tunnelStatus\(\)/.test(disconnect) &&
-  /const affected = st && st\.url \? await hostCore\.releaseTunnelBackends\(st\.url\) : \[\]/.test(disconnect) &&
+  /const url = st && st\.url \? st\.url : null/.test(disconnect) &&
+  /const affected = url \? await hostCore\.releaseTunnelBackends\(url\) : \[\]/.test(disconnect) &&
   /for \(const s of affected\) \{\s*if \(s\.slotId\)\s*continue;\s*if \(s\.winId !== e\.sender\.id\)\s*continue;\s*await hostCore\.releaseSlot\(s\.winId, s\.slotId, \{ leaving: true \}\);\s*\}/.test(disconnect),
   "the picker's MOVE ends one session — the asking window's own default slot on the hop it stops — and parks every tab claim and every other window's claim: their sessions outlive the hop, and the next claim re-binds the same one");
+// …unless a tab is STILL WORKING through that hop. Then the hop is handed to its
+// host instead of closed (tunnel-core keepPrimaryHop), because a tab on the same
+// machine as this window's own tunnel has no hop of its own: closing it is the
+// field's "switching the file browser to local kills the tab I am looking at".
+const keptAt = disconnect.indexOf("if (keptId) {");
+const keptEnd = keptAt < 0 ? -1 : disconnect.indexOf("const affected =", keptAt);
+const keptBranch = keptAt < 0 || keptEnd < keptAt ? "" : disconnect.slice(keptAt, keptEnd);
+check(/const onHop = url \? hostCore\.claimsOnTunnel\(url\) : \[\]/.test(disconnect) &&
+  /const riders = onHop\.filter\(/.test(disconnect) &&
+  /const keptId = riders\.length \? tunnel\.keepPrimaryHop\(\) : null/.test(disconnect),
+  "…and the move asks who is riding the hop before it may close it: a tab (or another window) on that same machine is a reason to keep it, not to park it");
+check(keptBranch &&
+  /for \(const s of mine\)\s*await hostCore\.releaseSlot\(s\.winId, s\.slotId, \{ leaving: true \}\)/.test(keptBranch) &&
+  /return \{ ok: true, kept: keptId \}/.test(keptBranch) &&
+  !/tunnel\.stopTunnel\(\)/.test(keptBranch) && !/releaseTunnelBackends/.test(keptBranch),
+  "and in that branch the hop is NOT closed: only this window's own claim ends, and the tab keeps the wire, the forward, the URL and the run in flight on it");
 check(!/releaseAllBackends/.test(disconnect) &&
   /await tunnel\.stopTunnel\(\)/.test(disconnect) && /stopIdleTunnels\(\)/.test(disconnect),
   "…and nothing else: no machine-wide release, because a tab on THIS machine never went through a hop and a tab on another machine is not on this one");

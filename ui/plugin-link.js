@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/plugin-link.ts and run `npm run build:host`.
-// source sha256: 39b583091a65ffd7c3bd7879c0a25cedf09ee8db8654ea44569132b4ba74d118
+// source sha256: ea79b6c617a1a998c3828e9d4e6bdf861029620cb9d108147832d6f86e00c8be
 
 // The client's plugin PATH: the listener, the reverse channel it answers on, and
 // the push that tells a session what this client runs.
@@ -35,7 +35,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const http = require("http");
-const { registerChannel, channels, tunnelLog, state: tunnelState } = require("./tunnel-core");
+const { registerChannel, channels, tunnelLog, primary } = require("./tunnel-core");
 const { createPluginServer } = require("./plugin-server");
 // A push is a few hundred bytes of JSON to a loopback port of our own session.
 // If that does not answer in five seconds, the session is not there — retrying
@@ -243,7 +243,9 @@ async function offer(base) {
     if (!base)
         return [];
     state.bases.add(String(base));
-    const client = tunnelState.sshClient;
+    // the hop that is serving this window (the primary, read at call time: the
+    // primary role is handed over when a picker's move leaves a tab on the hop)
+    const client = primary().sshClient;
     if (client && (!state.chan || state.chan.remote() == null)) {
         await start(client);
     }

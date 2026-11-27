@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit android/host/src/android-host.ts and run `node android/build-host.js`.
-// source sha256: 1fde40360486ece614dcc537efad019027e72141c1365c633c77c057610466f8
+// source sha256: b49d5304eb58f368098c3a1e56669330fa44a21ec4f8a6519b7ee60f241445c6
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -475,12 +475,15 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
                 // timeout (ui/plugin-link.js)
                 pluginLink.stop();
                 flushAllRuns();
-                // ONE hop, named by itself — the desktop's rule (ui/main.ts
-                // tunnel:disconnect). This shell holds a single hop today, so "every
-                // claim" and "the claims on this hop" happen to be the same set; the
-                // machine-wide premise is what per-endpoint hops retired, and a claim on
-                // a hop this stop does not own must never go with it. With no hop up
-                // there is no name to scope by, so every tunnel-borne claim goes.
+                // ONE hop, named by itself. The desktop's move goes one step further: it
+                // asks who is riding the hop (host-core claimsOnTunnel) and HANDS IT OVER
+                // when a tab still works through it (tunnel-core keepPrimaryHop), because
+                // there a tab on the window's own machine has no hop of its own and closing
+                // that one killed the run in flight ("fetch failed"). This shell is one hop
+                // and one window, and `flushAllRuns()` above ends every slot's run as part
+                // of the move whatever happens to the wire — so a kept hop would outlive
+                // exactly the runs it was kept for. A phone that ever stops flushing runs
+                // per move needs the desktop's rule, not this one.
                 const st = tunnel.tunnelStatus();
                 const affected = st && st.url ? await hostCore.releaseTunnelBackends(st.url) : await hostCore.releaseTunnelBackends();
                 // …and the sessions those forwards carried, told while their hop is still

@@ -34,7 +34,7 @@
 
 const http = require("http");
 
-const { registerChannel, channels, tunnelLog, state: tunnelState } = require("./tunnel-core");
+const { registerChannel, channels, tunnelLog, primary } = require("./tunnel-core");
 const { createPluginServer } = require("./plugin-server");
 
 // A push is a few hundred bytes of JSON to a loopback port of our own session.
@@ -246,7 +246,9 @@ function start(client) {
 async function offer(base) {
   if (!base) return [];
   state.bases.add(String(base));
-  const client = tunnelState.sshClient;
+  // the hop that is serving this window (the primary, read at call time: the
+  // primary role is handed over when a picker's move leaves a tab on the hop)
+  const client = primary().sshClient;
   if (client && (!state.chan || state.chan.remote() == null)) {
     await start(client);
   }

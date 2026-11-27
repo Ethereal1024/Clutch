@@ -138,11 +138,13 @@ const idC = core.tunnelId(C.host, C.user, C.port);
   check(label(a.st.target) === label(A) && a.st.sshClient instanceof FakeClient && label(b.st.target) === label(B),
     "and both hops are exactly where they were");
 
-  // ---- 3) the window's own dial reuses a live hop, BEFORE it names itself ----
+  // ---- 3) the window's own dial reuses a live hop — and the window is ON it ----
   // The gate runs first on purpose: naming would overwrite the registry key that
   // the lookup needs, and then the window's own tunnel would hold a second client
-  // for a host that is already served.
-  const primary = tunnel.primaryTunnel();
+  // for a host that is already served. What the gate finds is the HOP itself, so
+  // the window's own tunnel BEcomes that state (tunnel-core adoptPrimary): the
+  // picker's ✓ and the default slot's claim then name one endpoint, not two.
+  const replaced = tunnel.primaryTunnel();
   const reuse = await tunnel.connectTunnel(target(A));
   check(reuse && reuse.ok === true && reuse.url === healthUrl,
     `a dial for a host another instance already serves reuses that hop (got ${JSON.stringify(reuse)})`);
@@ -150,8 +152,12 @@ const idC = core.tunnelId(C.host, C.user, C.port);
     "…without opening a second ssh client for one machine");
   check(core.held(idA) === a.st,
     "…and the registry still answers with the instance that is really on the wire");
-  check(primary.st.id === null && primary.st.id !== idA && primary.st.sshClient === null,
-    "the reusing dial did not name itself either: nothing moved, nothing was claimed");
+  check(core.primary() === a.st && tunnel.primaryTunnel() === a,
+    "…and the window's own tunnel IS that hop now: one state answers for the host and for the window (adoptPrimary)");
+  check(a.st.pinned === false,
+    "…and it may still MOVE: the endpoint the window itself is on is not a tab's fixed hop");
+  check(replaced.st !== a.st && replaced.st.id === null && replaced.st.sshClient === null,
+    "the empty primary it replaced is left as it was: no wire, no host, nothing claimed");
 
   // ---- 4) the picker is offered each host once ----
   const rows = tunnel.listTunnels();
@@ -198,13 +204,14 @@ const idC = core.tunnelId(C.host, C.user, C.port);
   // asks about a host nothing has dialled): that question must not put a hop in
   // the picker, and when a dial does land for that host the placeholder goes.
   const placeholder = core.stateFor(idC);
-  check(placeholder !== primary.st && placeholder !== a.st,
+  check(placeholder !== replaced.st && placeholder !== a.st,
     "stateFor() makes an instance for an id nobody serves — a state, not a hop");
   check(tunnel.statusOf(idC).active === false,
     "and that instance is honestly inactive: nothing is claimed about a machine nobody is on");
-  core.name(primary.st, idC); // what a landed dial does to the window's own tunnel
-  check(core.held(idC) === primary.st && tunnel.listTunnels().filter((r) => r.tunnelId === idC).length === 1,
-    "a dial that names the window's own tunnel for that host takes the key over, and listTunnels() still shows one row");
+  const empty = replaced.st; // a state that answers for no host (the one the hand-over emptied)
+  core.name(empty, idC); // what a landed dial does with the tunnel it names
+  check(core.held(idC) === empty && tunnel.listTunnels().filter((r) => r.tunnelId === idC).length === 1,
+    "naming an unnamed state for that host takes the key over, drops the placeholder, and listTunnels() still shows one row");
   check(core.held(idA) === a.st && core.held(idB) === b.st,
     "and the named endpoints' keys are still theirs: naming one host never moves another");
 

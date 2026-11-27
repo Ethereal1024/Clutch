@@ -591,6 +591,27 @@ function createHostCore(deps) {
     return false;
   }
 
+  // The claims still WORKING through this hop, as {winId, slotId}: the same
+  // question anyTunnelWindow answers with a yes, asked so a caller can say whose
+  // work it is. The picker's move needs exactly this — "is somebody else riding
+  // the hop this window is leaving?" — because closing a hop that still serves a
+  // tab is what killed that tab's session (and its run in flight) with "fetch
+  // failed" (ui/main.ts tunnel:disconnect keeps the hop instead).
+  //
+  // Parked claims are absent, for the same reason they are absent above: their
+  // release could not be confirmed, nobody is watching the session, and keeping a
+  // wire alive for one would make every Disconnect unable to end anything.
+  function claimsOnTunnel(tunnelUrl?: string) {
+    const out = [];
+    if (!tunnelUrl) return out;
+    for (const wb of windowBackends.values()) {
+      if (!wb.remote || wb.parked) continue;
+      if (wb.tunnelUrl && wb.tunnelUrl !== tunnelUrl) continue;
+      out.push({ winId: wb.winId, slotId: wb.slotId });
+    }
+    return out;
+  }
+
   // The app is leaving: release every claim and then tell every supervisor to
   // die. `opts.leaving` must be true here — this IS the quit gate, and it is
   // the only place allowed to say so.
@@ -763,6 +784,7 @@ function createHostCore(deps) {
     releaseTunnelBackends,
     stopAllBackends,
     anyTunnelWindow,
+    claimsOnTunnel,
     backendExecutor,
     backendRemote,
     slotStatus,

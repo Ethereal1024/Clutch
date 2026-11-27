@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/main.ts and run `npm run build:host`.
-// source sha256: f34e85f22392faa9a8d24ac8e048ddab2989b34f85a2f8e5b8c3110a96b2a7af
+// source sha256: fd8ae8867f11d211a0e8d572a2b266d313c84c0cf8342272106436f10e9d5a4f
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -689,19 +689,42 @@ else {
             // window that asked. That is the one claim the move itself replaces, and the
             // window really is leaving that machine.
             //
-            // Every other affected claim is PARKED, not killed: a tab's claim (slotId)
+            // Every other claim is PARKED, not killed: a tab's claim (slotId)
             // outlives the hop by design — releaseTunnelBackends detaches the forward,
             // leaving the session id and port alive, so the tab's next claim re-binds the
             // SAME session (rebindSessionBackend) over whatever hop exists then. Another
             // window's claim is the same story: that window did not move.
             //
-            // Killing all of them is what turned "connect to another device" into a tab
-            // that looked disconnected: its session was SIGTERMed, so its next claim
-            // started a fresh one with no project open, and a run already in flight hit a
-            // forward whose far side was gone ("run failed: fetch failed").
+            // That premise has ONE hole, and it was the field's "switching the file
+            // browser to local disconnects the tab I am looking at": a tab on the SAME
+            // machine as the window's own tunnel has no hop of its own. `tunnelFor(id)`
+            // IS the primary state once a dial named it (tunnel-core), so both sessions
+            // ride this one hop — and after the move there is nothing left to re-bind
+            // over, because the ladder was told the user left and no hop to that host
+            // exists any more. So a hop that still has another slot working through it is
+            // HANDED OVER instead of closed (tunnel.keepPrimaryHop): the wire stays, it
+            // answers for its host's id from here on, the window's own claim is the only
+            // thing the move ends, and that tab's forward, its URL and the run posting to
+            // it are untouched.
             ladder.noteUserLeft();
             const st = tunnel.tunnelStatus();
-            const affected = st && st.url ? await hostCore.releaseTunnelBackends(st.url) : [];
+            const url = st && st.url ? st.url : null;
+            const onHop = url ? hostCore.claimsOnTunnel(url) : [];
+            const mine = onHop.filter((s) => s.winId === e.sender.id && !s.slotId);
+            const riders = onHop.filter((s) => !(s.winId === e.sender.id && !s.slotId));
+            const keptId = riders.length ? tunnel.keepPrimaryHop() : null;
+            if (keptId) {
+                // the move, and nothing else: this window's own default claim goes (its
+                // session is this window's to end), every tab on that machine keeps working
+                for (const s of mine)
+                    await hostCore.releaseSlot(s.winId, s.slotId, { leaving: true });
+                tunnelLog(`[disconnect] hop to ${keptId} kept: ${riders
+                    .map((s) => `${s.winId}::${s.slotId || "(default)"}`)
+                    .join(", ")} still working through it`);
+                await stopIdleTunnels();
+                return { ok: true, kept: keptId };
+            }
+            const affected = url ? await hostCore.releaseTunnelBackends(url) : [];
             for (const s of affected) {
                 if (s.slotId)
                     continue;

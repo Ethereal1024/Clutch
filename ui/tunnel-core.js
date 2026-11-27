@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-core.ts and run `npm run build:host`.
-// source sha256: 54b607c6a5fb94a5a034aa9ac746e04d643d44403157ca56903245c68e61c64a
+// source sha256: f089b557a464e66f11501817ab1d93d68ea629ea5bd19a71119bb72b4e8891a6
 
 "use strict";
 // the tunnel's state object, its wire constants, and the log every phase writes to
@@ -82,7 +82,14 @@ function createTunnelState(id = null, pinned = false) {
 // ---- the global state (backward compatibility) ----
 // One object, not thirteen module-level lets: the field a function assigns is
 // visible to every other module on the next call, with no export to keep in step.
-const state = createTunnelState(null);
+//
+// `let`, not `const`: the window's own tunnel can be HANDED OVER to the host it is
+// on (keepPrimaryHop below — a picker's move that leaves a tab still working
+// through that hop), and the primary role then has to move to a fresh, empty state.
+// Every reader of the primary takes it from primary()/stateFor(null) at call time,
+// which is what makes that swap safe: the handed-over state is still the state its
+// id's bound instance was built over, so the claims riding it never notice.
+let state = createTunnelState(null);
 // ---- tunnel ids ----
 // The one place a key is BUILT. Everything else compares two of them.
 function tunnelId(host, user, port) {
@@ -157,6 +164,57 @@ function held(id) {
     if (state.id === id)
         return state;
     return tunnelRegistry.get(id) || null;
+}
+// ---- the primary role changes hands ----
+//
+// One state, one bound instance, one wire, one exec bridge (ssh-tunnel's `bound`
+// is keyed by the state): the window's own tunnel and a tab's hop to the SAME host
+// are the same object as soon as a dial names the primary. That is why one hop
+// carries both forwards and why the picker's move could take a working tab with it.
+//
+// These two are the two directions of the hand-over:
+//
+//   keepPrimaryHop() — the picker is moving this window OFF the host, but a claim
+//   (a tab on that same machine) is still working through the hop. Closing it is
+//   what made that tab's session — and the run in flight on it — die with
+//   "run state not reported (fetch failed)". So the wire stays, the state answers
+//   for the host's id from here on and NOT for the window, and a fresh empty state
+//   becomes the window's own: the move really landed (executors.defaultId() reads
+//   the new primary and finds no hop), the next dial names the new one, and the tab
+//   keeps the very same local forward and URL it was using.
+//
+//   adoptPrimary(id) — the other direction: the picker connects this window to a
+//   host a tab already dialled as its own endpoint. There is exactly one client per
+//   machine (the reuse gate in tunnel-connect reuses that hop rather than opening a
+//   second), so the window's own tunnel must BE that state — otherwise the window
+//   would be "connected" while its default slot still resolves to no hop at all and
+//   claims a session on this machine.
+function keepPrimaryHop() {
+    const kept = state;
+    if (!kept.id || !kept.sshClient)
+        return null; // no wire, or no host to answer for
+    // the one key it answers for from now on: register() keeps the id it was named
+    // with, and the primary role goes to a fresh state nobody has dialled
+    kept.pinned = true;
+    register(kept);
+    state = createTunnelState(null);
+    tunnelRegistry.set(PRIMARY_KEY, state);
+    return kept.id;
+}
+function adoptPrimary(id, from = state) {
+    // the question is the PRIMARY's: a named hop's connect (a ladder's redial for
+    // that endpoint) may not hand itself the window's own role
+    if (from !== state)
+        return null;
+    if (id == null || state.pinned || state.sshClient || state.id)
+        return null; // the window has a hop of its own
+    const hop = held(id);
+    if (!hop || hop === state || !hop.sshClient || !hop.currentUrl)
+        return null;
+    hop.pinned = false; // it is the window's own tunnel now, and that one may MOVE
+    state = hop;
+    tunnelRegistry.set(PRIMARY_KEY, hop);
+    return hop.id;
 }
 // Every state a dial has named, primary included if it has one. This is what
 // "which hops does this process hold" means; it says nothing about liveness.
@@ -385,7 +443,6 @@ module.exports = {
     channels,
     registerChannel,
     channelFor,
-    state,
     tunnelLog,
     tunnelId,
     PRIMARY_KEY,
@@ -395,5 +452,11 @@ module.exports = {
     primary,
     held,
     tunnels,
+    keepPrimaryHop,
+    adoptPrimary,
     compatSurface,
 };
+// `state` is exported through a GETTER: the primary role can be handed over
+// (keepPrimaryHop), and a value copied at require time would name the state the
+// window has already left. Read through the property, it is always the live one.
+Object.defineProperty(module.exports, "state", { enumerable: true, get: () => state });
